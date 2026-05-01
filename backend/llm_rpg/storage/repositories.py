@@ -1,0 +1,528 @@
+from typing import Any, Dict, List, Optional, Type, TypeVar
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, desc
+
+from .models import (
+    WorldModel,
+    ChapterModel,
+    LocationModel,
+    NPCTemplateModel,
+    ItemTemplateModel,
+    QuestTemplateModel,
+    QuestStepModel,
+    EventTemplateModel,
+    PromptTemplateModel,
+    UserModel,
+    SaveSlotModel,
+    SessionModel,
+    SessionStateModel,
+    SessionPlayerStateModel,
+    SessionNPCStateModel,
+    SessionInventoryItemModel,
+    SessionQuestStateModel,
+    SessionEventFlagModel,
+    EventLogModel,
+    MemorySummaryModel,
+    MemoryFactModel,
+    ModelCallLogModel,
+    CombatSessionModel,
+    CombatRoundModel,
+    CombatActionModel,
+    ScheduledEventModel,
+)
+
+T = TypeVar("T")
+
+
+class BaseRepository:
+    def __init__(self, db: Session, model: Type[T]):
+        self.db = db
+        self.model = model
+
+    def create(self, data: Dict[str, Any]) -> T:
+        instance = self.model(**data)
+        self.db.add(instance)
+        self.db.commit()
+        self.db.refresh(instance)
+        return instance
+
+    def get_by_id(self, id: str) -> Optional[T]:
+        return self.db.query(self.model).filter(self.model.id == id).first()
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> List[T]:
+        return self.db.query(self.model).offset(skip).limit(limit).all()
+
+    def update(self, id: str, data: Dict[str, Any]) -> Optional[T]:
+        instance = self.get_by_id(id)
+        if instance:
+            for key, value in data.items():
+                if hasattr(instance, key):
+                    setattr(instance, key, value)
+            self.db.commit()
+            self.db.refresh(instance)
+        return instance
+
+    def delete(self, id: str) -> bool:
+        instance = self.get_by_id(id)
+        if instance:
+            self.db.delete(instance)
+            self.db.commit()
+            return True
+        return False
+
+
+class WorldRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, WorldModel)
+
+    def get_by_code(self, code: str) -> Optional[WorldModel]:
+        return self.db.query(WorldModel).filter(WorldModel.code == code).first()
+
+    def get_active(self) -> List[WorldModel]:
+        return self.db.query(WorldModel).filter(WorldModel.status == "active").all()
+
+
+class ChapterRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ChapterModel)
+
+    def get_by_world(self, world_id: str) -> List[ChapterModel]:
+        return self.db.query(ChapterModel).filter(
+            ChapterModel.world_id == world_id
+        ).order_by(ChapterModel.chapter_no).all()
+
+    def get_by_world_and_number(self, world_id: str, chapter_no: int) -> Optional[ChapterModel]:
+        return self.db.query(ChapterModel).filter(
+            and_(
+                ChapterModel.world_id == world_id,
+                ChapterModel.chapter_no == chapter_no
+            )
+        ).first()
+
+
+class LocationRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, LocationModel)
+
+    def get_by_world(self, world_id: str) -> List[LocationModel]:
+        return self.db.query(LocationModel).filter(LocationModel.world_id == world_id).all()
+
+    def get_by_chapter(self, chapter_id: str) -> List[LocationModel]:
+        return self.db.query(LocationModel).filter(LocationModel.chapter_id == chapter_id).all()
+
+
+class NPCTemplateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCTemplateModel)
+
+    def get_by_world(self, world_id: str) -> List[NPCTemplateModel]:
+        return self.db.query(NPCTemplateModel).filter(NPCTemplateModel.world_id == world_id).all()
+
+    def get_by_code(self, world_id: str, code: str) -> Optional[NPCTemplateModel]:
+        return self.db.query(NPCTemplateModel).filter(
+            and_(
+                NPCTemplateModel.world_id == world_id,
+                NPCTemplateModel.code == code
+            )
+        ).first()
+
+
+class ItemTemplateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ItemTemplateModel)
+
+    def get_by_world(self, world_id: str) -> List[ItemTemplateModel]:
+        return self.db.query(ItemTemplateModel).filter(ItemTemplateModel.world_id == world_id).all()
+
+
+class QuestTemplateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, QuestTemplateModel)
+
+    def get_by_world(self, world_id: str) -> List[QuestTemplateModel]:
+        return self.db.query(QuestTemplateModel).filter(QuestTemplateModel.world_id == world_id).all()
+
+
+class QuestStepRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, QuestStepModel)
+
+    def get_by_quest(self, quest_template_id: str) -> List[QuestStepModel]:
+        return self.db.query(QuestStepModel).filter(
+            QuestStepModel.quest_template_id == quest_template_id
+        ).order_by(QuestStepModel.step_no).all()
+
+
+class EventTemplateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, EventTemplateModel)
+
+    def get_by_world(self, world_id: str) -> List[EventTemplateModel]:
+        return self.db.query(EventTemplateModel).filter(
+            or_(
+                EventTemplateModel.world_id == world_id,
+                EventTemplateModel.world_id.is_(None)
+            )
+        ).all()
+
+
+class PromptTemplateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, PromptTemplateModel)
+
+    def get_by_type(self, prompt_type: str, world_id: Optional[str] = None) -> List[PromptTemplateModel]:
+        query = self.db.query(PromptTemplateModel).filter(
+            and_(
+                PromptTemplateModel.prompt_type == prompt_type,
+                PromptTemplateModel.enabled_flag == True
+            )
+        )
+        if world_id:
+            query = query.filter(
+                or_(
+                    PromptTemplateModel.world_id == world_id,
+                    PromptTemplateModel.world_id.is_(None)
+                )
+            )
+        return query.all()
+
+
+class UserRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, UserModel)
+
+    def get_by_username(self, username: str) -> Optional[UserModel]:
+        return self.db.query(UserModel).filter(UserModel.username == username).first()
+
+    def get_by_email(self, email: str) -> Optional[UserModel]:
+        return self.db.query(UserModel).filter(UserModel.email == email).first()
+
+
+class SaveSlotRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SaveSlotModel)
+
+    def get_by_user(self, user_id: str) -> List[SaveSlotModel]:
+        return self.db.query(SaveSlotModel).filter(
+            SaveSlotModel.user_id == user_id
+        ).order_by(SaveSlotModel.slot_number).all()
+
+    def get_by_user_and_slot(self, user_id: str, slot_number: int) -> Optional[SaveSlotModel]:
+        return self.db.query(SaveSlotModel).filter(
+            and_(
+                SaveSlotModel.user_id == user_id,
+                SaveSlotModel.slot_number == slot_number
+            )
+        ).first()
+
+
+class SessionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionModel)
+
+    def get_by_user(self, user_id: str) -> List[SessionModel]:
+        return self.db.query(SessionModel).filter(
+            SessionModel.user_id == user_id
+        ).order_by(desc(SessionModel.last_played_at)).all()
+
+    def get_active_by_user(self, user_id: str) -> List[SessionModel]:
+        return self.db.query(SessionModel).filter(
+            and_(
+                SessionModel.user_id == user_id,
+                SessionModel.status == "active"
+            )
+        ).all()
+
+    def update_last_played(self, session_id: str) -> Optional[SessionModel]:
+        from datetime import datetime
+        return self.update(session_id, {"last_played_at": datetime.now()})
+
+
+class SessionStateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionStateModel)
+
+    def get_by_session(self, session_id: str) -> Optional[SessionStateModel]:
+        return self.db.query(SessionStateModel).filter(
+            SessionStateModel.session_id == session_id
+        ).first()
+
+    def create_or_update(self, data: Dict[str, Any]) -> SessionStateModel:
+        existing = self.get_by_session(data["session_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+
+class SessionPlayerStateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionPlayerStateModel)
+
+    def get_by_session(self, session_id: str) -> Optional[SessionPlayerStateModel]:
+        return self.db.query(SessionPlayerStateModel).filter(
+            SessionPlayerStateModel.session_id == session_id
+        ).first()
+
+    def create_or_update(self, data: Dict[str, Any]) -> SessionPlayerStateModel:
+        existing = self.get_by_session(data["session_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+
+class SessionNPCStateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionNPCStateModel)
+
+    def get_by_session(self, session_id: str) -> List[SessionNPCStateModel]:
+        return self.db.query(SessionNPCStateModel).filter(
+            SessionNPCStateModel.session_id == session_id
+        ).all()
+
+    def get_by_session_and_npc(self, session_id: str, npc_template_id: str) -> Optional[SessionNPCStateModel]:
+        return self.db.query(SessionNPCStateModel).filter(
+            and_(
+                SessionNPCStateModel.session_id == session_id,
+                SessionNPCStateModel.npc_template_id == npc_template_id
+            )
+        ).first()
+
+    def create_or_update(self, data: Dict[str, Any]) -> SessionNPCStateModel:
+        existing = self.get_by_session_and_npc(data["session_id"], data["npc_template_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+
+class SessionInventoryItemRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionInventoryItemModel)
+
+    def get_by_session(self, session_id: str) -> List[SessionInventoryItemModel]:
+        return self.db.query(SessionInventoryItemModel).filter(
+            SessionInventoryItemModel.session_id == session_id
+        ).all()
+
+    def get_by_owner(self, session_id: str, owner_type: str, owner_ref_id: str) -> List[SessionInventoryItemModel]:
+        return self.db.query(SessionInventoryItemModel).filter(
+            and_(
+                SessionInventoryItemModel.session_id == session_id,
+                SessionInventoryItemModel.owner_type == owner_type,
+                SessionInventoryItemModel.owner_ref_id == owner_ref_id
+            )
+        ).all()
+
+
+class SessionQuestStateRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionQuestStateModel)
+
+    def get_by_session(self, session_id: str) -> List[SessionQuestStateModel]:
+        return self.db.query(SessionQuestStateModel).filter(
+            SessionQuestStateModel.session_id == session_id
+        ).all()
+
+    def get_by_session_and_quest(self, session_id: str, quest_template_id: str) -> Optional[SessionQuestStateModel]:
+        return self.db.query(SessionQuestStateModel).filter(
+            and_(
+                SessionQuestStateModel.session_id == session_id,
+                SessionQuestStateModel.quest_template_id == quest_template_id
+            )
+        ).first()
+
+
+class SessionEventFlagRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SessionEventFlagModel)
+
+    def get_by_session(self, session_id: str) -> List[SessionEventFlagModel]:
+        return self.db.query(SessionEventFlagModel).filter(
+            SessionEventFlagModel.session_id == session_id
+        ).all()
+
+    def get_by_key(self, session_id: str, flag_key: str) -> Optional[SessionEventFlagModel]:
+        return self.db.query(SessionEventFlagModel).filter(
+            and_(
+                SessionEventFlagModel.session_id == session_id,
+                SessionEventFlagModel.flag_key == flag_key
+            )
+        ).first()
+
+    def set_flag(self, session_id: str, flag_key: str, flag_value: str) -> SessionEventFlagModel:
+        existing = self.get_by_key(session_id, flag_key)
+        if existing:
+            return self.update(existing.id, {"flag_value": flag_value})
+        return self.create({
+            "session_id": session_id,
+            "flag_key": flag_key,
+            "flag_value": flag_value
+        })
+
+
+class EventLogRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, EventLogModel)
+
+    def get_by_session(self, session_id: str, skip: int = 0, limit: int = 100) -> List[EventLogModel]:
+        return self.db.query(EventLogModel).filter(
+            EventLogModel.session_id == session_id
+        ).order_by(EventLogModel.turn_no).offset(skip).limit(limit).all()
+
+    def get_by_turn(self, session_id: str, turn_no: int) -> List[EventLogModel]:
+        return self.db.query(EventLogModel).filter(
+            and_(
+                EventLogModel.session_id == session_id,
+                EventLogModel.turn_no == turn_no
+            )
+        ).all()
+
+    def get_recent(self, session_id: str, limit: int = 10) -> List[EventLogModel]:
+        return self.db.query(EventLogModel).filter(
+            EventLogModel.session_id == session_id
+        ).order_by(desc(EventLogModel.turn_no)).limit(limit).all()
+
+
+class MemorySummaryRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, MemorySummaryModel)
+
+    def get_by_session(self, session_id: str) -> List[MemorySummaryModel]:
+        return self.db.query(MemorySummaryModel).filter(
+            MemorySummaryModel.session_id == session_id
+        ).order_by(desc(MemorySummaryModel.importance_score)).all()
+
+    def get_by_scope(self, session_id: str, scope_type: str, scope_ref_id: Optional[str] = None) -> List[MemorySummaryModel]:
+        query = self.db.query(MemorySummaryModel).filter(
+            and_(
+                MemorySummaryModel.session_id == session_id,
+                MemorySummaryModel.scope_type == scope_type
+            )
+        )
+        if scope_ref_id:
+            query = query.filter(MemorySummaryModel.scope_ref_id == scope_ref_id)
+        return query.all()
+
+
+class MemoryFactRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, MemoryFactModel)
+
+    def get_by_session(self, session_id: str) -> List[MemoryFactModel]:
+        return self.db.query(MemoryFactModel).filter(
+            MemoryFactModel.session_id == session_id
+        ).all()
+
+    def get_by_type(self, session_id: str, fact_type: str) -> List[MemoryFactModel]:
+        return self.db.query(MemoryFactModel).filter(
+            and_(
+                MemoryFactModel.session_id == session_id,
+                MemoryFactModel.fact_type == fact_type
+            )
+        ).all()
+
+    def get_by_subject(self, session_id: str, subject_ref: str) -> List[MemoryFactModel]:
+        return self.db.query(MemoryFactModel).filter(
+            and_(
+                MemoryFactModel.session_id == session_id,
+                MemoryFactModel.subject_ref == subject_ref
+            )
+        ).all()
+
+
+class ModelCallLogRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ModelCallLogModel)
+
+    def get_by_session(self, session_id: str) -> List[ModelCallLogModel]:
+        return self.db.query(ModelCallLogModel).filter(
+            ModelCallLogModel.session_id == session_id
+        ).order_by(ModelCallLogModel.turn_no).all()
+
+    def get_total_cost(self, session_id: str) -> float:
+        result = self.db.query(ModelCallLogModel).filter(
+            ModelCallLogModel.session_id == session_id
+        ).all()
+        return sum(log.cost_estimate or 0 for log in result)
+
+
+class CombatSessionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, CombatSessionModel)
+
+    def get_by_session(self, session_id: str) -> List[CombatSessionModel]:
+        return self.db.query(CombatSessionModel).filter(
+            CombatSessionModel.session_id == session_id
+        ).order_by(desc(CombatSessionModel.started_at)).all()
+
+    def get_active(self, session_id: str) -> Optional[CombatSessionModel]:
+        return self.db.query(CombatSessionModel).filter(
+            and_(
+                CombatSessionModel.session_id == session_id,
+                CombatSessionModel.combat_status == "active"
+            )
+        ).first()
+
+    def update_status(self, combat_id: str, status: str, winner: Optional[str] = None) -> Optional[CombatSessionModel]:
+        from datetime import datetime
+        update_data = {
+            "combat_status": status,
+            "ended_at": datetime.now()
+        }
+        if winner:
+            update_data["winner"] = winner
+        return self.update(combat_id, update_data)
+
+
+class CombatRoundRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, CombatRoundModel)
+
+    def get_by_combat(self, combat_session_id: str) -> List[CombatRoundModel]:
+        return self.db.query(CombatRoundModel).filter(
+            CombatRoundModel.combat_session_id == combat_session_id
+        ).order_by(CombatRoundModel.round_no).all()
+
+    def get_current_round(self, combat_session_id: str) -> Optional[CombatRoundModel]:
+        return self.db.query(CombatRoundModel).filter(
+            CombatRoundModel.combat_session_id == combat_session_id
+        ).order_by(desc(CombatRoundModel.round_no)).first()
+
+
+class CombatActionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, CombatActionModel)
+
+    def get_by_round(self, combat_round_id: str) -> List[CombatActionModel]:
+        return self.db.query(CombatActionModel).filter(
+            CombatActionModel.combat_round_id == combat_round_id
+        ).all()
+
+    def get_by_actor(self, combat_round_id: str, actor_type: str, actor_ref_id: str) -> List[CombatActionModel]:
+        return self.db.query(CombatActionModel).filter(
+            and_(
+                CombatActionModel.combat_round_id == combat_round_id,
+                CombatActionModel.actor_type == actor_type,
+                CombatActionModel.actor_ref_id == actor_ref_id
+            )
+        ).all()
+
+
+class ScheduledEventRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ScheduledEventModel)
+
+    def get_by_session(self, session_id: str) -> List[ScheduledEventModel]:
+        return self.db.query(ScheduledEventModel).filter(
+            ScheduledEventModel.session_id == session_id
+        ).all()
+
+    def get_pending(self, session_id: str) -> List[ScheduledEventModel]:
+        return self.db.query(ScheduledEventModel).filter(
+            and_(
+                ScheduledEventModel.session_id == session_id,
+                ScheduledEventModel.status == "pending"
+            )
+        ).all()
+
+    def mark_triggered(self, event_id: str) -> Optional[ScheduledEventModel]:
+        return self.update(event_id, {"status": "triggered"})

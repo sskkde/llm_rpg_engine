@@ -1,25 +1,22 @@
 """
-Simple FastAPI backend for a demonstration LLM‑driven RPG engine.
+DEPRECATED: Legacy FastAPI backend for demonstration purposes.
 
-This implementation is intentionally lightweight: it does not persist
-state to a real database and it does not call any external large
-language model.  Instead it uses in‑memory dictionaries and simple
-rule‑based text generation to illustrate how the engine might work.
+WARNING: This file is DEPRECATED and should NOT be used as the application
+entrypoint. The demo content has been migrated to:
+    - llm_rpg/config/seeds/ - World configuration seeds
+    - llm_rpg/main.py - The current application entrypoint
 
-The goal of this proof of concept is to demonstrate that the core
-event loop – creating a session, handling player input, updating
-world state and returning a narrative response – can function.  It
-also lays the foundation for future expansions such as persistent
-storage, richer world models, proper NPC personalities and AI‑driven
-text.
+Use the following command to run the server:
+    uvicorn llm_rpg.main:app --reload --port 8000
 
-To run the development server, execute::
+This legacy file is kept for reference only. All new development should
+use the llm_rpg.main:app entrypoint with the Perspective-Aware Memory
+System architecture.
 
-    uvicorn app:app --reload --port 8000
-
-in the ``backend`` directory.  Then you can send requests to
-``http://localhost:8000`` to create sessions and play through the
-demo world.  See the endpoints defined below for details.
+MIGRATION NOTES:
+- Demo world data (locations, NPCs) → llm_rpg/config/seeds/
+- Session management → llm_rpg/main.py with canonical state
+- API endpoints → llm_rpg/api/ routes
 """
 
 import uuid

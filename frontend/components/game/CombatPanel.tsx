@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {useTranslations} from 'next-intl';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -27,7 +27,7 @@ export function CombatPanel({ combatId, onCombatEnd }: CombatPanelProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshCombat = async () => {
+  const refreshCombat = useCallback(async () => {
     try {
       const [combatData, eventsData] = await Promise.all([
         getCombat(combatId),
@@ -38,7 +38,7 @@ export function CombatPanel({ combatId, onCombatEnd }: CombatPanelProps) {
     } catch {
       setError(t('failedToLoad'));
     }
-  };
+  }, [combatId, t]);
 
   useEffect(() => {
     const loadCombat = async () => {
@@ -47,7 +47,7 @@ export function CombatPanel({ combatId, onCombatEnd }: CombatPanelProps) {
       setIsLoading(false);
     };
     loadCombat();
-  }, [combatId]);
+  }, [refreshCombat]);
 
   const handleAction = async (action: CombatActionRequest) => {
     setIsSubmitting(true);

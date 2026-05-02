@@ -1,8 +1,8 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import type { User, TokenResponse } from '@/types/api';
-import { loginUser, registerUser, getCurrentUser } from '@/lib/api';
+import type {User, TokenResponse} from '@/types/api';
+import {getCurrentUser, loginUser, registerUser} from '@/lib/api';
 
 interface AuthContextType {
   user: User | null;
@@ -17,24 +17,33 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(
-    () => typeof window !== 'undefined' && Boolean(localStorage.getItem('access_token'))
-  );
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('access_token');
-    if (token) {
-      getCurrentUser()
-        .then((userData) => {
-          setUser(userData);
-        })
-        .catch(() => {
-          localStorage.removeItem('access_token');
-        })
-        .finally(() => {
-          setIsLoading(false);
-        });
-    }
+    let isMounted = true;
+
+    const initializeAuth = async () => {
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        if (isMounted) setIsLoading(false);
+        return;
+      }
+
+      try {
+        const userData = await getCurrentUser();
+        if (isMounted) setUser(userData);
+      } catch {
+        localStorage.removeItem('access_token');
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    };
+
+    void initializeAuth();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = async (username: string, password: string) => {
@@ -44,9 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const register = async (username: string, password: string, email?: string) => {
-    const response: TokenResponse = await registerUser({ username, password, email });
-    localStorage.setItem('access_token', response.access_token);
-    setUser(response.user);
+    await registerUser({username, password, email});
   };
 
   const logout = () => {

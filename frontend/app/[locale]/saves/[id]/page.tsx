@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, use } from 'react';
+import React, {use, useCallback, useEffect, useState} from 'react';
 import {useFormatter, useTranslations} from 'next-intl';
-import { useRouter } from 'next/navigation';
+import {useRouter} from '@/i18n/navigation';
 import { ProtectedRoute } from '@/components/ui/ProtectedRoute';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Loading } from '@/components/ui/Loading';
 import { ErrorMessage } from '@/components/ui/ErrorMessage';
 import { SessionList } from '@/components/saves/SessionList';
-import { getSaveSlot, loadSession } from '@/lib/api';
+import {getSaveSlot, getWorldState, loadSession, manualSave} from '@/lib/api';
 import type { SaveSlotDetail } from '@/types/api';
 
 export default function SaveDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -29,8 +29,9 @@ function SaveDetailContent({ saveId }: { saveId: string }) {
   const [save, setSave] = useState<SaveSlotDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isStartingGame, setIsStartingGame] = useState(false);
 
-  const fetchSave = async () => {
+  const fetchSave = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
@@ -48,12 +49,12 @@ function SaveDetailContent({ saveId }: { saveId: string }) {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [saveId, t]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchSave();
-  }, [saveId]);
+  }, [fetchSave]);
 
   const handleLoadSession = async (sessionId: string) => {
     try {
@@ -61,6 +62,28 @@ function SaveDetailContent({ saveId }: { saveId: string }) {
       router.push(`/game/${sessionId}`);
     } catch {
       setError(t('failedToLoadSession'));
+    }
+  };
+
+  const handleStartNewGame = async () => {
+    if (!save) return;
+
+    setIsStartingGame(true);
+    setError(null);
+
+    try {
+      const worldState = await getWorldState();
+      const result = await manualSave({
+        world_id: worldState.world.id,
+        save_slot_id: save.id,
+        current_chapter_id: worldState.chapters[0]?.id,
+      });
+      await loadSession(result.session_id);
+      router.push(`/game/${result.session_id}`);
+    } catch {
+      setError(t('failedToStartGame'));
+    } finally {
+      setIsStartingGame(false);
     }
   };
 
@@ -107,9 +130,14 @@ function SaveDetailContent({ saveId }: { saveId: string }) {
         </p>
       </Card>
 
-      <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-4">
-        {t('sessions')}
-      </h2>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
+        <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
+          {t('sessions')}
+        </h2>
+        <Button onClick={handleStartNewGame} isLoading={isStartingGame} disabled={isStartingGame}>
+          {isStartingGame ? t('startingGame') : t('startNewGame')}
+        </Button>
+      </div>
       <SessionList
         sessions={save.sessions || []}
         isLoading={false}

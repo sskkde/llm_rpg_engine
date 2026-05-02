@@ -65,6 +65,7 @@ export interface SaveSlotUpdateRequest {
 
 export interface ManualSaveRequest {
   world_id: string;
+  save_slot_id?: string;
   current_chapter_id?: string;
 }
 
@@ -237,11 +238,25 @@ export type SSEEventData =
 // World Types
 // =============================================================================
 
-export interface WorldState {
+export interface WorldMetadata {
   id: string;
+  code: string;
   name: string;
-  description?: string;
-  settings?: Record<string, unknown>;
+  genre?: string;
+  lore_summary?: string;
+  status: string;
+}
+
+export interface WorldState {
+  world: WorldMetadata;
+  chapters: Chapter[];
+  locations: Location[];
+  npcs: NPC[];
+  items: Item[];
+  quests: Quest[];
+  endings: Array<{id: string; code: string; name: string; summary?: string}>;
+  event_templates: Array<Record<string, unknown>>;
+  prompt_templates: Array<Record<string, unknown>>;
 }
 
 export interface WorldSummary {
@@ -284,6 +299,15 @@ export interface Quest {
   name: string;
   description?: string;
   quest_type: string;
+}
+
+export interface Item {
+  id: string;
+  code?: string;
+  name: string;
+  item_type?: string;
+  rarity?: string;
+  description?: string;
 }
 
 // =============================================================================

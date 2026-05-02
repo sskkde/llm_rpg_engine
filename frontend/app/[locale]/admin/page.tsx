@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {useTranslations} from 'next-intl';
 import { ProtectedRoute } from '@/components/ui/ProtectedRoute';
 import { Button } from '@/components/ui/Button';
@@ -46,7 +46,7 @@ function AdminSection<T extends AdminItem>({ title, fetchItems, updateItem, colu
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Partial<T>>({});
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
@@ -62,12 +62,12 @@ function AdminSection<T extends AdminItem>({ title, fetchItems, updateItem, colu
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [fetchItems, t]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
-  }, [fetchItems]);
+  }, [load]);
 
   const handleEdit = (item: T) => {
     setEditingId(item.id);

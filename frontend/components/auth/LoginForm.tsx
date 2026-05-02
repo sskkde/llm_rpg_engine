@@ -31,7 +31,7 @@ export function LoginForm() {
 
     try {
       await login(username, password);
-      router.push('/saves');
+      router.push('/game');
     } catch (err) {
       if (err instanceof APIError) {
         if (err.status === 401) {

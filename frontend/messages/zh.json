@@ -21,6 +21,7 @@
     "confirm": "确认",
     "save": "保存",
     "delete": "删除",
+    "cancel": "取消",
     "edit": "编辑",
     "create": "创建",
     "back": "返回",
@@ -52,7 +53,7 @@
     "passwordRequired": "密码不能为空",
     "passwordMismatch": "密码不匹配",
     "usernameAndPasswordRequired": "用户名和密码不能为空",
-    "passwordMinLength": "密码至少需要6个字符",
+    "passwordMinLength": "密码至少需要8个字符",
     "usernameExists": "用户名已存在，请选择其他用户名",
     "invalidInput": "输入无效，请检查您的输入内容",
     "registrationError": "注册时发生错误",
@@ -61,7 +62,8 @@
     "chooseUsername": "选择用户名",
     "enterEmail": "输入邮箱（可选）",
     "createPassword": "创建密码",
-    "passwordHelperText": "至少需要6个字符"
+    "passwordHelperText": "至少需要8个字符",
+    "registrationSuccess": "注册成功，请登录后进入游戏。"
   },
   "ProtectedRoute": {
     "loginRequired": "需要登录",
@@ -81,6 +83,7 @@
     "loadSave": "加载存档",
     "deleteSave": "删除存档",
     "delete": "删除",
+    "cancel": "取消",
     "confirmDelete": "确定要删除此存档吗？",
     "yourSaves": "您的存档",
     "manageSaves": "管理您的冒险存档",
@@ -103,7 +106,10 @@
     "failedToLoadSession": "加载会话失败。",
     "loadingDetails": "正在加载存档详情...",
     "saveSlotInUse": "该存档位已被使用，请选择其他名称",
-    "failedToCreate": "创建存档失败"
+    "failedToCreate": "创建存档失败",
+    "startNewGame": "开始新游戏",
+    "startingGame": "正在开始游戏...",
+    "failedToStartGame": "开始游戏失败。请确认世界内容已初始化后重试。"
   },
   "Game": {
     "title": "游戏",
@@ -276,7 +282,7 @@
   },
   "Session": {
     "loading": "正在加载会话...",
-    "noSessions": "暂无会话。创建存档开始游戏。",
+    "noSessions": "暂无会话。请从此存档位开始新游戏。",
     "sessionId": "会话 {id}",
     "lastPlayed": "上次游玩：{date}",
     "continue": "继续",

@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, {useState} from 'react';
 import {useTranslations} from 'next-intl';
 import {useRouter} from '@/i18n/navigation';
-import { useAuth } from '@/hooks/useAuth';
-import { Input } from '@/components/ui/Input';
-import { Button } from '@/components/ui/Button';
-import { ErrorMessage } from '@/components/ui/ErrorMessage';
-import { APIError } from '@/lib/api';
+import {useAuth} from '@/hooks/useAuth';
+import {Input} from '@/components/ui/Input';
+import {Button} from '@/components/ui/Button';
+import {ErrorMessage} from '@/components/ui/ErrorMessage';
+import {APIError} from '@/lib/api';
 
 export function RegisterForm() {
   const router = useRouter();
@@ -27,7 +27,7 @@ export function RegisterForm() {
       return;
     }
 
-    if (password.length < 6) {
+    if (password.length < 8) {
       setError(t('passwordMinLength'));
       return;
     }
@@ -37,7 +37,7 @@ export function RegisterForm() {
 
     try {
       await register(username, password, email || undefined);
-      router.push('/saves');
+      router.push('/auth/login?registered=1');
     } catch (err) {
       if (err instanceof APIError) {
         if (err.status === 409) {

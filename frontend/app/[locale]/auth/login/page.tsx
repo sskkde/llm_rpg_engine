@@ -1,5 +1,6 @@
 'use client';
 
+import {useSearchParams} from 'next/navigation';
 import {Link} from '@/i18n/navigation';
 import {useTranslations} from 'next-intl';
 import {Card} from '@/components/ui/Card';
@@ -7,6 +8,8 @@ import {LoginForm} from '@/components/auth/LoginForm';
 
 export default function LoginPage() {
   const t = useTranslations('Auth');
+  const searchParams = useSearchParams();
+  const registrationSucceeded = searchParams.get('registered') === '1';
 
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-4 bg-slate-50 dark:bg-slate-900">
@@ -19,6 +22,15 @@ export default function LoginPage() {
             {t('loginToAccount')}
           </p>
         </div>
+
+        {registrationSucceeded && (
+          <div
+            className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200"
+            data-testid="registration-success"
+          >
+            {t('registrationSuccess')}
+          </div>
+        )}
 
         <Card className="p-6">
           <LoginForm />

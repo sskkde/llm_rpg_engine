@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, {useCallback, useEffect, useState} from 'react';
 import {useTranslations} from 'next-intl';
 import {useRouter} from '@/i18n/navigation';
 import { ProtectedRoute } from '@/components/ui/ProtectedRoute';
@@ -28,7 +28,7 @@ function SavesContent() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SaveSlot | null>(null);
 
-  const fetchSaves = async () => {
+  const fetchSaves = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
@@ -39,12 +39,12 @@ function SavesContent() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchSaves();
-  }, []);
+  }, [fetchSaves]);
 
   const handleCreateSave = async (name: string, slotNumber: number) => {
     const save = await createSaveSlot({ slot_number: slotNumber, name });

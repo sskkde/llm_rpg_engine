@@ -4,7 +4,8 @@ This is the frontend application for the LLM RPG Engine, a narrative RPG system 
 
 ## Features
 
-- **Modern Stack**: Next.js 14+ with App Router, TypeScript, Tailwind CSS
+- **Modern Stack**: Next.js 16 with App Router, TypeScript, Tailwind CSS
+- **Internationalization**: Bilingual support (Chinese/English) with `next-intl`
 - **Authentication**: JWT-based auth with login/register
 - **Game Interface**: Rich narrative display with real-time updates
 - **Save Management**: Multiple save slots with auto and manual saving
@@ -69,14 +70,24 @@ npm run test:watch
 ```
 frontend/
 ├── app/                    # Next.js App Router
+│   ├── [locale]/          # Localized routes (zh, en)
+│   │   ├── layout.tsx     # Locale layout with providers
+│   │   ├── page.tsx       # Home page
+│   │   ├── auth/          # Auth pages
+│   │   ├── game/          # Game interface
+│   │   ├── saves/         # Save management
+│   │   ├── admin/         # Admin panel
+│   │   └── debug/         # Debug panel
 │   ├── layout.tsx         # Root layout
-│   ├── page.tsx           # Home page
-│   ├── login/             # Login page
-│   ├── register/          # Registration page
-│   ├── game/              # Game interface
-│   ├── saves/             # Save management
-│   ├── admin/             # Admin panel
+│   ├── page.tsx           # Root redirect to /zh
 │   └── globals.css        # Global styles
+├── i18n/                  # Internationalization
+│   ├── routing.ts         # Locale routing configuration
+│   ├── navigation.ts      # Locale-aware navigation APIs
+│   └── request.ts         # Server-side i18n config
+├── messages/              # Translation files
+│   ├── zh.json            # Chinese translations
+│   └── en.json            # English translations
 ├── components/            # React components
 │   ├── ui/               # UI components
 │   ├── auth/             # Auth-related components
@@ -88,6 +99,40 @@ frontend/
 ├── public/               # Static assets
 └── tests/                # Test files
 ```
+
+## Internationalization (i18n)
+
+The frontend supports Chinese (zh) and English (en) with locale-prefixed routes.
+
+### Supported Locales
+
+- **Chinese (zh)**: Default locale, accessible at `/zh/...`
+- **English (en)**: Accessible at `/en/...`
+
+### Default Route Behavior
+
+- `/` redirects to `/zh` (Chinese default)
+- `/zh/...` - Chinese locale routes
+- `/en/...` - English locale routes
+
+### Language Switcher
+
+A language switcher is available in the navigation bar (desktop and mobile) to switch between Chinese and English while preserving the current route.
+
+### i18n File Structure
+
+- `i18n/routing.ts` - Locale routing configuration
+- `i18n/navigation.ts` - Locale-aware navigation APIs (Link, useRouter, usePathname)
+- `i18n/request.ts` - Server-side i18n configuration
+- `messages/zh.json` - Chinese translations
+- `messages/en.json` - English translations
+
+### Adding Translations
+
+1. Add new keys to both `messages/zh.json` and `messages/en.json`
+2. Use `useTranslations('Namespace')` hook in client components
+3. Use `getTranslations({locale, namespace})` in server components
+4. Access translations with `t('key')`
 
 ## Backend Integration
 

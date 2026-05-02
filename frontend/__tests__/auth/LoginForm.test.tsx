@@ -44,7 +44,7 @@ describe('LoginForm', () => {
 
     await waitFor(() => {
       expect(mockLogin).toHaveBeenCalledWith('testuser', 'password123');
-      expect(mockPush).toHaveBeenCalledWith('/saves');
+      expect(mockPush).toHaveBeenCalledWith('/game');
     });
   });
 

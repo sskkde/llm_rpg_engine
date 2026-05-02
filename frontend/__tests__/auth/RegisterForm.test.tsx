@@ -46,7 +46,7 @@ describe('RegisterForm', () => {
 
     await waitFor(() => {
       expect(mockRegister).toHaveBeenCalledWith('newuser', 'password123', 'test@example.com');
-      expect(mockPush).toHaveBeenCalledWith('/saves');
+      expect(mockPush).toHaveBeenCalledWith('/auth/login?registered=1');
     });
   });
 

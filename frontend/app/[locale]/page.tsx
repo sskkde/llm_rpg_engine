@@ -6,7 +6,6 @@ import {useAuth} from '@/hooks/useAuth';
 import {Button} from '@/components/ui/Button';
 import {Card} from '@/components/ui/Card';
 import {Badge} from '@/components/ui/Badge';
-import {Loading} from '@/components/ui/Loading';
 import {useRouter} from '@/i18n/navigation';
 import {useEffect} from 'react';
 
@@ -14,29 +13,11 @@ export default function HomePage() {
   const {isAuthenticated, isLoading} = useAuth();
   const router = useRouter();
   const tHome = useTranslations('Home');
-  const tGame = useTranslations('Game');
-
   useEffect(() => {
     if (isAuthenticated && !isLoading) {
-      router.push('/saves');
+      router.push('/game');
     }
   }, [isAuthenticated, isLoading, router]);
-
-  if (isLoading) {
-    return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
-        <Loading size="lg" text={tGame('preparingAdventure')} />
-      </div>
-    );
-  }
-
-  if (isAuthenticated) {
-    return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-4">
-        <Loading size="lg" text={tGame('redirectingToSaves')} />
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-[calc(100vh-4rem)]">

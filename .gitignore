@@ -39,3 +39,7 @@ logs/
 
 # Documentation directory - not tracked
 doc/
+
+# Local runtime/test artifacts
+backend/dev.db
+frontend/test-results/

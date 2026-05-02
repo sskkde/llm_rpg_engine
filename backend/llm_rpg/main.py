@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .models import (
@@ -34,8 +35,27 @@ from .api import auth, saves, sessions, game, streaming, world, combat, admin, d
 
 
 APP_ENV = os.getenv("APP_ENV", "development")
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:3005,http://127.0.0.1:3005,"
+    "http://localhost:3000,http://127.0.0.1:3000,"
+    "http://localhost:8000,http://127.0.0.1:8000,"
+    "https://llm.nas-1.club:18080"
+)
 
 app = FastAPI(title="LLM RPG Engine", version="2.0.0")
+
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth.router)
 app.include_router(saves.router)

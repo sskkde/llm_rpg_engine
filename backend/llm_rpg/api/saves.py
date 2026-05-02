@@ -59,6 +59,7 @@ class SaveSlotDetailResponse(BaseModel):
 
 class ManualSaveRequest(BaseModel):
     world_id: str = Field(..., description="World ID to create session in")
+    save_slot_id: Optional[str] = Field(None, description="Optional save slot to attach the new session to")
     current_chapter_id: Optional[str] = Field(None, description="Optional chapter ID")
 
 
@@ -243,16 +244,29 @@ def create_manual_save(
         )
     
     save_repo = SaveSlotRepository(db)
-    existing_slots = save_repo.get_by_user(current_user.id)
     
-    if not existing_slots:
-        slot = save_repo.create({
-            "user_id": current_user.id,
-            "slot_number": 1,
-            "name": "Auto-created save slot"
-        })
+    if request.save_slot_id:
+        slot = save_repo.get_by_id(request.save_slot_id)
+        if not slot:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Save slot not found"
+            )
+        if slot.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
     else:
-        slot = existing_slots[0]
+        existing_slots = save_repo.get_by_user(current_user.id)
+        if not existing_slots:
+            slot = save_repo.create({
+                "user_id": current_user.id,
+                "slot_number": 1,
+                "name": "Auto-created save slot"
+            })
+        else:
+            slot = existing_slots[0]
     
     session_repo = SessionRepository(db)
     session = session_repo.create({

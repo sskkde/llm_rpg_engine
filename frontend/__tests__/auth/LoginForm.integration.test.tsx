@@ -30,6 +30,7 @@ const mockLoginUser = jest.mocked(loginUser);
 const user: User = {
   id: 'user-1',
   username: 'testuser',
+  is_admin: false,
   created_at: '2026-05-04T00:00:00Z',
 };
 

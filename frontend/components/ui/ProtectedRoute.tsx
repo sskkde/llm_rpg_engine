@@ -111,7 +111,7 @@ export function AdminRoute({children}: AdminRouteProps) {
     );
   }
 
-  const isAdmin = user?.username === 'admin' || user?.email?.includes('admin');
+  const isAdmin = user?.is_admin === true;
 
   if (!isAdmin) {
     return (

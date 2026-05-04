@@ -16,7 +16,7 @@ export function Navigation() {
   const t = useTranslations('Navigation');
   const tLang = useTranslations('LanguageSwitcher');
 
-  const isAdmin = user?.username === 'admin' || user?.email?.includes('admin');
+  const isAdmin = user?.is_admin === true;
 
   const navLinks = [
     {href: '/', label: t('home'), auth: false},

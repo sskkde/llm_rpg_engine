@@ -9,6 +9,7 @@ import type {
   AdminWorld, AdminWorldDetail, AdminChapter, AdminLocation, AdminNPCTemplate,
   AdminItemTemplate, AdminQuestTemplate, AdminEventTemplate, AdminPromptTemplate,
   DebugSessionLogsResponse, DebugSessionStateResponse, DebugModelCallsResponse, DebugErrorsResponse,
+  SystemSettings, SystemSettingsUpdateRequest,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -346,6 +347,21 @@ export async function getPromptTemplateDetail(templateId: string): Promise<Admin
 
 export async function updatePromptTemplate(templateId: string, data: Partial<AdminPromptTemplate>): Promise<AdminPromptTemplate> {
   return fetchWithAuth<AdminPromptTemplate>(`/admin/prompt-templates/${templateId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+// =============================================================================
+// System Settings
+// =============================================================================
+
+export async function getSystemSettings(): Promise<SystemSettings> {
+  return fetchWithAuth<SystemSettings>('/admin/system-settings');
+}
+
+export async function updateSystemSettings(data: SystemSettingsUpdateRequest): Promise<SystemSettings> {
+  return fetchWithAuth<SystemSettings>('/admin/system-settings', {
     method: 'PATCH',
     body: JSON.stringify(data),
   });

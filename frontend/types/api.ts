@@ -8,6 +8,7 @@ export interface User {
   id: string;
   username: string;
   email?: string;
+  is_admin: boolean;
   created_at: string;
   last_login_at?: string;
 }
@@ -502,4 +503,60 @@ export interface APIError {
     warnings?: string[];
     audit_event_id?: string;
   };
+}
+
+// =============================================================================
+// System Settings Types
+// =============================================================================
+
+export interface OpenAIKeyMetadata {
+  configured: boolean;
+  last4?: string;
+  secret_updated_at?: string;
+  secret_cleared_at?: string;
+}
+
+export interface LLMSettings {
+  provider_mode: 'auto' | 'openai' | 'mock';
+  default_model?: string;
+  temperature: number;
+  max_tokens: number;
+  openai_api_key: OpenAIKeyMetadata;
+}
+
+export interface OpsSettings {
+  registration_enabled: boolean;
+  maintenance_mode: boolean;
+  debug_enabled: boolean;
+}
+
+export interface SystemSettings {
+  llm: LLMSettings;
+  ops: OpsSettings;
+  updated_at?: string;
+  updated_by_user_id?: string;
+}
+
+export interface OpenAIKeyAction {
+  action: 'keep' | 'set' | 'clear';
+  value?: string;
+}
+
+export interface LLMSettingsUpdate {
+  provider_mode?: 'auto' | 'openai' | 'mock';
+  default_model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  openai_api_key?: OpenAIKeyAction;
+}
+
+export interface OpsSettingsUpdate {
+  registration_enabled?: boolean;
+  maintenance_mode?: boolean;
+  debug_enabled?: boolean;
+}
+
+export interface SystemSettingsUpdateRequest {
+  llm?: LLMSettingsUpdate;
+  ops?: OpsSettingsUpdate;
 }

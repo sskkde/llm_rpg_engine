@@ -82,7 +82,7 @@ function DebugContent() {
 
       <Card className="p-6 mb-6">
         <h2 className="text-xl font-semibold mb-4">{t('sessionInspector')}</h2>
-        <div className="flex gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row">
           <Input
             value={sessionId}
             onChange={e => setSessionId(e.target.value)}

@@ -152,6 +152,7 @@
     "mode": "模式",
     "adventureLog": "冒险日志",
     "noTurnsYet": "暂无回合",
+    "logEntryCount": "{count} 条记录",
     "streaming": "流式传输中...",
     "fallbackMode": "回退模式",
     "ready": "就绪",

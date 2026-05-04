@@ -104,9 +104,10 @@ function AdminSection<T extends AdminItem>({ title, fetchItems, updateItem, colu
             {items.map(item => (
               <tr key={item.id} className="border-b border-slate-100 dark:border-slate-800">
                 {columns.map(col => (
-                  <td key={String(col.key)} className="p-2">
+                  <td key={String(col.key)} className="p-2 min-w-[120px]">
                     {editingId === item.id ? (
                       <input
+                        aria-label={col.label}
                         value={String(editValues[col.key] || '')}
                         onChange={e => setEditValues(prev => ({ ...prev, [col.key]: e.target.value }))}
                         className="px-2 py-1 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded text-sm w-full"
@@ -116,9 +117,9 @@ function AdminSection<T extends AdminItem>({ title, fetchItems, updateItem, colu
                     )}
                   </td>
                 ))}
-                <td className="p-2">
+                <td className="p-2 min-w-[100px]">
                   {editingId === item.id ? (
-                    <div className="flex gap-1">
+                    <div className="flex flex-wrap gap-1">
                       <Button size="sm" onClick={handleSave}>{t('save')}</Button>
                       <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>{t('cancel')}</Button>
                     </div>

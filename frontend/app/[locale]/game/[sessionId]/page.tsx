@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, use } from 'react';
 import {useTranslations} from 'next-intl';
 import { ProtectedRoute } from '@/components/ui/ProtectedRoute';
 import { Loading } from '@/components/ui/Loading';
+import { CollapsibleSection } from '@/components/ui/CollapsibleSection';
 import { NarrationPanel } from '@/components/game/NarrationPanel';
 import { ActionInput } from '@/components/game/ActionInput';
 import { RecommendedActions } from '@/components/game/RecommendedActions';
@@ -36,6 +37,7 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
       const data = await getSessionSnapshot(sessionId);
       setSnapshot(data);
     } catch {
+      // Snapshot refresh failed; loading state handles this gracefully
     }
   }, [sessionId]);
 
@@ -95,9 +97,39 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
             isDisabled={isPending}
           />
           <ActionInput onSubmit={handleAction} isDisabled={isPending} />
+
+          {/* Mobile: Collapsible State and Log sections below main content */}
+          <div className="lg:hidden space-y-4 pt-2">
+            <CollapsibleSection
+              id="mobile-state-section"
+              title={t('characterState')}
+              defaultOpen={true}
+              summary={
+                snapshot?.player_state && snapshot?.session_state
+                  ? `${t('hp')}: ${snapshot.player_state.hp}/${snapshot.player_state.max_hp} · ${snapshot.session_state.active_mode}`
+                  : undefined
+              }
+            >
+              <div className="px-4 pb-4">
+                <StatePanel snapshot={snapshot} />
+              </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              id="mobile-log-section"
+              title={t('adventureLog')}
+              defaultOpen={false}
+              summary={logEntries.length > 0 ? t('logEntryCount', { count: logEntries.length }) : undefined}
+            >
+              <div className="px-4 pb-4">
+                <LogPanel entries={logEntries} />
+              </div>
+            </CollapsibleSection>
+          </div>
         </div>
 
-        <div className="space-y-4">
+        {/* Desktop: Side panel with State and Log */}
+        <div className="hidden lg:block space-y-4">
           <StatePanel snapshot={snapshot} />
           <LogPanel entries={logEntries} />
         </div>

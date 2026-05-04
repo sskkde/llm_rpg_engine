@@ -1,5 +1,10 @@
 import './globals.css';
 
+export const metadata = {
+  title: 'RPG Engine',
+  description: 'LLM-powered narrative RPG engine',
+};
+
 export default function RootLayout({
   children,
 }: {

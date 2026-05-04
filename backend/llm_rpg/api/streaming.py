@@ -243,16 +243,28 @@ async def execute_turn_stream(
     """
     event_id = str(uuid.uuid4())
     
-    # Initialize LLM service
-    if use_mock:
+    # Initialize LLM service based on system settings
+    from ..services.settings import SystemSettingsService
+    settings_service = SystemSettingsService(db)
+    provider_config = settings_service.get_provider_config()
+    
+    if use_mock or provider_config["provider_mode"] == "mock":
         provider = MockLLMProvider()
     else:
-        # Try to use real provider, fall back to mock if no API key
-        import os
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
+        effective_key = settings_service.get_effective_openai_key()
+        if effective_key:
             from ..llm.service import OpenAIProvider
-            provider = OpenAIProvider(api_key=api_key)
+            provider = OpenAIProvider(
+                api_key=effective_key,
+                model=provider_config.get("default_model"),
+                temperature=provider_config.get("temperature"),
+                max_tokens=provider_config.get("max_tokens"),
+            )
+        elif provider_config["provider_mode"] == "openai":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No effective OpenAI API key available"
+            )
         else:
             provider = MockLLMProvider()
     

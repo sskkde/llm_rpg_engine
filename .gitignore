@@ -43,3 +43,4 @@ doc/
 # Local runtime/test artifacts
 backend/dev.db
 frontend/test-results/
+/package-lock.json

@@ -28,11 +28,11 @@ export function CombatParticipantCard({ participant, isSelected, onSelect, isPla
       } ${isPlayer ? 'border-l-4 border-l-blue-500' : ''}`}
       onClick={() => !participant.is_defeated && onSelect(participant.entity_id)}
     >
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 mb-2">
         <span className="font-medium text-slate-900 dark:text-slate-100">
           {participant.name}
         </span>
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-wrap">
           {isPlayer && <Badge variant="info" size="sm">{t('player')}</Badge>}
           {participant.is_defeated && <Badge variant="error" size="sm">{t('defeated')}</Badge>}
         </div>

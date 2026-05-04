@@ -63,11 +63,11 @@ export function CreateSaveForm({ onSubmit, onCancel, usedSlotNumbers }: CreateSa
         {t('saveSlot', {slotNumber: defaultSlot})}
       </p>
 
-      <div className="flex gap-3 justify-end">
-        <Button type="button" variant="ghost" onClick={onCancel} disabled={isLoading}>
+      <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
+        <Button type="button" variant="ghost" onClick={onCancel} disabled={isLoading} className="w-full sm:w-auto">
           {t('cancel')}
         </Button>
-        <Button type="submit" isLoading={isLoading}>
+        <Button type="submit" isLoading={isLoading} className="w-full sm:w-auto">
           {t('createSave')}
         </Button>
       </div>

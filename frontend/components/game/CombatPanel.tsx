@@ -86,11 +86,11 @@ export function CombatPanel({ combatId, onCombatEnd }: CombatPanelProps) {
 
   return (
     <Card className="p-4">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
         <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
           {t('title')}
         </h2>
-        <Badge variant={isActive ? 'warning' : 'success'}>
+        <Badge variant={isActive ? 'warning' : 'success'} className="self-start sm:self-auto">
           {combat.status}
         </Badge>
       </div>

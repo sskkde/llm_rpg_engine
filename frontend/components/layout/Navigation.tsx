@@ -96,7 +96,7 @@ export function Navigation() {
             <div className="hidden sm:flex items-center gap-1" data-testid="language-switcher">
               <button
                 onClick={() => switchLocale('zh')}
-                className={`px-2 py-1 text-xs font-medium rounded ${
+                className={`min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 sm:px-2 sm:py-1 text-xs font-medium rounded ${
                   locale === 'zh'
                     ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
                     : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
@@ -107,7 +107,7 @@ export function Navigation() {
               </button>
               <button
                 onClick={() => switchLocale('en')}
-                className={`px-2 py-1 text-xs font-medium rounded ${
+                className={`min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 sm:px-2 sm:py-1 text-xs font-medium rounded ${
                   locale === 'en'
                     ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
                     : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
@@ -163,7 +163,7 @@ export function Navigation() {
             )}
 
             <button
-              className="md:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="md:hidden min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 sm:p-2 rounded-lg text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               aria-label="Toggle menu"
             >
@@ -209,7 +209,7 @@ export function Navigation() {
                 </span>
                 <button
                   onClick={() => switchLocale('zh')}
-                  className={`px-2 py-1 text-xs font-medium rounded ${
+                  className={`min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 sm:px-2 sm:py-1 text-xs font-medium rounded ${
                     locale === 'zh'
                       ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
                       : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
@@ -220,7 +220,7 @@ export function Navigation() {
                 </button>
                 <button
                   onClick={() => switchLocale('en')}
-                  className={`px-2 py-1 text-xs font-medium rounded ${
+                  className={`min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 sm:px-2 sm:py-1 text-xs font-medium rounded ${
                     locale === 'en'
                       ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300'
                       : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'

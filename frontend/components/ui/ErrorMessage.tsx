@@ -61,7 +61,7 @@ export function ErrorMessage({
             {onRetry && (
               <button
                 onClick={onRetry}
-                className="text-sm font-medium text-red-700 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
+                className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 underline hover:text-red-800 dark:hover:text-red-300"
               >
                 {t('retry')}
               </button>
@@ -69,7 +69,7 @@ export function ErrorMessage({
             {onDismiss && (
               <button
                 onClick={onDismiss}
-                className="text-red-500 hover:text-red-700 dark:hover:text-red-300"
+                className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 flex items-center justify-center text-red-500 hover:text-red-700 dark:hover:text-red-300"
                 aria-label={t('dismissError')}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -105,7 +105,7 @@ export function ErrorMessage({
             {onRetry && (
               <button
                 onClick={onRetry}
-                className="text-sm font-medium text-red-700 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
+                className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 text-sm font-medium text-red-700 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
               >
                 {t('retry')}
               </button>
@@ -113,7 +113,7 @@ export function ErrorMessage({
             {onDismiss && (
               <button
                 onClick={onDismiss}
-                className="text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
+                className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
               >
                 {t('dismiss')}
               </button>
@@ -138,7 +138,7 @@ export function ErrorMessage({
       {onRetry && (
         <button
           onClick={onRetry}
-          className="underline hover:text-red-800 dark:hover:text-red-300"
+          className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 text-sm font-medium text-red-700 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
         >
           {t('retry')}
         </button>

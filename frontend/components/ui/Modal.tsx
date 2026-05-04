@@ -91,7 +91,7 @@ export function Modal({
             {showCloseButton && (
               <button
                 onClick={onClose}
-                className="text-slate-400 hover:text-slate-500 dark:hover:text-slate-300 transition-colors"
+                className="min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0 flex items-center justify-center text-slate-400 hover:text-slate-500 dark:hover:text-slate-300 transition-colors"
                 aria-label={t('closeModal')}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -103,7 +103,7 @@ export function Modal({
         )}
 
         {/* Content */}
-        <div className="px-6 py-4">{children}</div>
+        <div className="px-6 py-4 max-h-[calc(100dvh-2rem)] overflow-y-auto">{children}</div>
       </div>
     </div>
   );

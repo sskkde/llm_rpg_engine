@@ -13,6 +13,7 @@ from .models import (
     EventTemplateModel,
     PromptTemplateModel,
     UserModel,
+    SystemSettingsModel,
     SaveSlotModel,
     SessionModel,
     SessionStateModel,
@@ -526,3 +527,28 @@ class ScheduledEventRepository(BaseRepository):
 
     def mark_triggered(self, event_id: str) -> Optional[ScheduledEventModel]:
         return self.update(event_id, {"status": "triggered"})
+
+
+class SystemSettingsRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, SystemSettingsModel)
+
+    def get_singleton(self) -> SystemSettingsModel:
+        settings = self.db.query(SystemSettingsModel).first()
+        if not settings:
+            settings = SystemSettingsModel()
+            self.db.add(settings)
+            self.db.commit()
+            self.db.refresh(settings)
+        return settings
+
+    def update_singleton(self, data: Dict[str, Any], user_id: Optional[str] = None) -> SystemSettingsModel:
+        settings = self.get_singleton()
+        for key, value in data.items():
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+        if user_id:
+            settings.updated_by_user_id = user_id
+        self.db.commit()
+        self.db.refresh(settings)
+        return settings

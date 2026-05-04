@@ -1,6 +1,9 @@
 import {screen, fireEvent, waitFor} from '@testing-library/react';
+import {renderToString} from 'react-dom/server';
+import {NextIntlClientProvider} from 'next-intl';
 import {renderWithIntl} from '@/test-utils';
 import {LoginForm} from '@/components/auth/LoginForm';
+import zhMessages from '@/messages/zh.json';
 
 const mockPush = jest.fn();
 const mockLogin = jest.fn();
@@ -32,6 +35,20 @@ describe('LoginForm', () => {
     expect(screen.getByTestId('username-input')).toBeInTheDocument();
     expect(screen.getByTestId('password-input')).toBeInTheDocument();
     expect(screen.getByTestId('login-submit')).toBeInTheDocument();
+    expect(screen.getByTestId('login-submit').closest('form')).toHaveAttribute('method', 'post');
+  });
+
+  it('renders a POST form with disabled controls before hydration', () => {
+    const html = renderToString(
+      <NextIntlClientProvider locale="zh" messages={zhMessages}>
+        <LoginForm />
+      </NextIntlClientProvider>
+    );
+
+    expect(html).toContain('method="post"');
+    expect(html).toContain('name="username"');
+    expect(html).toContain('name="password"');
+    expect(html).toContain('disabled=""');
   });
 
   it('calls login on submit', async () => {

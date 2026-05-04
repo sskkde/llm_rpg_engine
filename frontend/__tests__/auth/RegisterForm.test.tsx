@@ -1,6 +1,9 @@
 import {screen, fireEvent, waitFor} from '@testing-library/react';
+import {renderToString} from 'react-dom/server';
+import {NextIntlClientProvider} from 'next-intl';
 import {renderWithIntl} from '@/test-utils';
 import { RegisterForm } from '@/components/auth/RegisterForm';
+import enMessages from '@/messages/en.json';
 
 const mockPush = jest.fn();
 const mockRegister = jest.fn();
@@ -33,6 +36,20 @@ describe('RegisterForm', () => {
     expect(screen.getByTestId('register-email-input')).toBeInTheDocument();
     expect(screen.getByTestId('register-password-input')).toBeInTheDocument();
     expect(screen.getByTestId('register-submit')).toBeInTheDocument();
+    expect(screen.getByTestId('register-submit').closest('form')).toHaveAttribute('method', 'post');
+  });
+
+  it('renders a POST form with disabled controls before hydration', () => {
+    const html = renderToString(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <RegisterForm />
+      </NextIntlClientProvider>
+    );
+
+    expect(html).toContain('method="post"');
+    expect(html).toContain('name="username"');
+    expect(html).toContain('name="password"');
+    expect(html).toContain('disabled=""');
   });
 
   it('calls register on submit', async () => {

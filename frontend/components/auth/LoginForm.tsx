@@ -1,6 +1,6 @@
 'use client';
 
-import React, {useState} from 'react';
+import React, {useState, useSyncExternalStore} from 'react';
 import {useRouter} from '@/i18n/navigation';
 import {useTranslations} from 'next-intl';
 import {useAuth} from '@/hooks/useAuth';
@@ -9,6 +9,10 @@ import {Button} from '@/components/ui/Button';
 import {ErrorMessage} from '@/components/ui/ErrorMessage';
 import {APIError} from '@/lib/api';
 
+const subscribeToHydration = () => () => {};
+const hydratedSnapshot = () => true;
+const serverSnapshot = () => false;
+
 export function LoginForm() {
   const router = useRouter();
   const {login} = useAuth();
@@ -16,10 +20,15 @@ export function LoginForm() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const isHydrated = useSyncExternalStore(subscribeToHydration, hydratedSnapshot, serverSnapshot);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!isHydrated) {
+      return;
+    }
 
     if (!username.trim() || !password) {
       setError(t('usernameRequired') + ' / ' + t('passwordRequired'));
@@ -50,7 +59,7 @@ export function LoginForm() {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form method="post" onSubmit={handleSubmit} className="space-y-4">
       {error && (
         <ErrorMessage
           message={error}
@@ -70,7 +79,7 @@ export function LoginForm() {
         placeholder={t('username')}
         autoComplete="username"
         required
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         data-testid="username-input"
       />
 
@@ -84,7 +93,7 @@ export function LoginForm() {
         placeholder={t('password')}
         autoComplete="current-password"
         required
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         data-testid="password-input"
       />
 
@@ -93,7 +102,7 @@ export function LoginForm() {
         variant="primary"
         size="lg"
         isLoading={isLoading}
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         className="w-full"
         data-testid="login-submit"
       >

@@ -1,6 +1,6 @@
 'use client';
 
-import React, {useState} from 'react';
+import React, {useState, useSyncExternalStore} from 'react';
 import {useTranslations} from 'next-intl';
 import {useRouter} from '@/i18n/navigation';
 import {useAuth} from '@/hooks/useAuth';
@@ -8,6 +8,10 @@ import {Input} from '@/components/ui/Input';
 import {Button} from '@/components/ui/Button';
 import {ErrorMessage} from '@/components/ui/ErrorMessage';
 import {APIError} from '@/lib/api';
+
+const subscribeToHydration = () => () => {};
+const hydratedSnapshot = () => true;
+const serverSnapshot = () => false;
 
 export function RegisterForm() {
   const router = useRouter();
@@ -17,10 +21,15 @@ export function RegisterForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const isHydrated = useSyncExternalStore(subscribeToHydration, hydratedSnapshot, serverSnapshot);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!isHydrated) {
+      return;
+    }
 
     if (!username.trim() || !password) {
       setError(t('usernameAndPasswordRequired'));
@@ -56,7 +65,7 @@ export function RegisterForm() {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form method="post" onSubmit={handleSubmit} className="space-y-4">
       {error && (
         <ErrorMessage
           message={error}
@@ -76,7 +85,7 @@ export function RegisterForm() {
         placeholder={t('chooseUsername')}
         autoComplete="username"
         required
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         data-testid="register-username-input"
       />
 
@@ -89,7 +98,7 @@ export function RegisterForm() {
         onChange={(e) => setEmail(e.target.value)}
         placeholder={t('enterEmail')}
         autoComplete="email"
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         data-testid="register-email-input"
       />
 
@@ -103,7 +112,7 @@ export function RegisterForm() {
         placeholder={t('createPassword')}
         autoComplete="new-password"
         required
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         helperText={t('passwordHelperText')}
         data-testid="register-password-input"
       />
@@ -113,7 +122,7 @@ export function RegisterForm() {
         variant="primary"
         size="lg"
         isLoading={isLoading}
-        disabled={isLoading}
+        disabled={!isHydrated || isLoading}
         className="w-full"
         data-testid="register-submit"
       >

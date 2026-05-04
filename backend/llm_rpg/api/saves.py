@@ -107,6 +107,13 @@ def list_save_slots(
     current_user: UserModel = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
+    from ..services.settings import check_maintenance_mode
+    if check_maintenance_mode(db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="System is in maintenance mode"
+        )
+    
     save_repo = SaveSlotRepository(db)
     slots = save_repo.get_by_user(current_user.id)
     

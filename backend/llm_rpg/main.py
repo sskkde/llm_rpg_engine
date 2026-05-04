@@ -57,6 +57,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
+class MaintenanceModeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        
+        if path.startswith("/admin") or path.startswith("/auth/login") or path.startswith("/auth/me"):
+            return await call_next(request)
+        
+        if path.startswith("/docs") or path.startswith("/openapi.json") or path.startswith("/redoc"):
+            return await call_next(request)
+        
+        try:
+            from .storage.database import get_db
+            from .services.settings import SystemSettingsService
+            db_gen = get_db()
+            db = next(db_gen)
+            try:
+                settings_service = SystemSettingsService(db)
+                settings = settings_service.get_settings()
+                if settings.maintenance_mode:
+                    return JSONResponse(
+                        status_code=503,
+                        content={"detail": "System is in maintenance mode"}
+                    )
+            finally:
+                try:
+                    next(db_gen)
+                except StopIteration:
+                    pass
+        except Exception:
+            pass
+        
+        return await call_next(request)
+
+
+app.add_middleware(MaintenanceModeMiddleware)
+
 app.include_router(auth.router)
 app.include_router(saves.router)
 app.include_router(sessions.router)

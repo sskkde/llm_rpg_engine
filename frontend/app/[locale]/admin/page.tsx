@@ -20,6 +20,7 @@ import type {
   AdminNPCTemplate, AdminItemTemplate, AdminQuestTemplate,
   AdminEventTemplate, AdminPromptTemplate,
 } from '@/types/api';
+import {SystemSettingsPanel} from '@/components/admin/SystemSettingsPanel';
 
 export default function AdminPage() {
   return (
@@ -141,7 +142,7 @@ function AdminSection<T extends AdminItem>({ title, fetchItems, updateItem, colu
 
 function AdminContent() {
   const t = useTranslations('Admin');
-  const tabIds = ['worlds', 'chapters', 'locations', 'npcs', 'items', 'quests', 'events', 'prompts'];
+  const tabIds = ['worlds', 'chapters', 'locations', 'npcs', 'items', 'quests', 'events', 'prompts', 'settings'];
   void tabIds;
 
   return (
@@ -158,6 +159,7 @@ function AdminContent() {
           <Tab value="quests">{t('quests')}</Tab>
           <Tab value="events">{t('events')}</Tab>
           <Tab value="prompts">{t('prompts')}</Tab>
+          <Tab value="settings">{t('settings')}</Tab>
         </TabList>
 
         <TabPanel value="worlds">
@@ -223,6 +225,9 @@ function AdminContent() {
             updateItem={updatePromptTemplate}
             columns={[{ key: 'name', label: t('name') }, { key: 'purpose', label: t('purpose') }]}
           />
+        </TabPanel>
+        <TabPanel value="settings">
+          <SystemSettingsPanel />
         </TabPanel>
       </Tabs>
     </div>

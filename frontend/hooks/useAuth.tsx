@@ -31,11 +31,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       try {
         const userData = await getCurrentUser();
-        if (isMounted) setUser(userData);
+        if (isMounted && localStorage.getItem('access_token') === token) {
+          setUser(userData);
+        }
       } catch {
-        localStorage.removeItem('access_token');
+        if (isMounted && localStorage.getItem('access_token') === token) {
+          localStorage.removeItem('access_token');
+          setUser(null);
+        }
       } finally {
-        if (isMounted) setIsLoading(false);
+        if (isMounted && localStorage.getItem('access_token') === token) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -50,6 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response: TokenResponse = await loginUser({ username, password });
     localStorage.setItem('access_token', response.access_token);
     setUser(response.user);
+    setIsLoading(false);
   };
 
   const register = async (username: string, password: string, email?: string) => {

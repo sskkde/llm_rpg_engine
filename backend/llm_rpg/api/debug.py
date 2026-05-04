@@ -41,6 +41,28 @@ from .auth import get_current_active_user
 router = APIRouter(prefix="/debug", tags=["debug"])
 
 
+async def require_debug_admin(
+    current_user: UserModel = Depends(get_current_active_user),
+    db: DBSession = Depends(get_db)
+) -> UserModel:
+    from ..services.settings import SystemSettingsService
+    settings_service = SystemSettingsService(db)
+    settings = settings_service.get_settings()
+    
+    if not settings.debug_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debug endpoints are disabled"
+        )
+    
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required for debug endpoints"
+        )
+    return current_user
+
+
 class DebugSessionLogEntry(BaseModel):
     id: str
     turn_no: int
@@ -319,7 +341,7 @@ def require_admin_role(user: UserModel) -> None:
 def get_session_logs(
     session_id: str,
     limit: int = Query(100, ge=1, le=1000),
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     """
@@ -355,7 +377,7 @@ def get_session_logs(
 @router.get("/sessions/{session_id}/state", response_model=DebugSessionStateResponse)
 def get_session_state(
     session_id: str,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     """
@@ -473,7 +495,7 @@ def get_session_state(
 def get_model_calls(
     session_id: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     """
@@ -504,7 +526,7 @@ def get_model_calls(
 @router.get("/errors", response_model=DebugErrorsResponse)
 def get_recent_errors(
     limit: int = Query(50, ge=1, le=500),
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     """
@@ -542,7 +564,7 @@ def get_recent_errors(
 def get_turn_debug(
     session_id: str,
     turn_no: int,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
 ):
     """
     Get detailed debug information for a specific turn.
@@ -614,7 +636,7 @@ def get_turn_debug(
 def get_context_build_audit(
     session_id: str,
     build_id: str,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
 ):
     """
     Get context build audit details.
@@ -688,7 +710,7 @@ def get_context_build_audit(
 def get_validation_audit(
     session_id: str,
     validation_id: str,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
 ):
     """
     Get validation result audit details.
@@ -742,7 +764,7 @@ def replay_session_turns(
     end_turn: int = Query(..., ge=1),
     perspective: str = Query("admin", regex="^(admin|player|auditor)$"),
     snapshot_id: Optional[str] = None,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
 ):
     """
     Replay session turns.
@@ -848,7 +870,7 @@ def replay_session_turns(
 def create_state_snapshot(
     session_id: str,
     turn_no: int,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db),
 ):
     """
@@ -1105,7 +1127,7 @@ def get_session_timeline(
     session_id: str,
     start_turn: int = Query(1, ge=1),
     end_turn: Optional[int] = Query(None, ge=1),
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     require_admin_role(current_user)
@@ -1165,7 +1187,7 @@ def get_session_timeline(
 def get_turn_timeline(
     session_id: str,
     turn_no: int,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     require_admin_role(current_user)
@@ -1223,7 +1245,7 @@ def get_turn_timeline(
 @router.get("/sessions/{session_id}/npcs", response_model=NPCListResponse)
 def list_session_npcs(
     session_id: str,
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     require_admin_role(current_user)
@@ -1251,7 +1273,7 @@ def get_npc_mind(
     session_id: str,
     npc_id: str,
     role: str = Query("debug", regex="^(player|admin|debug|auditor)$"),
-    current_user: UserModel = Depends(get_current_active_user),
+    current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
     view_role = ViewRole(role)

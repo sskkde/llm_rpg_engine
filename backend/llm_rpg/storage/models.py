@@ -172,11 +172,31 @@ class UserModel(Base):
     username = Column(String, nullable=False, unique=True)
     email = Column(String, nullable=True, unique=True)
     password_hash = Column(String, nullable=True)
+    is_admin = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
     last_login_at = Column(DateTime, nullable=True)
 
     save_slots = relationship("SaveSlotModel", back_populates="user")
     sessions = relationship("SessionModel", back_populates="user")
+
+
+class SystemSettingsModel(Base):
+    __tablename__ = "system_settings"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    provider_mode = Column(String, default="auto", nullable=False)
+    default_model = Column(String, default="gpt-4", nullable=True)
+    temperature = Column(Float, default=0.7, nullable=False)
+    max_tokens = Column(Integer, default=2000, nullable=False)
+    registration_enabled = Column(Boolean, default=True, nullable=False)
+    maintenance_mode = Column(Boolean, default=False, nullable=False)
+    debug_enabled = Column(Boolean, default=True, nullable=False)
+    openai_api_key_encrypted = Column(Text, nullable=True)
+    openai_api_key_last4 = Column(String, nullable=True)
+    secret_updated_at = Column(DateTime, nullable=True)
+    secret_cleared_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    updated_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
 
 
 class SaveSlotModel(Base):

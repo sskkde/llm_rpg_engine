@@ -41,14 +41,11 @@ async def require_admin(
     Raises:
         HTTPException: If user is not an admin
     """
-    # Check if user has admin role (stored in username for simplicity)
-    # In production, this would check a roles/permissions table
-    if not hasattr(current_user, 'username') or not current_user.username:
+    if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
         )
-    # For now, allow all authenticated users (can be restricted later)
     return current_user
 
 
@@ -59,9 +56,11 @@ def require_admin_role(user: UserModel) -> None:
     Raises:
         HTTPException: If user is not an admin
     """
-    # In a production system, this would check user.roles or similar
-    # For now, we allow access but log the attempt
-    pass
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
 
 
 # =============================================================================
@@ -967,3 +966,110 @@ def update_prompt_template(
 
     updated = repo.update(template_id, update_data)
     return PromptTemplateDetail.model_validate(updated)
+
+
+# =============================================================================
+# System Settings Models
+# =============================================================================
+
+class OpenAIKeyMetadata(BaseModel):
+    configured: bool
+    last4: Optional[str] = None
+    secret_updated_at: Optional[str] = None
+    secret_cleared_at: Optional[str] = None
+
+
+class LLMSettingsResponse(BaseModel):
+    provider_mode: str
+    default_model: Optional[str] = None
+    temperature: float
+    max_tokens: int
+    openai_api_key: OpenAIKeyMetadata
+
+
+class OpsSettingsResponse(BaseModel):
+    registration_enabled: bool
+    maintenance_mode: bool
+    debug_enabled: bool
+
+
+class SystemSettingsResponse(BaseModel):
+    llm: LLMSettingsResponse
+    ops: OpsSettingsResponse
+    updated_at: Optional[str] = None
+    updated_by_user_id: Optional[str] = None
+
+
+class OpenAIKeyAction(BaseModel):
+    action: str
+    value: Optional[str] = None
+
+
+class LLMSettingsUpdate(BaseModel):
+    provider_mode: Optional[str] = None
+    default_model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    openai_api_key: Optional[OpenAIKeyAction] = None
+
+
+class OpsSettingsUpdate(BaseModel):
+    registration_enabled: Optional[bool] = None
+    maintenance_mode: Optional[bool] = None
+    debug_enabled: Optional[bool] = None
+
+
+class SystemSettingsUpdateRequest(BaseModel):
+    llm: Optional[LLMSettingsUpdate] = None
+    ops: Optional[OpsSettingsUpdate] = None
+
+
+# =============================================================================
+# System Settings Endpoints
+# =============================================================================
+
+@router.get("/system-settings", response_model=SystemSettingsResponse)
+def get_system_settings(
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db)
+):
+    require_admin_role(current_user)
+    from ..services.settings import SystemSettingsService
+    service = SystemSettingsService(db)
+    return service.get_settings_dict()
+
+
+@router.patch("/system-settings", response_model=SystemSettingsResponse)
+def update_system_settings(
+    request: SystemSettingsUpdateRequest,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db)
+):
+    require_admin_role(current_user)
+    from ..services.settings import SystemSettingsService
+    service = SystemSettingsService(db)
+    
+    update_data = request.model_dump(exclude_unset=True)
+    
+    if "llm" in update_data and update_data["llm"] is not None:
+        llm_data = update_data["llm"]
+        if "provider_mode" in llm_data and llm_data["provider_mode"] == "openai":
+            effective_key = service.get_effective_openai_key()
+            if not effective_key:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Cannot set provider_mode to openai without an effective API key"
+                )
+    
+    try:
+        return service.update_settings(update_data, current_user.id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update settings"
+        )

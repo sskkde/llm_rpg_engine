@@ -55,6 +55,7 @@ class UserResponse(BaseModel):
     id: str
     username: str
     email: Optional[str] = None
+    is_admin: bool = False
     created_at: datetime
     last_login_at: Optional[datetime] = None
 
@@ -173,12 +174,16 @@ def register_user(
     request: UserRegisterRequest,
     db: Session = Depends(get_db)
 ):
-    """
-    Register a new user account.
+    from ..services.settings import SystemSettingsService
+    settings_service = SystemSettingsService(db)
+    settings = settings_service.get_settings()
     
-    Creates a new user with the provided username, email, and password.
-    Returns an access token and user information upon success.
-    """
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is currently disabled"
+        )
+    
     user_repo = UserRepository(db)
     
     # Check if username already exists

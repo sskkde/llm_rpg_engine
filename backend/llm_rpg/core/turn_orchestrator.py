@@ -46,7 +46,12 @@ from ..models.events import (
 )
 from ..models.common import ProposedAction, CommittedAction, ValidationResult
 from ..models.perspectives import PlayerPerspective, NarratorPerspective
-from ..models.proposals import InputIntentProposal
+from ..models.proposals import (
+    InputIntentProposal,
+    WorldTickProposal,
+    SceneEventProposal,
+    CandidateEvent,
+)
 
 from .event_log import EventLog
 from .canonical_state import CanonicalStateManager
@@ -58,6 +63,7 @@ from .context_builder import ContextBuilder
 from ..engines.world_engine import WorldEngine
 from ..engines.npc_engine import NPCEngine
 from ..engines.narration_engine import NarrationEngine
+from ..engines.scene_engine import SceneEngine
 from ..llm.proposal_pipeline import ProposalPipeline
 
 
@@ -92,6 +98,7 @@ class TurnOrchestrator:
         world_engine: WorldEngine,
         npc_engine: NPCEngine,
         narration_engine: NarrationEngine,
+        scene_engine: Optional[SceneEngine] = None,
         proposal_pipeline: Optional[ProposalPipeline] = None,
     ):
         self._state_manager = state_manager
@@ -103,9 +110,9 @@ class TurnOrchestrator:
         self._world_engine = world_engine
         self._npc_engine = npc_engine
         self._narration_engine = narration_engine
+        self._scene_engine = scene_engine
         self._proposal_pipeline = proposal_pipeline
         
-        # Audit log for debugging and replay
         self._audit_log: List[Dict[str, Any]] = []
     
     def execute_turn(
@@ -161,12 +168,19 @@ class TurnOrchestrator:
             working_state.world_state.current_time = world_tick_event.time_after
             events.append(world_tick_event)
             
-            # Step 5: Check scene triggers (on working state)
-            scene_triggers = self._action_scheduler.collect_scene_triggers(working_state)
-            for trigger in scene_triggers:
-                scene_event = self._create_scene_event(
+            # Step 5: Generate scene candidates (LLM-driven with deterministic fallback)
+            scene_candidates = self._generate_scene_candidates(
+                game_state=self._state_to_dict(working_state),
+                current_turn=turn_index,
+                parsed_intent=parsed_intent,
+                session_id=session_id,
+            )
+            
+            for candidate_event in scene_candidates.candidate_events:
+                scene_event = self._create_scene_event_from_candidate(
                     turn_index=turn_index,
-                    trigger=trigger,
+                    scene_id=scene_candidates.scene_id,
+                    candidate=candidate_event,
                 )
                 events.append(scene_event)
             
@@ -465,6 +479,124 @@ class TurnOrchestrator:
             summary=f"Scene triggered: {trigger.get('event_candidate', 'unknown')}",
             visible_to_player=True,
             importance=trigger.get("priority", 0.5),
+        )
+    
+    def _generate_scene_candidates(
+        self,
+        game_state: Dict[str, Any],
+        current_turn: int,
+        parsed_intent: Optional[ParsedIntent],
+        session_id: Optional[str],
+    ) -> "SceneEventProposal":
+        from ..models.proposals import SceneEventProposal, create_fallback_scene_event
+        
+        if self._scene_engine is not None:
+            return self._scene_engine.generate_scene_candidates(
+                game_state=game_state,
+                current_turn=current_turn,
+                parsed_intent=parsed_intent,
+                session_id=session_id,
+            )
+        
+        scene_triggers = self._action_scheduler.collect_scene_triggers(
+            self._dict_to_state(game_state)
+        )
+        
+        if scene_triggers:
+            from ..models.proposals import (
+                CandidateEvent,
+                ProposalAuditMetadata,
+                ProposalType,
+                ProposalSource,
+                ValidationStatus,
+            )
+            
+            candidate_events = [
+                CandidateEvent(
+                    event_type="scene_trigger",
+                    description=f"Trigger: {t.get('trigger_id', 'unknown')}",
+                    target_entity_ids=[],
+                    effects={},
+                    importance=t.get("priority", 0.5),
+                    visibility="player_visible",
+                )
+                for t in scene_triggers
+            ]
+            
+            return SceneEventProposal(
+                scene_id=scene_triggers[0].get("scene_id", "unknown"),
+                candidate_events=candidate_events,
+                state_deltas=[],
+                affected_entities=[],
+                visibility="player_visible",
+                confidence=0.3,
+                audit=ProposalAuditMetadata(
+                    proposal_type=ProposalType.SCENE_EVENT,
+                    source_engine=ProposalSource.SCENE_ENGINE,
+                    fallback_used=True,
+                    fallback_reason="SceneEngine not available, using ActionScheduler triggers",
+                    validation_status=ValidationStatus.PASSED,
+                ),
+                is_fallback=True,
+            )
+        
+        return create_fallback_scene_event(
+            scene_id="none",
+            reason="No scene engine or triggers available"
+        )
+    
+    def _create_scene_event_from_candidate(
+        self,
+        turn_index: int,
+        scene_id: str,
+        candidate: "CandidateEvent",
+    ) -> SceneEvent:
+        from ..models.proposals import CandidateEvent
+        
+        return SceneEvent(
+            event_id=f"evt_scene_{turn_index:06d}_{uuid.uuid4().hex[:8]}",
+            turn_index=turn_index,
+            scene_id=scene_id,
+            trigger="llm_proposal",
+            summary=candidate.description,
+            visible_to_player=candidate.visibility == "player_visible",
+            importance=candidate.importance,
+            affected_entities=candidate.target_entity_ids,
+        )
+    
+    def _state_to_dict(self, state: CanonicalState) -> Dict[str, Any]:
+        return {
+            "player_location": state.player_state.location_id,
+            "world_time": state.world_state.current_time.model_dump(),
+            "npc_states": {
+                npc_id: {"mood": npc.mood, "location_id": npc.location_id}
+                for npc_id, npc in state.npc_states.items()
+            },
+            "quest_states": {},
+        }
+    
+    def _dict_to_state(self, data: Dict[str, Any]) -> CanonicalState:
+        return CanonicalState(
+            player_state=PlayerState(
+                entity_id="player",
+                location_id=data.get("player_location", "unknown"),
+            ),
+            world_state=WorldState(
+                entity_id="world",
+                world_id="default_world",
+                current_time=WorldTime(
+                    calendar="修仙历",
+                    season="春",
+                    day=1,
+                    period=data.get("world_time", {}).get("period", "辰时"),
+                ),
+            ),
+            current_scene_state=CurrentSceneState(
+                entity_id="scene",
+                scene_id="default_scene",
+                location_id="unknown",
+            ),
+            npc_states={},
         )
     
     def _process_npc_decisions(

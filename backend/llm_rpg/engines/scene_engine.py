@@ -5,11 +5,16 @@ Manages scene triggers, state transitions, and scene lifecycle.
 Provides helpers for scene activation and state management.
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, TYPE_CHECKING
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from ..llm.proposal_pipeline import ProposalPipeline
+    from ..models.proposals import SceneEventProposal, ParsedIntent
 
 
 class SceneState(str, Enum):
@@ -100,14 +105,20 @@ class SceneEngine:
     - Scene state management
     - Scene activation/deactivation
     - Actor management within scenes
+    - LLM-driven scene event proposals via ProposalPipeline
     """
     
-    def __init__(self):
+    def __init__(
+        self,
+        proposal_pipeline: Optional["ProposalPipeline"] = None,
+    ):
         self._scenes: Dict[str, Scene] = {}
         self._location_scenes: Dict[str, List[str]] = {}
         self._active_scenes: List[str] = []
         self._trigger_history: List[Dict[str, Any]] = []
         self._max_history = 100
+        self._proposal_pipeline = proposal_pipeline
+        self._audit_log: List[Dict[str, Any]] = []
     
     def register_scene(self, scene: Scene) -> str:
         """Register a scene with the engine."""
@@ -383,3 +394,215 @@ class SceneEngine:
                 self._location_scenes[scene.location_id].remove(scene_id)
         
         return True
+    
+    def generate_scene_candidates(
+        self,
+        game_state: Dict[str, Any],
+        current_turn: int,
+        parsed_intent: Optional["ParsedIntent"] = None,
+        session_id: Optional[str] = None,
+    ) -> "SceneEventProposal":
+        """
+        Generate scene event candidates using LLM via ProposalPipeline.
+        
+        Returns a SceneEventProposal containing:
+        - Candidate events for the current scene
+        - Environmental reactions
+        - Visible object changes
+        - Danger hints
+        - Available/blocked action suggestions
+        
+        The proposal is a CANDIDATE only - no state mutation occurs.
+        Falls back to deterministic trigger evaluation if LLM unavailable.
+        """
+        from ..models.proposals import (
+            SceneEventProposal,
+            ProposalAuditMetadata,
+            ProposalType,
+            ProposalSource,
+            create_fallback_scene_event,
+        )
+        
+        active_scenes = self.get_active_scenes()
+        if not active_scenes:
+            return create_fallback_scene_event(
+                scene_id="none",
+                reason="No active scenes"
+            )
+        
+        current_scene = active_scenes[0]
+        scene_id = current_scene.scene_id
+        
+        scene_context = self._build_scene_context(current_scene, game_state, parsed_intent)
+        
+        if self._proposal_pipeline is not None:
+            try:
+                proposal = self._generate_proposal_via_pipeline(
+                    scene_id=scene_id,
+                    scene_context=scene_context,
+                    session_id=session_id,
+                    turn_no=current_turn,
+                )
+                
+                if proposal and not proposal.is_fallback:
+                    self._audit_log.append({
+                        "audit_id": f"scene_llm_{uuid.uuid4().hex[:8]}",
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "scene_proposal_llm_success",
+                        "scene_id": scene_id,
+                        "confidence": proposal.confidence,
+                        "events_count": len(proposal.candidate_events),
+                    })
+                    return proposal
+                else:
+                    fallback_reason = proposal.audit.fallback_reason if proposal else "Unknown error"
+                    self._audit_log.append({
+                        "audit_id": f"scene_fallback_{uuid.uuid4().hex[:8]}",
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "scene_proposal_fallback",
+                        "scene_id": scene_id,
+                        "reason": fallback_reason,
+                    })
+                    
+            except Exception as e:
+                self._audit_log.append({
+                    "audit_id": f"scene_error_{uuid.uuid4().hex[:8]}",
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "scene_proposal_error",
+                    "scene_id": scene_id,
+                    "error": str(e),
+                })
+        
+        proposal = self._create_fallback_proposal(scene_id, game_state, current_turn)
+        
+        self._audit_log.append({
+            "audit_id": f"scene_fallback_{uuid.uuid4().hex[:8]}",
+            "timestamp": datetime.now().isoformat(),
+            "type": "scene_proposal_fallback",
+            "scene_id": scene_id,
+            "reason": "LLM unavailable or failed, using deterministic triggers",
+        })
+        
+        return proposal
+    
+    def _build_scene_context(
+        self,
+        scene: Scene,
+        game_state: Dict[str, Any],
+        parsed_intent: Optional["ParsedIntent"],
+    ) -> Dict[str, Any]:
+        context = {
+            "scene_id": scene.scene_id,
+            "scene_name": scene.name,
+            "scene_state": scene.state.value,
+            "location_id": scene.location_id,
+            "active_actors": scene.active_actors,
+            "blocked_paths": scene.blocked_paths,
+            "available_actions": scene.available_actions,
+            "scene_context": scene.context,
+            "player_location": game_state.get("player_location"),
+            "world_time": game_state.get("world_time"),
+        }
+        
+        if parsed_intent:
+            context["player_intent"] = {
+                "intent_type": parsed_intent.intent_type,
+                "target": parsed_intent.target,
+                "risk_level": parsed_intent.risk_level,
+            }
+        
+        return context
+    
+    def _generate_proposal_via_pipeline(
+        self,
+        scene_id: str,
+        scene_context: Dict[str, Any],
+        session_id: Optional[str],
+        turn_no: int,
+    ) -> Optional["SceneEventProposal"]:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run,
+                        self._proposal_pipeline.generate_scene_event(
+                            scene_id=scene_id,
+                            scene_context=scene_context,
+                            session_id=session_id,
+                            turn_no=turn_no,
+                        )
+                    )
+                    return future.result(timeout=30.0)
+            else:
+                return loop.run_until_complete(
+                    self._proposal_pipeline.generate_scene_event(
+                        scene_id=scene_id,
+                        scene_context=scene_context,
+                        session_id=session_id,
+                        turn_no=turn_no,
+                    )
+                )
+        except Exception:
+            return None
+    
+    def _create_fallback_proposal(
+        self,
+        scene_id: str,
+        game_state: Dict[str, Any],
+        current_turn: int,
+    ) -> "SceneEventProposal":
+        from ..models.proposals import (
+            SceneEventProposal,
+            CandidateEvent,
+            StateDeltaCandidate,
+            ProposalAuditMetadata,
+            ProposalType,
+            ProposalSource,
+            ValidationStatus,
+        )
+        
+        triggered = self.evaluate_triggers(game_state, current_turn)
+        
+        candidate_events = []
+        state_deltas = []
+        
+        for trigger in triggered:
+            candidate_events.append(CandidateEvent(
+                event_type="scene_trigger",
+                description=f"Scene trigger activated: {trigger.trigger_id}",
+                target_entity_ids=[],
+                effects={},
+                importance=trigger.priority,
+                visibility="player_visible",
+            ))
+        
+        scene = self.get_scene(scene_id)
+        scene_name = scene.name if scene else None
+        
+        return SceneEventProposal(
+            scene_id=scene_id,
+            scene_name=scene_name,
+            candidate_events=candidate_events,
+            state_deltas=state_deltas,
+            affected_entities=[],
+            suggested_transition=None,
+            transition_reason=None,
+            visibility="player_visible",
+            confidence=0.3 if triggered else 0.0,
+            audit=ProposalAuditMetadata(
+                proposal_type=ProposalType.SCENE_EVENT,
+                source_engine=ProposalSource.SCENE_ENGINE,
+                fallback_used=not bool(triggered),
+                fallback_reason="LLM unavailable or failed" if not triggered else "Using deterministic triggers",
+                validation_status=ValidationStatus.PASSED,
+            ),
+            is_fallback=True,
+        )
+    
+    def get_audit_log(self) -> List[Dict[str, Any]]:
+        return self._audit_log.copy()
+    
+    def clear_audit_log(self) -> None:
+        self._audit_log.clear()

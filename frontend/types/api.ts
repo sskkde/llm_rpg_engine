@@ -517,11 +517,13 @@ export interface OpenAIKeyMetadata {
 }
 
 export interface LLMSettings {
-  provider_mode: 'auto' | 'openai' | 'mock';
+  provider_mode: 'auto' | 'openai' | 'mock' | 'custom';
   default_model?: string;
   temperature: number;
   max_tokens: number;
   openai_api_key: OpenAIKeyMetadata;
+  custom_base_url?: string | null;
+  custom_api_key: OpenAIKeyMetadata;
 }
 
 export interface OpsSettings {
@@ -543,11 +545,13 @@ export interface OpenAIKeyAction {
 }
 
 export interface LLMSettingsUpdate {
-  provider_mode?: 'auto' | 'openai' | 'mock';
+  provider_mode?: 'auto' | 'openai' | 'mock' | 'custom';
   default_model?: string;
   temperature?: number;
   max_tokens?: number;
   openai_api_key?: OpenAIKeyAction;
+  custom_base_url?: string | null;
+  custom_api_key?: OpenAIKeyAction;
 }
 
 export interface OpsSettingsUpdate {

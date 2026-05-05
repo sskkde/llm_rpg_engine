@@ -13,8 +13,8 @@ import { LogPanel } from '@/components/game/LogPanel';
 import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
 import { useTurnStream } from '@/hooks/useTurnStream';
-import { getSessionSnapshot } from '@/lib/api';
-import type { SessionSnapshot } from '@/types/api';
+import { getSessionSnapshot, getAdventureLog } from '@/lib/api';
+import type { SessionSnapshot, AdventureLogEntry } from '@/types/api';
 
 export default function GameSessionPage({ params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = use(params);
@@ -28,7 +28,7 @@ export default function GameSessionPage({ params }: { params: Promise<{ sessionI
 function GameSessionContent({ sessionId }: { sessionId: string }) {
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [logEntries, setLogEntries] = useState<Array<{ turnIndex: number; action: string; narration: string }>>([]);
+  const [logEntries, setLogEntries] = useState<AdventureLogEntry[]>([]);
 
   const { isStreaming, isPending, narration, error, usedFallback, submitTurn, clearError } = useTurnStream(sessionId);
 
@@ -45,23 +45,37 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
     const load = async () => {
       setIsLoading(true);
       await refreshSnapshot();
+      try {
+        const entries = await getAdventureLog(sessionId);
+        setLogEntries(entries);
+      } catch {
+        // Adventure log load failed; empty state handles this gracefully
+      }
       setIsLoading(false);
     };
     load();
-  }, [refreshSnapshot]);
+  }, [refreshSnapshot, sessionId]);
 
   const handleAction = useCallback(async (action: string) => {
     const result = await submitTurn(action);
     if (result) {
-      setLogEntries((prev) => [
-        ...prev,
-        { turnIndex: result.turn_index, action, narration: result.narration },
-      ]);
+      try {
+        const entries = await getAdventureLog(sessionId);
+        setLogEntries(entries);
+      } catch {
+        // Refresh failed after successful turn; stale log is acceptable
+      }
       await refreshSnapshot();
     }
-  }, [submitTurn, refreshSnapshot]);
+  }, [submitTurn, refreshSnapshot, sessionId]);
 
   const t = useTranslations('Game');
+
+  const currentNarration = isStreaming
+    ? narration
+    : logEntries.length > 0
+      ? logEntries[logEntries.length - 1].narration
+      : '';
 
   if (isLoading) {
     return (
@@ -90,7 +104,7 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
         <div className="lg:col-span-2 space-y-4">
-          <NarrationPanel narration={narration} isStreaming={isStreaming} />
+          <NarrationPanel narration={currentNarration} isStreaming={isStreaming} />
           <RecommendedActions
             actions={recommendedActions}
             onSelect={handleAction}

@@ -18,6 +18,7 @@ from ..storage.repositories import (
     SessionStateRepository,
     SessionPlayerStateRepository,
     EventLogRepository,
+    LocationRepository,
 )
 
 from .auth import get_current_active_user
@@ -55,6 +56,28 @@ router = APIRouter(prefix="/game", tags=["game"])
 
 # Cache for game orchestrators to persist state across requests
 _game_orchestrators: dict[str, TurnOrchestrator] = {}
+
+
+def _resolve_location_id(
+    canonical_location_id: Optional[str],
+    db: Session,
+    session: SessionModel,
+) -> Optional[str]:
+    if not canonical_location_id:
+        return None
+
+    location_repo = LocationRepository(db)
+    location = location_repo.get_by_id(canonical_location_id)
+    if location and location.world_id == session.world_id:
+        return location.id
+
+    if canonical_location_id.startswith("loc_"):
+        code = canonical_location_id[4:]
+        location = location_repo.get_by_code(session.world_id, code)
+        if location:
+            return location.id
+
+    return None
 
 
 def get_or_create_orchestrator(game_id: str) -> TurnOrchestrator:
@@ -255,16 +278,31 @@ def execute_turn(
 
         # Update session state in database
         state_repo = SessionStateRepository(db)
+        resolved_location_id = _resolve_location_id(
+            result["player_state"].get("location_id"),
+            db,
+            session,
+        )
         state_repo.create_or_update({
             "session_id": session_id,
             "current_time": result["world_time"].get("period", "未知"),
             "time_phase": result["world_time"].get("period", "未知"),
             "active_mode": "exploration",
-            "current_location_id": result["player_state"].get("location_id"),
+            "current_location_id": resolved_location_id,
         })
         
         # Update last played
         session_repo.update_last_played(session_id)
+        
+        # Create player_turn adventure log entry
+        event_log_repo = EventLogRepository(db)
+        event_log_repo.create_or_get_player_turn(
+            session_id=session_id,
+            turn_no=next_turn,
+            input_text=request.action,
+            narrative_text=result["narration"],
+            result_json={"transaction_id": result["transaction_id"]},
+        )
         
         return TurnResponse(
             turn_index=result["turn_index"],

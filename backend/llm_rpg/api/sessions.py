@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
-from ..storage.models import UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel
-from ..storage.repositories import SessionRepository, SessionStateRepository, SessionPlayerStateRepository
+from ..storage.models import UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel, EventLogModel
+from ..storage.repositories import SessionRepository, SessionStateRepository, SessionPlayerStateRepository, EventLogRepository
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -45,6 +45,15 @@ class LoadSessionResponse(BaseModel):
     session_id: str
     world_id: str
     message: str = "Session loaded successfully"
+
+
+class AdventureLogEntryResponse(BaseModel):
+    id: str
+    turn_no: int
+    event_type: str
+    action: Optional[str] = None
+    narration: str
+    occurred_at: datetime
 
 
 class SessionListItem(BaseModel):
@@ -166,3 +175,42 @@ def load_session(
         session_id=session.id,
         world_id=session.world_id
     )
+
+
+@router.get("/{session_id}/adventure-log", response_model=List[AdventureLogEntryResponse])
+def get_adventure_log(
+    session_id: str,
+    current_user: UserModel = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
+    if session.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+    
+    event_log_repo = EventLogRepository(db)
+    event_log_repo.ensure_initial_scene(session_id)
+    
+    entries = event_log_repo.get_by_session_ordered(session_id)
+    
+    return [
+        AdventureLogEntryResponse(
+            id=entry.id,
+            turn_no=entry.turn_no,
+            event_type=entry.event_type,
+            action=entry.input_text,
+            narration=entry.narrative_text or "",
+            occurred_at=entry.occurred_at
+        )
+        for entry in entries
+    ]

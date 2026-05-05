@@ -81,18 +81,19 @@ class LLMProvider(ABC):
 
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible provider."""
-    
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o", base_url: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None):
+
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o", base_url: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None, timeout: float = 30.0):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model
         self.base_url = base_url
+        self.timeout = timeout
         self._client = None
     
     def _get_client(self):
         if self._client is None:
             try:
                 import openai
-                kwargs: Dict[str, Any] = {"api_key": self.api_key}
+                kwargs: Dict[str, Any] = {"api_key": self.api_key, "timeout": self.timeout}
                 if self.base_url:
                     kwargs["base_url"] = self.base_url
                 self._client = openai.AsyncOpenAI(**kwargs)

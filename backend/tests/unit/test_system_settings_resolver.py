@@ -220,6 +220,24 @@ class TestEncryptionService:
         assert decrypted == plaintext
         assert encrypted != plaintext.encode()
 
+    def test_encrypt_returns_text_token(self, monkeypatch):
+        monkeypatch.setenv("SYSTEM_SETTINGS_SECRET_KEY", TEST_SECRET_KEY)
+
+        service = SecretEncryptionService()
+        encrypted = service.encrypt("sk-test1234567890abcdef")
+
+        assert isinstance(encrypted, str)
+        assert encrypted.startswith("gAAAA")
+
+    def test_decrypts_legacy_hex_text_token(self, monkeypatch):
+        monkeypatch.setenv("SYSTEM_SETTINGS_SECRET_KEY", TEST_SECRET_KEY)
+
+        service = SecretEncryptionService()
+        encrypted = service.encrypt("sk-test1234567890abcdef")
+        legacy_hex_text = "\\x" + encrypted.encode().hex()
+
+        assert service.decrypt(legacy_hex_text) == "sk-test1234567890abcdef"
+
     def test_missing_key_raises_error(self, monkeypatch):
         monkeypatch.setenv("SYSTEM_SETTINGS_SECRET_KEY", "")
 

@@ -123,6 +123,15 @@ export interface LoadSessionResponse {
   message: string;
 }
 
+export interface AdventureLogEntry {
+  id: string;
+  turn_no: number;
+  event_type: string;
+  action?: string | null;
+  narration: string;
+  occurred_at: string;
+}
+
 // =============================================================================
 // Game Turn Types
 // =============================================================================

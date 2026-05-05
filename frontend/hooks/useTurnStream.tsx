@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef } from 'react';
 import { createTurnStream, executeTurn } from '@/lib/api';
-import type { TurnResponse, SSEEventData } from '@/types/api';
+import type { TurnResponse } from '@/types/api';
 
 interface TurnState {
   isStreaming: boolean;
@@ -20,12 +20,12 @@ export function useTurnStream(sessionId: string | null) {
     error: null,
     usedFallback: false,
   });
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<{ abort(): void } | null>(null);
 
   const cleanup = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.abort();
+      streamRef.current = null;
     }
   }, []);
 
@@ -75,73 +75,68 @@ export function useTurnStream(sessionId: string | null) {
     });
 
     try {
-      const eventSource = createTurnStream(sessionId, action);
-      eventSourceRef.current = eventSource;
+      const handle = createTurnStream(sessionId, action);
+      streamRef.current = handle;
 
       let accumulatedNarration = '';
-      let turnResponse: TurnResponse | null = null;
 
-      return new Promise<TurnResponse | null>((resolve) => {
-        eventSource.onmessage = (event) => {
-          try {
-            const data: SSEEventData = JSON.parse(event.data);
+      try {
+        for await (const event of handle.events) {
+          switch (event.event) {
+            case 'narration_delta':
+              accumulatedNarration += event.delta;
+              setState((prev) => ({
+                ...prev,
+                narration: accumulatedNarration,
+              }));
+              break;
 
-            switch (data.event) {
-              case 'narration_delta':
-                accumulatedNarration += data.delta;
-                setState((prev) => ({
-                  ...prev,
-                  narration: accumulatedNarration,
-                }));
-                break;
-
-              case 'turn_completed':
-                turnResponse = {
-                  turn_index: data.turn_index,
-                  narration: data.narration || accumulatedNarration,
-                  world_time: data.world_time,
-                  player_state: data.player_state,
-                  events_committed: 0,
-                  actions_committed: 0,
-                  validation_passed: true,
-                  transaction_id: '',
-                };
-                cleanup();
-                setState({
-                  isStreaming: false,
-                  isPending: false,
-                  narration: turnResponse.narration,
-                  error: null,
-                  usedFallback: false,
-                });
-                resolve(turnResponse);
-                break;
-
-              case 'turn_error':
-                cleanup();
-                setState((prev) => ({
-                  ...prev,
-                  isStreaming: false,
-                  error: data.message || 'Turn failed',
-                }));
-                resolve(null);
-                break;
+            case 'turn_completed': {
+              const turnResponse: TurnResponse = {
+                turn_index: event.turn_index,
+                narration: event.narration || accumulatedNarration,
+                world_time: event.world_time,
+                player_state: event.player_state,
+                events_committed: 0,
+                actions_committed: 0,
+                validation_passed: true,
+                transaction_id: '',
+              };
+              cleanup();
+              setState({
+                isStreaming: false,
+                isPending: false,
+                narration: turnResponse.narration,
+                error: null,
+                usedFallback: false,
+              });
+              return turnResponse;
             }
-          } catch {
-          }
-        };
 
-        eventSource.onerror = () => {
-          cleanup();
-          setState((prev) => ({
-            ...prev,
-            isStreaming: false,
-            usedFallback: true,
-          }));
-          fallbackTurn(action).then(resolve);
-        };
-      });
+            case 'turn_error':
+              cleanup();
+              setState((prev) => ({
+                ...prev,
+                isStreaming: false,
+                isPending: false,
+                error: event.message || 'Turn failed',
+              }));
+              return null;
+          }
+        }
+      } catch (err) {
+        console.warn('Turn stream failed, falling back to non-streaming turn', err);
+      }
+
+      cleanup();
+      setState((prev) => ({
+        ...prev,
+        isStreaming: false,
+        usedFallback: true,
+      }));
+      return fallbackTurn(action);
     } catch {
+      cleanup();
       return fallbackTurn(action);
     }
   }, [sessionId, cleanup, fallbackTurn]);

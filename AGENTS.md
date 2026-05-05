@@ -6,6 +6,9 @@
 - Runtime infra is root `docker-compose.yml`: PostgreSQL + pgvector on 5432 and Redis on 6379.
 - Before frontend changes, read `frontend/AGENTS.md` and the relevant Next 16 docs under `frontend/node_modules/next/dist/docs/`.
 
+## Communication
+- 回复用户时使用中文。
+
 ## Commands agents usually guess wrong
 - Backend setup: `cd backend && pip install -r requirements.txt`.
 - Backend dev server: `cd backend && uvicorn llm_rpg.main:app --reload --port 8000`; do not use legacy `backend/app_legacy.py` or `uvicorn app:app`.

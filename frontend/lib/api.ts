@@ -1,8 +1,9 @@
 import type {
   TokenResponse, UserRegisterRequest, UserLoginRequest, User,
   SaveSlot, SaveSlotDetail, SaveSlotCreateRequest, SaveSlotUpdateRequest, ManualSaveRequest, ManualSaveResponse,
-  GameSession, SessionSnapshot, LoadSessionResponse,
+  GameSession, SessionSnapshot, LoadSessionResponse, AdventureLogEntry,
   TurnRequest, TurnResponse,
+  SSEEventData,
   WorldState, WorldSummary, Chapter, Location, NPC, Quest,
   StartCombatRequest, StartCombatResponse, CombatSession, CombatActionRequest, SubmitActionResponse,
   EndCombatResponse, CombatEventsResponse,
@@ -132,6 +133,10 @@ export async function loadSession(sessionId: string): Promise<LoadSessionRespons
   });
 }
 
+export async function getAdventureLog(sessionId: string): Promise<AdventureLogEntry[]> {
+  return fetchWithAuth<AdventureLogEntry[]>(`/sessions/${sessionId}/adventure-log`);
+}
+
 // =============================================================================
 // Game
 // =============================================================================
@@ -147,22 +152,133 @@ export async function executeTurn(sessionId: string, data: TurnRequest): Promise
 // Streaming
 // =============================================================================
 
+export interface TurnStreamHandle {
+  abort(): void;
+  events: AsyncIterable<SSEEventData>;
+}
+
+async function* parseSSEStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+): AsyncGenerator<SSEEventData> {
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() || '';
+
+      for (const chunk of chunks) {
+        if (!chunk.trim()) continue;
+
+        let eventType = '';
+        const dataLines: string[] = [];
+
+        for (const line of chunk.split('\n')) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            dataLines.push(line.slice(6));
+          }
+        }
+
+        if (eventType && dataLines.length > 0) {
+          try {
+            const data = JSON.parse(dataLines.join('\n'));
+            yield { event: eventType, ...data } as SSEEventData;
+          } catch (err) {
+            console.warn('Failed to parse SSE event', err);
+          }
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      let eventType = '';
+      const dataLines: string[] = [];
+
+      for (const line of buffer.split('\n')) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          dataLines.push(line.slice(6));
+        }
+      }
+
+      if (eventType && dataLines.length > 0) {
+        try {
+          const data = JSON.parse(dataLines.join('\n'));
+          yield { event: eventType, ...data } as SSEEventData;
+        } catch (err) {
+          console.warn('Failed to parse buffered SSE event', err);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function createTurnStream(
   sessionId: string,
   action: string,
-  useMock: boolean = false
-): EventSource {
-  const endpoint = useMock 
+  useMock: boolean = false,
+): TurnStreamHandle {
+  const controller = new AbortController();
+  const endpoint = useMock
     ? `/streaming/sessions/${sessionId}/turn/mock`
     : `/streaming/sessions/${sessionId}/turn`;
-  
-  // EventSource does not support headers, so we use URL query parameter
-  const url = new URL(`${API_BASE_URL}${endpoint}`);
-  const eventSource = new EventSource(url.toString(), {
-    withCredentials: true,
+
+  const token = localStorage.getItem('access_token');
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const responsePromise = fetch(`${API_BASE_URL}${endpoint}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ action }),
+    signal: controller.signal,
   });
-  
-  return eventSource;
+
+  const events: AsyncIterable<SSEEventData> = {
+    async *[Symbol.asyncIterator]() {
+      let response: Response;
+      try {
+        response = await responsePromise;
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return;
+        throw err;
+      }
+
+      if (!response.ok) {
+        const error = await response
+          .json()
+          .catch(() => ({ detail: 'Stream request failed' }));
+        throw new APIError(
+          response.status,
+          error.detail || 'Stream request failed',
+        );
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      yield* parseSSEStream(reader, decoder);
+    },
+  };
+
+  return {
+    abort: () => controller.abort(),
+    events,
+  };
 }
 
 // =============================================================================

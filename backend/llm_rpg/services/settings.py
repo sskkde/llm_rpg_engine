@@ -2,7 +2,7 @@ import os
 import base64
 import ipaddress
 import socket
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -56,19 +56,26 @@ class SecretEncryptionService:
         self._ensure_initialized()
         return self._key_valid
 
-    def encrypt(self, plaintext: str) -> bytes:
+    def encrypt(self, plaintext: str) -> str:
         self._ensure_initialized()
         if not self._fernet:
             raise MissingEncryptionKeyError("SYSTEM_SETTINGS_SECRET_KEY not configured")
-        return self._fernet.encrypt(plaintext.encode())
+        return self._fernet.encrypt(plaintext.encode()).decode()
 
-    def decrypt(self, ciphertext: bytes) -> str:
+    def _normalize_ciphertext(self, ciphertext: Union[str, bytes]) -> bytes:
+        if isinstance(ciphertext, bytes):
+            return ciphertext
+        if ciphertext.startswith("\\x"):
+            return bytes.fromhex(ciphertext[2:])
+        return ciphertext.encode()
+
+    def decrypt(self, ciphertext: Union[str, bytes]) -> str:
         self._ensure_initialized()
         if not self._fernet:
             raise MissingEncryptionKeyError("SYSTEM_SETTINGS_SECRET_KEY not configured")
         try:
-            return self._fernet.decrypt(ciphertext).decode()
-        except InvalidToken:
+            return self._fernet.decrypt(self._normalize_ciphertext(ciphertext)).decode()
+        except (InvalidToken, ValueError):
             raise EncryptionError("Failed to decrypt secret")
 
     def get_last4(self, plaintext: str) -> str:
@@ -88,8 +95,22 @@ class SystemSettingsService:
     def get_settings(self) -> SystemSettingsModel:
         return self.repo.get_singleton()
 
+    def _secret_is_usable(self, encrypted: Optional[Union[str, bytes]]) -> bool:
+        if not encrypted:
+            return False
+        encryption = self._get_encryption_service()
+        if not encryption.is_available:
+            return False
+        try:
+            encryption.decrypt(encrypted)
+        except EncryptionError:
+            return False
+        return True
+
     def get_settings_dict(self) -> dict:
         settings = self.get_settings()
+        openai_key_usable = self._secret_is_usable(settings.openai_api_key_encrypted)
+        custom_key_usable = self._secret_is_usable(settings.custom_api_key_encrypted)
         return {
             "llm": {
                 "provider_mode": settings.provider_mode,
@@ -97,15 +118,15 @@ class SystemSettingsService:
                 "temperature": settings.temperature,
                 "max_tokens": settings.max_tokens,
                 "openai_api_key": {
-                    "configured": settings.openai_api_key_encrypted is not None,
-                    "last4": settings.openai_api_key_last4,
+                    "configured": openai_key_usable,
+                    "last4": settings.openai_api_key_last4 if openai_key_usable else None,
                     "secret_updated_at": settings.secret_updated_at.isoformat() if settings.secret_updated_at else None,
                     "secret_cleared_at": settings.secret_cleared_at.isoformat() if settings.secret_cleared_at else None,
                 },
                 "custom_base_url": settings.custom_base_url,
                 "custom_api_key": {
-                    "configured": settings.custom_api_key_encrypted is not None,
-                    "last4": settings.custom_api_key_last4,
+                    "configured": custom_key_usable,
+                    "last4": settings.custom_api_key_last4 if custom_key_usable else None,
                     "secret_updated_at": settings.custom_secret_updated_at.isoformat() if settings.custom_secret_updated_at else None,
                     "secret_cleared_at": settings.custom_secret_cleared_at.isoformat() if settings.custom_secret_cleared_at else None,
                 },

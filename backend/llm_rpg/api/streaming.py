@@ -6,7 +6,8 @@ Events are emitted in order:
 1. turn_started
 2. event_committed (state/events committed to DB)
 3. narration_delta (streaming narration text)
-4. turn_completed
+4. DB writes (adventure log, session state, last_played)
+5. turn_completed
 """
 
 import asyncio
@@ -22,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
 from ..storage.models import SessionModel
-from ..storage.repositories import SessionRepository
+from ..storage.repositories import SessionRepository, LocationRepository, EventLogRepository
 
 from .auth import get_current_active_user
 from ..storage.models import UserModel
@@ -56,6 +57,28 @@ from ..llm.parsers import OutputParser, ParsedNarration
 router = APIRouter(prefix="/streaming", tags=["streaming"])
 
 _game_orchestrators: Dict[str, TurnOrchestrator] = {}
+
+
+def _resolve_location_id(
+    canonical_location_id: Optional[str],
+    db: Session,
+    world_id: str,
+) -> Optional[str]:
+    if not canonical_location_id:
+        return None
+
+    location_repo = LocationRepository(db)
+    location = location_repo.get_by_id(canonical_location_id)
+    if location and location.world_id == world_id:
+        return location.id
+
+    if canonical_location_id.startswith("loc_"):
+        code = canonical_location_id[4:]
+        location = location_repo.get_by_code(world_id, code)
+        if location:
+            return location.id
+
+    return None
 
 
 class SSEEvent(BaseModel):
@@ -213,15 +236,16 @@ async def generate_narration_stream(
         ),
     ]
     
-    async for chunk in llm_service.generate_stream(
-        messages=messages,
-        template_id="narration_v1",
-        session_id=session_id,
-        turn_no=turn_index,
-        temperature=0.8,
-        max_tokens=500,
-    ):
-        yield chunk
+    async with asyncio.timeout(30):
+        async for chunk in llm_service.generate_stream(
+            messages=messages,
+            template_id="narration_v1",
+            session_id=session_id,
+            turn_no=turn_index,
+            temperature=0.8,
+            max_tokens=500,
+        ):
+            yield chunk
 
 
 async def execute_turn_stream(
@@ -230,6 +254,7 @@ async def execute_turn_stream(
     turn_index: int,
     player_input: str,
     db: Session,
+    world_id: str,
     use_mock: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
@@ -239,7 +264,8 @@ async def execute_turn_stream(
     1. turn_started
     2. event_committed (after atomic commit)
     3. narration_delta (streaming text)
-    4. turn_completed
+    4. DB writes (adventure log, session state, last_played)
+    5. turn_completed
     """
     event_id = str(uuid.uuid4())
     
@@ -248,24 +274,29 @@ async def execute_turn_stream(
     settings_service = SystemSettingsService(db)
     provider_config = settings_service.get_provider_config()
     
+    provider_error = None
     if use_mock or provider_config["provider_mode"] == "mock":
         provider = MockLLMProvider()
     elif provider_config["provider_mode"] == "custom":
+        settings = settings_service.get_settings()
         custom_key = settings_service.get_effective_custom_api_key()
         custom_url = settings_service.get_effective_custom_base_url()
-        if not custom_key or not custom_url:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Custom provider requires both custom_base_url and custom API key"
+        if not custom_url:
+            provider_error = "Custom provider requires custom_base_url"
+        elif not custom_key:
+            if settings.custom_api_key_encrypted:
+                provider_error = "Custom provider API key cannot be decrypted. Set a new custom API key in system settings."
+            else:
+                provider_error = "Custom provider requires custom API key"
+        else:
+            from ..llm.service import OpenAIProvider
+            provider = OpenAIProvider(
+                api_key=custom_key,
+                base_url=custom_url,
+                model=provider_config.get("default_model"),
+                temperature=provider_config.get("temperature"),
+                max_tokens=provider_config.get("max_tokens"),
             )
-        from ..llm.service import OpenAIProvider
-        provider = OpenAIProvider(
-            api_key=custom_key,
-            base_url=custom_url,
-            model=provider_config.get("default_model"),
-            temperature=provider_config.get("temperature"),
-            max_tokens=provider_config.get("max_tokens"),
-        )
     else:
         effective_key = settings_service.get_effective_openai_key()
         if effective_key:
@@ -277,13 +308,24 @@ async def execute_turn_stream(
                 max_tokens=provider_config.get("max_tokens"),
             )
         elif provider_config["provider_mode"] == "openai":
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="No effective OpenAI API key available"
-            )
+            provider_error = "No effective OpenAI API key available"
         else:
             provider = MockLLMProvider()
     
+    if provider_error:
+        yield format_sse(
+            "turn_error",
+            {
+                "session_id": session_id,
+                "turn_index": turn_index,
+                "error_type": "provider_error",
+                "message": provider_error,
+                "timestamp": datetime.now().isoformat(),
+            },
+            event_id=f"{event_id}_error"
+        )
+        return
+
     llm_service = get_llm_service(provider=provider, db_session=db)
     
     try:
@@ -356,7 +398,35 @@ async def execute_turn_stream(
         # Get full narration
         full_narration = "".join(accumulated_narration) if accumulated_narration else result.get("narration", "")
         
-        # 4. Emit turn_completed
+        # 4. Persist adventure log, session state, and last_played BEFORE turn_completed
+        event_log_repo = EventLogRepository(db)
+        event_log_repo.create_or_get_player_turn(
+            session_id=session_id,
+            turn_no=turn_index,
+            input_text=player_input,
+            narrative_text=full_narration,
+            result_json={"transaction_id": result.get("transaction_id")},
+        )
+        
+        from ..storage.repositories import SessionStateRepository
+        state_repo = SessionStateRepository(db)
+        resolved_location_id = _resolve_location_id(
+            result["player_state"].get("location_id"),
+            db,
+            world_id,
+        )
+        state_repo.create_or_update({
+            "session_id": session_id,
+            "current_time": result["world_time"].get("period", "未知"),
+            "time_phase": result["world_time"].get("period", "未知"),
+            "active_mode": "exploration",
+            "current_location_id": resolved_location_id,
+        })
+        
+        session_repo = SessionRepository(db)
+        session_repo.update_last_played(session_id)
+        
+        # 5. Emit turn_completed
         yield format_sse(
             "turn_completed",
             {
@@ -369,19 +439,6 @@ async def execute_turn_stream(
             },
             event_id=f"{event_id}_complete"
         )
-        
-        from ..storage.repositories import SessionStateRepository
-        state_repo = SessionStateRepository(db)
-        state_repo.create_or_update({
-            "session_id": session_id,
-            "current_time": result["world_time"].get("period", "未知"),
-            "time_phase": result["world_time"].get("period", "未知"),
-            "active_mode": "exploration",
-            "current_location_id": result["player_state"].get("location_id"),
-        })
-        
-        session_repo = SessionRepository(db)
-        session_repo.update_last_played(session_id)
         
     except TurnValidationError as e:
         yield format_sse(
@@ -398,13 +455,14 @@ async def execute_turn_stream(
             event_id=f"{event_id}_error"
         )
     except Exception as e:
+        provider_timeout = isinstance(e, TimeoutError)
         yield format_sse(
             "turn_error",
             {
                 "session_id": session_id,
                 "turn_index": turn_index,
-                "error_type": "unexpected_error",
-                "message": "Unexpected error while streaming turn",
+                "error_type": "provider_timeout" if provider_timeout else "unexpected_error",
+                "message": "LLM provider request timed out" if provider_timeout else "Unexpected error while streaming turn",
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_error"
@@ -464,6 +522,7 @@ async def stream_turn(
             turn_index=next_turn,
             player_input=request.action,
             db=db,
+            world_id=session.world_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -520,6 +579,7 @@ async def stream_turn_mock(
             turn_index=next_turn,
             player_input=request.action,
             db=db,
+            world_id=session.world_id,
             use_mock=True,
         ),
         media_type="text/event-stream",

@@ -359,7 +359,10 @@ class EventLogModel(Base):
     combat_sessions = relationship("CombatSessionModel", back_populates="trigger_event")
     memory_facts = relationship("MemoryFactModel", back_populates="source_event")
 
-    __table_args__ = (Index("idx_event_logs_session_turn", "session_id", "turn_no"),)
+    __table_args__ = (
+        Index("idx_event_logs_session_turn", "session_id", "turn_no"),
+        UniqueConstraint("session_id", "turn_no", "event_type", name="uq_event_logs_session_turn_type"),
+    )
 
 
 class MemorySummaryModel(Base):

@@ -1,20 +1,28 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import {useTranslations} from 'next-intl';
-
-interface LogEntry {
-  turnIndex: number;
-  action: string;
-  narration: string;
-}
+import { AdventureLogEntry } from '@/types/api';
 
 interface LogPanelProps {
-  entries: LogEntry[];
+  entries: AdventureLogEntry[];
 }
 
 export function LogPanel({ entries }: LogPanelProps) {
   const t = useTranslations('Game');
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
+  const toggleEntry = (id: string) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   if (entries.length === 0) {
     return (
@@ -33,16 +41,65 @@ export function LogPanel({ entries }: LogPanelProps) {
         {t('adventureLog')}
       </h3>
       <div className="space-y-3 max-h-[300px] overflow-y-auto">
-        {entries.map((entry, index) => (
-          <div key={index} className="text-sm border-l-2 border-indigo-300 dark:border-indigo-600 pl-3">
-            <p className="font-medium text-slate-700 dark:text-slate-300">
-              {t('turn', {turnIndex: entry.turnIndex})}: {entry.action}
-            </p>
-            <p className="text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
-              {entry.narration}
-            </p>
-          </div>
-        ))}
+        {entries.map((entry) => {
+          const isExpanded = expandedIds.has(entry.id);
+          const isInitialScene = entry.event_type === 'initial_scene';
+          
+          return (
+            <div key={entry.id} className="text-sm border-l-2 border-indigo-300 dark:border-indigo-600 pl-3">
+              <button
+                aria-expanded={isExpanded}
+                aria-controls={`log-entry-${entry.id}`}
+                onClick={() => toggleEntry(entry.id)}
+                className="w-full text-left focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 rounded"
+                aria-label={isExpanded ? t('collapseLogEntry') : t('expandLogEntry')}
+              >
+                <p className="font-medium text-slate-700 dark:text-slate-300">
+                  {isInitialScene 
+                    ? t('initialScene')
+                    : t('turn', {turnIndex: entry.turn_no}) + (entry.action ? `: ${entry.action}` : '')
+                  }
+                </p>
+                {!isExpanded && (
+                  <p className="text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                    {entry.narration}
+                  </p>
+                )}
+              </button>
+              
+              {isExpanded && (
+                <div id={`log-entry-${entry.id}`} className="mt-2 space-y-2">
+                  {isInitialScene ? (
+                    <p className="text-slate-600 dark:text-slate-300">
+                      {entry.narration}
+                    </p>
+                  ) : (
+                    <>
+                      {entry.action && (
+                        <div>
+                          <span className="font-medium text-slate-500 dark:text-slate-400">
+                            {t('playerAction')}:
+                          </span>
+                          <p className="text-slate-700 dark:text-slate-300">
+                            {entry.action}
+                          </p>
+                        </div>
+                      )}
+                      <div>
+                        <span className="font-medium text-slate-500 dark:text-slate-400">
+                          {t('turnNarration')}:
+                        </span>
+                        <p className="text-slate-600 dark:text-slate-300">
+                          {entry.narration}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

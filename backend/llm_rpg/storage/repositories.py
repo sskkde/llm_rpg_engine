@@ -111,6 +111,14 @@ class LocationRepository(BaseRepository):
     def get_by_chapter(self, chapter_id: str) -> List[LocationModel]:
         return self.db.query(LocationModel).filter(LocationModel.chapter_id == chapter_id).all()
 
+    def get_by_code(self, world_id: str, code: str) -> Optional[LocationModel]:
+        return self.db.query(LocationModel).filter(
+            and_(
+                LocationModel.world_id == world_id,
+                LocationModel.code == code
+            )
+        ).first()
+
 
 class NPCTemplateRepository(BaseRepository):
     def __init__(self, db: Session):
@@ -381,6 +389,63 @@ class EventLogRepository(BaseRepository):
         return self.db.query(EventLogModel).filter(
             EventLogModel.session_id == session_id
         ).order_by(desc(EventLogModel.turn_no)).limit(limit).all()
+
+    def get_by_session_ordered(self, session_id: str) -> List[EventLogModel]:
+        return self.db.query(EventLogModel).filter(
+            EventLogModel.session_id == session_id
+        ).order_by(EventLogModel.turn_no.asc()).all()
+
+    def get_by_session_turn_event(self, session_id: str, turn_no: int, event_type: str) -> Optional[EventLogModel]:
+        return self.db.query(EventLogModel).filter(
+            and_(
+                EventLogModel.session_id == session_id,
+                EventLogModel.turn_no == turn_no,
+                EventLogModel.event_type == event_type
+            )
+        ).first()
+
+    def ensure_initial_scene(self, session_id: str) -> EventLogModel:
+        existing = self.get_by_session_turn_event(session_id, 0, "initial_scene")
+        if existing:
+            return existing
+        
+        from .models import generate_uuid
+        initial_scene = self.create({
+            "id": generate_uuid(),
+            "session_id": session_id,
+            "turn_no": 0,
+            "event_type": "initial_scene",
+            "input_text": None,
+            "structured_action": None,
+            "result_json": None,
+            "narrative_text": "山门广场晨雾未散，青石阶上还残留着昨夜的露水。远处试炼堂的钟声缓缓响起，提醒你今日的修行试炼即将开始。你站在广场中央，可以环顾四周、查看状态，或向试炼堂前进。",
+        })
+        return initial_scene
+
+    def create_or_get_player_turn(
+        self, 
+        session_id: str, 
+        turn_no: int, 
+        input_text: str, 
+        narrative_text: str, 
+        result_json: Optional[Dict] = None
+    ) -> EventLogModel:
+        existing = self.get_by_session_turn_event(session_id, turn_no, "player_turn")
+        if existing:
+            return existing
+        
+        from .models import generate_uuid
+        player_turn = self.create({
+            "id": generate_uuid(),
+            "session_id": session_id,
+            "turn_no": turn_no,
+            "event_type": "player_turn",
+            "input_text": input_text,
+            "structured_action": None,
+            "result_json": result_json,
+            "narrative_text": narrative_text,
+        })
+        return player_turn
 
 
 class MemorySummaryRepository(BaseRepository):

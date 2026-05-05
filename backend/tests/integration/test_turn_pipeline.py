@@ -491,3 +491,87 @@ class TestDeterministicPipeline:
         
         # All transaction IDs should be unique
         assert len(transaction_ids) == len(set(transaction_ids))
+
+
+class TestLLMIntentParsingIntegration:
+    """Tests for LLM-driven intent parsing integration in turn pipeline."""
+    
+    def test_turn_uses_keyword_parser_when_no_llm(self, client, auth_headers, db_engine, sample_world_data):
+        """Test that turn execution works with keyword parser when LLM is unavailable."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        response = client.post(
+            f"/game/sessions/{session_id}/turn",
+            json={"action": "去东边"},
+            headers=auth_headers
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["validation_passed"] is True
+        assert "narration" in data
+    
+    def test_turn_handles_chinese_input(self, client, auth_headers, db_engine, sample_world_data):
+        """Test that Chinese input is handled correctly."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        chinese_actions = ["观察四周", "走向山门", "与师姐交谈", "攻击敌人"]
+        
+        for action in chinese_actions:
+            response = client.post(
+                f"/game/sessions/{session_id}/turn",
+                json={"action": action},
+                headers=auth_headers
+            )
+            
+            assert response.status_code == 200
+            assert response.json()["validation_passed"] is True
+    
+    def test_turn_handles_english_input(self, client, auth_headers, db_engine, sample_world_data):
+        """Test that English input is handled correctly."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        english_actions = ["look around", "move east", "talk to npc", "attack enemy"]
+        
+        for action in english_actions:
+            response = client.post(
+                f"/game/sessions/{session_id}/turn",
+                json={"action": action},
+                headers=auth_headers
+            )
+            
+            assert response.status_code == 200
+            assert response.json()["validation_passed"] is True
+    
+    def test_turn_handles_unknown_input_gracefully(self, client, auth_headers, db_engine, sample_world_data):
+        """Test that unknown input is handled gracefully with default action."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        response = client.post(
+            f"/game/sessions/{session_id}/turn",
+            json={"action": "do something random and unknown"},
+            headers=auth_headers
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["validation_passed"] is True
+        assert "narration" in data
+    
+    def test_multiple_turns_with_mixed_input(self, client, auth_headers, db_engine, sample_world_data):
+        """Test multiple turns with mixed Chinese and English input."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        mixed_actions = ["观察四周", "move north", "与NPC交谈", "inspect the area", "等待"]
+        
+        for i, action in enumerate(mixed_actions, 1):
+            response = client.post(
+                f"/game/sessions/{session_id}/turn",
+                json={"action": action},
+                headers=auth_headers
+            )
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["turn_index"] == i
+            assert data["validation_passed"] is True

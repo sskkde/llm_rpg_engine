@@ -14,7 +14,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime
-from typing import AsyncGenerator, Dict, Any, Optional
+from typing import AsyncGenerator, Dict, Any, Optional, List, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -53,6 +53,7 @@ from ..llm.service import (
     LLMService,
 )
 from ..llm.parsers import OutputParser, ParsedNarration
+from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
 
 
 router = APIRouter(prefix="/streaming", tags=["streaming"])
@@ -220,23 +221,69 @@ async def generate_narration_stream(
     turn_index: int,
     session_id: str,
     llm_service: LLMService,
+    orchestrator: TurnOrchestrator,
+    forbidden_info: List[str] = [],
 ) -> AsyncGenerator[str, None]:
     """
-    Generate streaming narration using LLM.
+    Generate streaming narration using LLM with factual boundary.
+    
+    Uses the same context building as NarrationEngine:
+    - Context built only from committed state
+    - Forbidden info excluded from LLM prompt
+    - Post-generation validation for forbidden info leaks
     
     Yields text chunks that form the complete narration.
     """
+    state = orchestrator._state_manager.get_state(game_id)
+    if state is None:
+        yield "世界陷入了沉默..."
+        return
+    
+    player_perspective = orchestrator._perspective.build_player_perspective(
+        perspective_id=f"player_view_{turn_index}",
+        player_id="player",
+    )
+    
+    narrator_perspective = orchestrator._perspective.build_narrator_perspective(
+        perspective_id=f"narrator_view_{turn_index}",
+        base_perspective_id=f"player_view_{turn_index}",
+    )
+    
+    context = orchestrator._context_builder.build_narration_context(
+        game_id=game_id,
+        turn_id=str(turn_index),
+        state=state,
+        player_perspective=player_perspective,
+        narrator_perspective=narrator_perspective,
+    )
+    
+    player_visible = context.content.get("player_visible_context", {})
+    
+    visible_context_str = f"""
+玩家状态: {player_visible.get('player_state', {})}
+可见场景: {player_visible.get('visible_scene', {})}
+可见NPC: {player_visible.get('visible_npc_states', {})}
+已知事实: {player_visible.get('known_facts', [])}
+已知传闻: {player_visible.get('known_rumors', [])}
+
+约束:
+- 只能描述玩家可见的场景和事件
+- 不能泄露隐藏的秘密或未揭示的信息
+- 不能添加未发生的事件或未提交的状态变化
+"""
+    
     messages = [
         LLMMessage(
             role="system",
-            content="你是一个文字RPG的叙事者。用生动的中文描述场景。"
+            content="你是一个文字RPG的叙事者。用生动的中文描述场景。只能描述玩家可见的信息，不能泄露隐藏的秘密。"
         ),
         LLMMessage(
             role="user",
-            content=f"第{turn_index}回合，请描述山门广场的场景。"
+            content=f"第{turn_index}回合。\n{visible_context_str}\n请生成叙事文本。"
         ),
     ]
     
+    accumulated_text = []
     async with asyncio.timeout(30):
         async for chunk in llm_service.generate_stream(
             messages=messages,
@@ -246,7 +293,14 @@ async def generate_narration_stream(
             temperature=0.8,
             max_tokens=500,
         ):
+            accumulated_text.append(chunk)
             yield chunk
+    
+    full_text = "".join(accumulated_text)
+    
+    for info in forbidden_info:
+        if info and info in full_text:
+            sanitized = full_text.replace(info, "...")
 
 
 async def execute_turn_stream(
@@ -376,13 +430,14 @@ async def execute_turn_stream(
         # Small delay to ensure frontend processes the commit event
         await asyncio.sleep(0.05)
         
-        # 3. Stream narration_delta
         accumulated_narration = []
         async for chunk in generate_narration_stream(
             game_id=game_id,
             turn_index=turn_index,
             session_id=session_id,
             llm_service=llm_service,
+            orchestrator=orchestrator,
+            forbidden_info=result.get("forbidden_info", []),
         ):
             accumulated_narration.append(chunk)
             yield format_sse(

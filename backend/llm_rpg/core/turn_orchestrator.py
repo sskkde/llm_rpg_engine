@@ -46,6 +46,7 @@ from ..models.events import (
 )
 from ..models.common import ProposedAction, CommittedAction, ValidationResult
 from ..models.perspectives import PlayerPerspective, NarratorPerspective
+from ..models.proposals import InputIntentProposal
 
 from .event_log import EventLog
 from .canonical_state import CanonicalStateManager
@@ -57,6 +58,7 @@ from .context_builder import ContextBuilder
 from ..engines.world_engine import WorldEngine
 from ..engines.npc_engine import NPCEngine
 from ..engines.narration_engine import NarrationEngine
+from ..llm.proposal_pipeline import ProposalPipeline
 
 
 class TurnValidationError(Exception):
@@ -90,6 +92,7 @@ class TurnOrchestrator:
         world_engine: WorldEngine,
         npc_engine: NPCEngine,
         narration_engine: NarrationEngine,
+        proposal_pipeline: Optional[ProposalPipeline] = None,
     ):
         self._state_manager = state_manager
         self._event_log = event_log
@@ -100,6 +103,7 @@ class TurnOrchestrator:
         self._world_engine = world_engine
         self._npc_engine = npc_engine
         self._narration_engine = narration_engine
+        self._proposal_pipeline = proposal_pipeline
         
         # Audit log for debugging and replay
         self._audit_log: List[Dict[str, Any]] = []
@@ -334,9 +338,80 @@ class TurnOrchestrator:
         )
     
     def _parse_intent(self, player_input: str) -> Optional[ParsedIntent]:
-        """Parse player input into structured intent."""
-        # Simple rule-based parsing for now
-        # In production, this would use an LLM
+        """
+        Parse player input into structured intent.
+        
+        Uses ProposalPipeline for LLM-driven intent parsing with deterministic
+        keyword-based fallback for timeout, malformed JSON, schema errors,
+        or validator rejection.
+        
+        Audit records both accepted LLM parse and fallback reasons.
+        """
+        # Try LLM-based parsing if proposal pipeline is available
+        if self._proposal_pipeline is not None:
+            try:
+                import asyncio
+                proposal = asyncio.get_event_loop().run_until_complete(
+                    self._proposal_pipeline.generate_input_intent(
+                        raw_input=player_input,
+                        session_id=None,
+                        turn_no=0,
+                    )
+                )
+                
+                # Check if proposal is valid (not a fallback)
+                if proposal and not proposal.is_fallback:
+                    # Record successful LLM parse in audit log
+                    self._audit_log.append({
+                        "audit_id": f"intent_llm_{uuid.uuid4().hex[:8]}",
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "intent_parse_llm_success",
+                        "source": "proposal_pipeline",
+                        "intent_type": proposal.intent_type,
+                        "target": proposal.target,
+                        "confidence": proposal.confidence,
+                        "repair_status": proposal.audit.repair_status.value,
+                        "latency_ms": proposal.audit.latency_ms,
+                    })
+                    
+                    # Convert InputIntentProposal to ParsedIntent
+                    return ParsedIntent(
+                        intent_type=proposal.intent_type,
+                        target=proposal.target,
+                        risk_level=proposal.risk_level,
+                        raw_tokens=proposal.raw_tokens,
+                    )
+                else:
+                    # LLM returned fallback - record reason and use keyword parser
+                    fallback_reason = proposal.audit.fallback_reason if proposal else "Unknown error"
+                    self._audit_log.append({
+                        "audit_id": f"intent_fallback_{uuid.uuid4().hex[:8]}",
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "intent_parse_fallback",
+                        "source": "keyword_parser",
+                        "reason": fallback_reason,
+                        "repair_status": proposal.audit.repair_status.value if proposal else "none",
+                    })
+                    
+            except Exception as e:
+                # LLM call failed - record error and fall back to keyword parser
+                self._audit_log.append({
+                    "audit_id": f"intent_error_{uuid.uuid4().hex[:8]}",
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "intent_parse_error",
+                    "source": "keyword_parser",
+                    "error": str(e),
+                })
+        
+        # Deterministic keyword-based fallback parser
+        return self._parse_intent_keyword(player_input)
+    
+    def _parse_intent_keyword(self, player_input: str) -> ParsedIntent:
+        """
+        Deterministic keyword-based intent parser.
+        
+        Used as fallback when LLM parsing fails or is unavailable.
+        """
         input_lower = player_input.lower()
         
         intent_type = "action"

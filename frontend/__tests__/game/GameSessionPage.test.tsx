@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, fireEvent } from '@testing-library/react';
 import { renderWithIntl } from '@/test-utils';
 import GameSessionPage from '@/app/[locale]/game/[sessionId]/page';
 
@@ -58,6 +58,7 @@ describe('GameSessionPage - adventure log loading', () => {
         event_type: 'initial_scene',
         action: null,
         narration: '你站在一座古老的山门前，云雾缭绕。',
+        recommended_actions: ['环顾四周', '查看状态'],
         occurred_at: '2025-01-01T00:00:00Z',
       },
     ]);
@@ -77,6 +78,7 @@ describe('GameSessionPage - adventure log loading', () => {
         event_type: 'initial_scene',
         action: null,
         narration: '你站在一座古老的山门前。',
+        recommended_actions: ['环顾四周'],
         occurred_at: '2025-01-01T00:00:00Z',
       },
       {
@@ -85,6 +87,7 @@ describe('GameSessionPage - adventure log loading', () => {
         event_type: 'player_turn',
         action: '观察四周',
         narration: '你环顾四周，发现一条蜿蜒的小路通向山林深处。',
+        recommended_actions: ['沿小路前进', '返回山门'],
         occurred_at: '2025-01-01T00:01:00Z',
       },
     ]);
@@ -93,6 +96,60 @@ describe('GameSessionPage - adventure log loading', () => {
 
     await waitFor(() => {
       expect(screen.getByText('你环顾四周，发现一条蜿蜒的小路通向山林深处。')).toBeInTheDocument();
+    });
+  });
+
+  it('shows clicked log entry narration in the narration panel', async () => {
+    mockGetAdventureLog.mockResolvedValue([
+      {
+        id: 'entry-1',
+        turn_no: 0,
+        event_type: 'initial_scene',
+        action: null,
+        narration: '初始场景叙事。',
+        recommended_actions: ['环顾四周'],
+        occurred_at: '2025-01-01T00:00:00Z',
+      },
+      {
+        id: 'entry-2',
+        turn_no: 1,
+        event_type: 'player_turn',
+        action: '观察四周',
+        narration: '最新回合叙事。',
+        recommended_actions: ['继续前进'],
+        occurred_at: '2025-01-01T00:01:00Z',
+      },
+    ]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText('最新回合叙事。')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getAllByRole('button', { name: /在叙事栏中显示这条日志/ })[0]);
+
+    expect(screen.getByText('初始场景叙事。')).toBeInTheDocument();
+  });
+
+  it('uses structured recommended actions from the latest log entry', async () => {
+    mockGetAdventureLog.mockResolvedValue([
+      {
+        id: 'entry-1',
+        turn_no: 0,
+        event_type: 'initial_scene',
+        action: null,
+        narration: '初始场景叙事。',
+        recommended_actions: ['检查石阶', '前往试炼堂'],
+        occurred_at: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '检查石阶' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '前往试炼堂' })).toBeInTheDocument();
     });
   });
 });

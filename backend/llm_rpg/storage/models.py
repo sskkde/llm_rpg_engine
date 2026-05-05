@@ -195,6 +195,11 @@ class SystemSettingsModel(Base):
     openai_api_key_last4 = Column(String, nullable=True)
     secret_updated_at = Column(DateTime, nullable=True)
     secret_cleared_at = Column(DateTime, nullable=True)
+    custom_base_url = Column(String, nullable=True)
+    custom_api_key_encrypted = Column(Text, nullable=True)
+    custom_api_key_last4 = Column(String, nullable=True)
+    custom_secret_updated_at = Column(DateTime, nullable=True)
+    custom_secret_cleared_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     updated_by_user_id = Column(String, ForeignKey("users.id"), nullable=True)
 

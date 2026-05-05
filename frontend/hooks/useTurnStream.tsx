@@ -95,6 +95,7 @@ export function useTurnStream(sessionId: string | null) {
               const turnResponse: TurnResponse = {
                 turn_index: event.turn_index,
                 narration: event.narration || accumulatedNarration,
+                recommended_actions: event.recommended_actions ?? [],
                 world_time: event.world_time,
                 player_state: event.player_state,
                 events_committed: 0,

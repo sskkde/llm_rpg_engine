@@ -129,6 +129,7 @@ export interface AdventureLogEntry {
   event_type: string;
   action?: string | null;
   narration: string;
+  recommended_actions: string[];
   occurred_at: string;
 }
 
@@ -143,6 +144,7 @@ export interface TurnRequest {
 export interface TurnResponse {
   turn_index: number;
   narration: string;
+  recommended_actions: string[];
   world_time: {
     calendar?: string;
     season?: string;
@@ -211,6 +213,7 @@ export interface TurnCompletedEvent {
   session_id: string;
   turn_index: number;
   narration: string;
+  recommended_actions?: string[];
   player_state: {
     entity_id?: string;
     name?: string;

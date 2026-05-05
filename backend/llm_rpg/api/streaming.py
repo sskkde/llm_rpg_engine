@@ -250,6 +250,22 @@ async def execute_turn_stream(
     
     if use_mock or provider_config["provider_mode"] == "mock":
         provider = MockLLMProvider()
+    elif provider_config["provider_mode"] == "custom":
+        custom_key = settings_service.get_effective_custom_api_key()
+        custom_url = settings_service.get_effective_custom_base_url()
+        if not custom_key or not custom_url:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Custom provider requires both custom_base_url and custom API key"
+            )
+        from ..llm.service import OpenAIProvider
+        provider = OpenAIProvider(
+            api_key=custom_key,
+            base_url=custom_url,
+            model=provider_config.get("default_model"),
+            temperature=provider_config.get("temperature"),
+            max_tokens=provider_config.get("max_tokens"),
+        )
     else:
         effective_key = settings_service.get_effective_openai_key()
         if effective_key:
@@ -388,7 +404,7 @@ async def execute_turn_stream(
                 "session_id": session_id,
                 "turn_index": turn_index,
                 "error_type": "unexpected_error",
-                "message": str(e),
+                "message": "Unexpected error while streaming turn",
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_error"

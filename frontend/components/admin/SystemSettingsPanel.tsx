@@ -15,8 +15,8 @@ export function SystemSettingsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  
-  const [providerMode, setProviderMode] = useState<'auto' | 'openai' | 'mock'>('auto');
+
+  const [providerMode, setProviderMode] = useState<'auto' | 'openai' | 'mock' | 'custom'>('auto');
   const [defaultModel, setDefaultModel] = useState('');
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(2000);
@@ -25,6 +25,9 @@ export function SystemSettingsPanel() {
   const [debugEnabled, setDebugEnabled] = useState(true);
   const [secretAction, setSecretAction] = useState<'keep' | 'set' | 'clear'>('keep');
   const [secretValue, setSecretValue] = useState('');
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [customSecretAction, setCustomSecretAction] = useState<'keep' | 'set' | 'clear'>('keep');
+  const [customSecretValue, setCustomSecretValue] = useState('');
 
   const loadSettings = useCallback(async () => {
     setIsLoading(true);
@@ -39,6 +42,7 @@ export function SystemSettingsPanel() {
       setRegistrationEnabled(data.ops.registration_enabled);
       setMaintenanceMode(data.ops.maintenance_mode);
       setDebugEnabled(data.ops.debug_enabled);
+      setCustomBaseUrl(data.llm.custom_base_url || '');
     } catch (err: unknown) {
       const status = (err as { status?: number })?.status;
       if (status === 401 || status === 403) {
@@ -60,7 +64,7 @@ export function SystemSettingsPanel() {
     setIsSaving(true);
     setError(null);
     setSuccessMessage(null);
-    
+
     try {
       const updateData: SystemSettingsUpdateRequest = {
         llm: {
@@ -68,10 +72,16 @@ export function SystemSettingsPanel() {
           default_model: defaultModel || undefined,
           temperature,
           max_tokens: maxTokens,
-          openai_api_key: secretAction === 'keep' 
+          openai_api_key: secretAction === 'keep'
             ? {action: 'keep'}
             : secretAction === 'set'
               ? {action: 'set', value: secretValue}
+              : {action: 'clear'},
+          custom_base_url: customBaseUrl || null,
+          custom_api_key: customSecretAction === 'keep'
+            ? {action: 'keep'}
+            : customSecretAction === 'set'
+              ? {action: 'set', value: customSecretValue}
               : {action: 'clear'},
         },
         ops: {
@@ -80,11 +90,13 @@ export function SystemSettingsPanel() {
           debug_enabled: debugEnabled,
         },
       };
-      
+
       const result = await updateSystemSettings(updateData);
       setSettings(result);
       setSecretAction('keep');
       setSecretValue('');
+      setCustomSecretAction('keep');
+      setCustomSecretValue('');
       setSuccessMessage(t('settingsSaved'));
     } catch (err: unknown) {
       const detail = (err as { detail?: string })?.detail;
@@ -108,20 +120,22 @@ export function SystemSettingsPanel() {
 
       <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-6">
         <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">{t('llmSettings')}</h3>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+            <label htmlFor="providerMode" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
               {t('providerMode')}
             </label>
             <select
+              id="providerMode"
               value={providerMode}
-              onChange={(e) => setProviderMode(e.target.value as 'auto' | 'openai' | 'mock')}
+              onChange={(e) => setProviderMode(e.target.value as 'auto' | 'openai' | 'mock' | 'custom')}
               className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm"
             >
               <option value="auto">{t('auto')}</option>
               <option value="openai">{t('openai')}</option>
               <option value="mock">{t('mock')}</option>
+              <option value="custom">{t('custom')}</option>
             </select>
           </div>
 
@@ -179,7 +193,7 @@ export function SystemSettingsPanel() {
               <span>{t('keyNotConfigured')}</span>
             )}
           </div>
-          
+
           <div className="flex gap-2 mb-2">
             <label className="flex items-center gap-2">
               <input
@@ -212,7 +226,7 @@ export function SystemSettingsPanel() {
               <span className="text-sm">{t('clearKey')}</span>
             </label>
           </div>
-          
+
           {secretAction === 'set' && (
             <input
               type="password"
@@ -223,11 +237,81 @@ export function SystemSettingsPanel() {
             />
           )}
         </div>
+
+        <div className="mt-4">
+          <label htmlFor="customBaseUrl" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+            {t('customBaseUrl')}
+          </label>
+          <input
+            id="customBaseUrl"
+            type="text"
+            value={customBaseUrl}
+            onChange={(e) => setCustomBaseUrl(e.target.value)}
+            placeholder={t('customBaseUrlPlaceholder')}
+            className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm"
+          />
+        </div>
+
+        <div className="mt-4">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+            {t('customApiKey')}
+          </label>
+          <div className="text-sm text-slate-600 dark:text-slate-400 mb-2">
+            {settings.llm.custom_api_key?.configured ? (
+              <span>{t('keyConfigured')} (****{settings.llm.custom_api_key.last4})</span>
+            ) : (
+              <span>{t('keyNotConfigured')}</span>
+            )}
+          </div>
+
+          <div className="flex gap-2 mb-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="customSecretAction"
+                value="keep"
+                checked={customSecretAction === 'keep'}
+                onChange={() => setCustomSecretAction('keep')}
+              />
+              <span className="text-sm">{t('keepCurrent')}</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="customSecretAction"
+                value="set"
+                checked={customSecretAction === 'set'}
+                onChange={() => setCustomSecretAction('set')}
+              />
+              <span className="text-sm">{t('setNewKey')}</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="customSecretAction"
+                value="clear"
+                checked={customSecretAction === 'clear'}
+                onChange={() => setCustomSecretAction('clear')}
+              />
+              <span className="text-sm">{t('clearKey')}</span>
+            </label>
+          </div>
+
+          {customSecretAction === 'set' && (
+            <input
+              type="password"
+              value={customSecretValue}
+              onChange={(e) => setCustomSecretValue(e.target.value)}
+              placeholder={t('enterNewKey')}
+              className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-sm"
+            />
+          )}
+        </div>
       </div>
 
       <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-6">
         <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">{t('opsSettings')}</h3>
-        
+
         <div className="space-y-3">
           <label className="flex items-center gap-3">
             <input

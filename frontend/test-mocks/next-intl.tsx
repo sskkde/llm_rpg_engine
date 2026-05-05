@@ -64,10 +64,10 @@ export function useLocale() {
 
 export function useTranslations(namespace?: string) {
   const {messages} = useContext(IntlContext);
-  return (key: string, values?: Record<string, string | number>) => {
+  return React.useCallback((key: string, values?: Record<string, string | number>) => {
     const path = namespace ? `${namespace}.${key}` : key;
     return interpolate(getNestedMessage(messages, path), values);
-  };
+  }, [messages, namespace]);
 }
 
 export function useFormatter() {

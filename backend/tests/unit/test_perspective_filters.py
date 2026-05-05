@@ -626,5 +626,214 @@ class TestEmbeddingsFallback:
         assert results[0].memory_id == "mem_1"
 
 
+class TestNPCPerspectiveNoLeak:
+    """
+    Test that NPC perspective never leaks forbidden information.
+    
+    These tests verify the critical constraint that NPC prompts see only
+    perspective-filtered state - no other NPC private memories, no
+    narrator-only hidden facts, no future scene triggers.
+    """
+
+    @pytest.fixture
+    def perspective_service(self):
+        return PerspectiveService()
+
+    @pytest.fixture
+    def retrieval_system(self):
+        return RetrievalSystem()
+
+    @pytest.fixture
+    def context_builder(self, retrieval_system, perspective_service):
+        return ContextBuilder(retrieval_system, perspective_service)
+
+    @pytest.fixture
+    def secret_npc_memory(self):
+        """Private memory belonging to another NPC."""
+        return Memory(
+            memory_id="mem_npc2_secret",
+            owner_type="npc",
+            owner_id="npc_2",
+            memory_type=MemoryType.SECRET,
+            content="NPC2's dark secret about the conspiracy",
+            entities=["npc_2", "conspiracy"],
+            importance=0.9,
+            created_turn=1,
+            last_accessed_turn=1,
+        )
+
+    @pytest.fixture
+    def narrator_hidden_fact(self):
+        """Hidden lore that only the narrator/world should know."""
+        return LoreEntry(
+            lore_id="narrator_secret",
+            title="The Ultimate Truth",
+            category=LoreCategory.MAIN_PLOT,
+            canonical_content="The hero is destined to die in the final battle.",
+            public_content=None,
+            rumor_versions=[],
+            known_by=["world", "narrator"],
+            hidden_from_player_until=["game_end"],
+            tags=["secret", "destiny", "spoiler"],
+        )
+
+    @pytest.fixture
+    def mock_state(self):
+        from llm_rpg.models.events import WorldTime
+        return CanonicalState(
+            world_state=WorldState(
+                entity_id="world_1",
+                world_id="test_world",
+                current_time=WorldTime(
+                    calendar="standard",
+                    season="spring",
+                    day=1,
+                    hour=12,
+                    period="morning",
+                ),
+            ),
+            player_state=PlayerState(
+                entity_id="player_1",
+                name="Test Player",
+                location_id="square",
+            ),
+            current_scene_state=CurrentSceneState(
+                entity_id="square",
+                scene_id="square",
+                location_id="square",
+                active_actor_ids=["player_1", "npc_1"],
+            ),
+            location_states={},
+            npc_states={},
+            quest_states={},
+            faction_states={},
+        )
+
+    def test_npc_cannot_see_other_npc_private_memories(
+        self,
+        context_builder,
+        retrieval_system,
+        mock_state,
+        secret_npc_memory,
+    ):
+        """NPC context must not include other NPCs' private memories."""
+        retrieval_system.index_memory(secret_npc_memory)
+        
+        npc_scope = NPCMemoryScope(
+            npc_id="npc_1",
+            profile=NPCProfile(npc_id="npc_1", name="NPC 1"),
+            belief_state=NPCBeliefState(npc_id="npc_1"),
+            recent_context=NPCRecentContext(npc_id="npc_1"),
+            secrets=NPCSecrets(npc_id="npc_1"),
+            knowledge_state=NPCKnowledgeState(npc_id="npc_1"),
+            goals=NPCGoals(npc_id="npc_1"),
+        )
+        
+        context = context_builder.build_npc_context(
+            npc_id="npc_1",
+            game_id="game_1",
+            turn_id="turn_1",
+            state=mock_state,
+            npc_scope=npc_scope,
+        )
+        
+        context_str = str(context.content)
+        assert "NPC2's dark secret" not in context_str
+        assert "conspiracy" not in context_str or "mem_npc2_secret" not in context_str
+
+    def test_npc_cannot_see_narrator_hidden_facts(
+        self,
+        context_builder,
+        mock_state,
+        narrator_hidden_fact,
+    ):
+        """NPC context must not include narrator-only hidden facts."""
+        npc_scope = NPCMemoryScope(
+            npc_id="npc_1",
+            profile=NPCProfile(npc_id="npc_1", name="NPC 1"),
+            belief_state=NPCBeliefState(npc_id="npc_1"),
+            recent_context=NPCRecentContext(npc_id="npc_1"),
+            secrets=NPCSecrets(npc_id="npc_1"),
+            knowledge_state=NPCKnowledgeState(npc_id="npc_1"),
+            goals=NPCGoals(npc_id="npc_1"),
+        )
+        
+        context = context_builder.build_npc_context(
+            npc_id="npc_1",
+            game_id="game_1",
+            turn_id="turn_1",
+            state=mock_state,
+            npc_scope=npc_scope,
+            relevant_lore=[narrator_hidden_fact],
+        )
+        
+        context_str = str(context.content)
+        assert "destined to die" not in context_str
+        assert "Ultimate Truth" not in context_str
+
+    def test_npc_context_only_includes_own_knowledge(
+        self,
+        context_builder,
+        mock_state,
+    ):
+        """NPC context should only include what the NPC actually knows."""
+        npc_scope = NPCMemoryScope(
+            npc_id="npc_1",
+            profile=NPCProfile(npc_id="npc_1", name="NPC 1"),
+            belief_state=NPCBeliefState(npc_id="npc_1"),
+            recent_context=NPCRecentContext(npc_id="npc_1"),
+            secrets=NPCSecrets(npc_id="npc_1"),
+            knowledge_state=NPCKnowledgeState(
+                npc_id="npc_1",
+                known_facts=["fact_1", "fact_2"],
+                known_rumors=["rumor_1"],
+                forbidden_knowledge=["forbidden_secret"],
+            ),
+            goals=NPCGoals(npc_id="npc_1"),
+        )
+        
+        context = context_builder.build_npc_context(
+            npc_id="npc_1",
+            game_id="game_1",
+            turn_id="turn_1",
+            state=mock_state,
+            npc_scope=npc_scope,
+        )
+        
+        assert "known_facts" in context.content
+        assert context.content["known_facts"] == ["fact_1", "fact_2"]
+        assert context.content["known_rumors"] == ["rumor_1"]
+        assert "forbidden_secret" in context.content["forbidden_knowledge"]
+
+    def test_npc_context_includes_visible_scene_only(
+        self,
+        context_builder,
+        mock_state,
+    ):
+        """NPC context should only include the visible scene state."""
+        npc_scope = NPCMemoryScope(
+            npc_id="npc_1",
+            profile=NPCProfile(npc_id="npc_1", name="NPC 1"),
+            belief_state=NPCBeliefState(npc_id="npc_1"),
+            recent_context=NPCRecentContext(npc_id="npc_1"),
+            secrets=NPCSecrets(npc_id="npc_1"),
+            knowledge_state=NPCKnowledgeState(npc_id="npc_1"),
+            goals=NPCGoals(npc_id="npc_1"),
+        )
+        
+        context = context_builder.build_npc_context(
+            npc_id="npc_1",
+            game_id="game_1",
+            turn_id="turn_1",
+            state=mock_state,
+            npc_scope=npc_scope,
+        )
+        
+        assert "visible_scene" in context.content
+        visible_scene = context.content["visible_scene"]
+        assert visible_scene is not None
+        assert visible_scene.get("scene_id") == "square"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

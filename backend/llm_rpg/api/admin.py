@@ -985,6 +985,8 @@ class LLMSettingsResponse(BaseModel):
     temperature: float
     max_tokens: int
     openai_api_key: OpenAIKeyMetadata
+    custom_base_url: Optional[str] = None
+    custom_api_key: OpenAIKeyMetadata
 
 
 class OpsSettingsResponse(BaseModel):
@@ -1011,6 +1013,8 @@ class LLMSettingsUpdate(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     openai_api_key: Optional[OpenAIKeyAction] = None
+    custom_base_url: Optional[str] = None
+    custom_api_key: Optional[OpenAIKeyAction] = None
 
 
 class OpsSettingsUpdate(BaseModel):
@@ -1053,12 +1057,52 @@ def update_system_settings(
     
     if "llm" in update_data and update_data["llm"] is not None:
         llm_data = update_data["llm"]
-        if "provider_mode" in llm_data and llm_data["provider_mode"] == "openai":
-            effective_key = service.get_effective_openai_key()
-            if not effective_key:
+        settings = service.get_settings()
+        provider_mode = llm_data.get("provider_mode", settings.provider_mode)
+
+        openai_key_available = bool(service.get_effective_openai_key())
+        openai_key_data = llm_data.get("openai_api_key")
+        if openai_key_data:
+            if openai_key_data.get("action") == "set" and openai_key_data.get("value"):
+                openai_key_available = True
+            elif openai_key_data.get("action") == "clear":
+                openai_key_available = False
+
+        custom_url = settings.custom_base_url
+        if "custom_base_url" in llm_data:
+            try:
+                custom_url = service._normalize_custom_base_url(llm_data["custom_base_url"])
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(e)
+                )
+
+        custom_key_available = bool(service.get_effective_custom_api_key())
+        custom_key_data = llm_data.get("custom_api_key")
+        if custom_key_data:
+            if custom_key_data.get("action") == "set" and custom_key_data.get("value"):
+                custom_key_available = True
+            elif custom_key_data.get("action") == "clear":
+                custom_key_available = False
+
+        if provider_mode == "openai":
+            if not openai_key_available:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail="Cannot set provider_mode to openai without an effective API key"
+                )
+
+        if provider_mode == "custom":
+            if not custom_url:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Cannot set provider_mode to custom without a custom_base_url"
+                )
+            if not custom_key_available:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Cannot set provider_mode to custom without an effective custom API key"
                 )
     
     try:
@@ -1069,6 +1113,12 @@ def update_system_settings(
             detail=str(e)
         )
     except Exception as e:
+        from ..services.settings import MissingEncryptionKeyError
+        if isinstance(e, MissingEncryptionKeyError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e)
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update settings"

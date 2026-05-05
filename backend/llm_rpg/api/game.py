@@ -22,6 +22,7 @@ from ..storage.repositories import (
 )
 
 from .auth import get_current_active_user
+from .turn_output import finalize_turn_output
 from ..storage.models import UserModel
 
 from ..core.turn_orchestrator import TurnOrchestrator, TurnValidationError
@@ -94,6 +95,7 @@ class TurnRequest(BaseModel):
 class TurnResponse(BaseModel):
     turn_index: int
     narration: str
+    recommended_actions: List[str] = []
     world_time: dict
     player_state: dict
     events_committed: int
@@ -275,6 +277,10 @@ def execute_turn(
             turn_index=next_turn,
             player_input=request.action,
         )
+        narration, recommended_actions = finalize_turn_output(
+            result["narration"],
+            forbidden_info=result.get("forbidden_info", []),
+        )
 
         # Update session state in database
         state_repo = SessionStateRepository(db)
@@ -300,13 +306,17 @@ def execute_turn(
             session_id=session_id,
             turn_no=next_turn,
             input_text=request.action,
-            narrative_text=result["narration"],
-            result_json={"transaction_id": result["transaction_id"]},
+            narrative_text=narration,
+            result_json={
+                "transaction_id": result["transaction_id"],
+                "recommended_actions": recommended_actions,
+            },
         )
         
         return TurnResponse(
             turn_index=result["turn_index"],
-            narration=result["narration"],
+            narration=narration,
+            recommended_actions=recommended_actions,
             world_time=result["world_time"],
             player_state=result["player_state"],
             events_committed=result["events_committed"],

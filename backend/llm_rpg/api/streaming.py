@@ -26,6 +26,7 @@ from ..storage.models import SessionModel
 from ..storage.repositories import SessionRepository, LocationRepository, EventLogRepository
 
 from .auth import get_current_active_user
+from .turn_output import finalize_turn_output
 from ..storage.models import UserModel
 
 from ..core.turn_orchestrator import TurnOrchestrator, TurnValidationError
@@ -397,6 +398,10 @@ async def execute_turn_stream(
         
         # Get full narration
         full_narration = "".join(accumulated_narration) if accumulated_narration else result.get("narration", "")
+        narration, recommended_actions = finalize_turn_output(
+            full_narration,
+            forbidden_info=result.get("forbidden_info", []),
+        )
         
         # 4. Persist adventure log, session state, and last_played BEFORE turn_completed
         event_log_repo = EventLogRepository(db)
@@ -404,8 +409,11 @@ async def execute_turn_stream(
             session_id=session_id,
             turn_no=turn_index,
             input_text=player_input,
-            narrative_text=full_narration,
-            result_json={"transaction_id": result.get("transaction_id")},
+            narrative_text=narration,
+            result_json={
+                "transaction_id": result.get("transaction_id"),
+                "recommended_actions": recommended_actions,
+            },
         )
         
         from ..storage.repositories import SessionStateRepository
@@ -432,7 +440,8 @@ async def execute_turn_stream(
             {
                 "session_id": session_id,
                 "turn_index": turn_index,
-                "narration": full_narration,
+                "narration": narration,
+                "recommended_actions": recommended_actions,
                 "player_state": result.get("player_state"),
                 "world_time": result.get("world_time"),
                 "timestamp": datetime.now().isoformat(),

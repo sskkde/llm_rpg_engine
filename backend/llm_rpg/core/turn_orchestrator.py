@@ -302,6 +302,7 @@ class TurnOrchestrator:
                 "state_deltas_applied": len(state_deltas),
                 "world_time": working_state.world_state.current_time.model_dump(),
                 "player_state": working_state.player_state.model_dump(),
+                "forbidden_info": narrator_perspective.forbidden_info,
                 "validation_passed": True,
             }
             

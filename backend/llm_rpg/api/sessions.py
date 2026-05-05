@@ -9,6 +9,7 @@ from ..storage.database import get_db
 from ..storage.models import UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel, EventLogModel
 from ..storage.repositories import SessionRepository, SessionStateRepository, SessionPlayerStateRepository, EventLogRepository
 from .auth import get_current_active_user
+from .turn_output import recommended_actions_from_result
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -53,6 +54,7 @@ class AdventureLogEntryResponse(BaseModel):
     event_type: str
     action: Optional[str] = None
     narration: str
+    recommended_actions: List[str] = []
     occurred_at: datetime
 
 
@@ -210,6 +212,7 @@ def get_adventure_log(
             event_type=entry.event_type,
             action=entry.input_text,
             narration=entry.narrative_text or "",
+            recommended_actions=recommended_actions_from_result(entry.result_json),
             occurred_at=entry.occurred_at
         )
         for entry in entries

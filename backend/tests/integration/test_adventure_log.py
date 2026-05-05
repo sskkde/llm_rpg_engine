@@ -105,6 +105,7 @@ class TestAdventureLogAPI:
         assert entry["event_type"] == "initial_scene"
         assert "山门广场晨雾未散" in entry["narration"]
         assert entry["action"] is None
+        assert entry["recommended_actions"] == []
 
     def test_adventure_log_idempotent(self, client, auth_headers, db_engine, sample_world_data):
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
@@ -174,6 +175,7 @@ class TestAdventureLogPersistence:
         assert player_turn["event_type"] == "player_turn"
         assert player_turn["action"] == "观察四周"
         assert len(player_turn["narration"]) > 0
+        assert player_turn["recommended_actions"] == []
 
     def test_multiple_turns_persisted_in_order(self, client, auth_headers, db_engine, sample_world_data):
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
@@ -262,6 +264,7 @@ class TestAdventureLogPersistence:
         assert player_turn["event_type"] == "player_turn"
         assert player_turn["action"] == "观察四周"
         assert len(player_turn["narration"]) > 0
+        assert player_turn["recommended_actions"] == []
 
     def test_streaming_error_does_not_create_player_log(self, client, auth_headers, db_engine, sample_world_data):
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)

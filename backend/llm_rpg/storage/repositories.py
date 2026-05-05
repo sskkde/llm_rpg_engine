@@ -418,7 +418,7 @@ class EventLogRepository(BaseRepository):
             "input_text": None,
             "structured_action": None,
             "result_json": None,
-            "narrative_text": "山门广场晨雾未散，青石阶上还残留着昨夜的露水。远处试炼堂的钟声缓缓响起，提醒你今日的修行试炼即将开始。你站在广场中央，可以环顾四周、查看状态，或向试炼堂前进。",
+            "narrative_text": "山门广场晨雾未散，青石阶上还残留着昨夜的露水。远处试炼堂的钟声缓缓响起，提醒你今日的修行试炼即将开始。你站在广场中央，试炼堂的朱门在薄雾后若隐若现。",
         })
         return initial_scene
 

@@ -253,10 +253,43 @@ class TurnOrchestrator:
             )
             events.append(player_input_event)
             
-            # Step 4: World tick (on working state)
+            # Step 3: Deterministic time tick + LLM world candidates
+            # Time advancement is deterministic (rule-driven)
             world_tick_event = self._world_engine.advance_time(game_id)
             working_state.world_state.current_time = world_tick_event.time_after
             events.append(world_tick_event)
+            
+            # Generate world candidates via LLM (proposals only, no state mutation)
+            world_proposal = self._generate_world_candidates(
+                game_id=game_id,
+                current_turn=turn_index,
+            )
+            
+            # Record world proposal audit
+            self._record_proposal_audit(
+                proposal_type="world_tick",
+                prompt_template_id=world_proposal.audit.prompt_template_id,
+                raw_output_preview=world_proposal.audit.raw_output_preview,
+                parsed_proposal={
+                    "time_delta_turns": world_proposal.time_delta_turns,
+                    "candidate_events_count": len(world_proposal.candidate_events),
+                    "state_deltas_count": len(world_proposal.state_deltas),
+                    "is_fallback": world_proposal.is_fallback,
+                    "confidence": world_proposal.confidence,
+                },
+                repair_trace=world_proposal.audit.repair_strategies_tried,
+                rejection_reason=None,
+                fallback_reason=world_proposal.audit.fallback_reason,
+                committed_event_ids=[],
+            )
+            
+            # Add world candidate events to the event list
+            for candidate_event in world_proposal.candidate_events:
+                world_event = self._create_world_event_from_candidate(
+                    turn_index=turn_index,
+                    candidate=candidate_event,
+                )
+                events.append(world_event)
             
             # Step 5: Generate scene candidates (LLM-driven with deterministic fallback)
             scene_candidates = self._generate_scene_candidates(
@@ -684,6 +717,46 @@ class TurnOrchestrator:
             affected_entities=candidate.target_entity_ids,
         )
     
+    def _generate_world_candidates(
+        self,
+        game_id: str,
+        current_turn: int,
+    ) -> "WorldTickProposal":
+        """
+        Generate world tick proposal for global/offscreen evolution.
+        
+        Uses WorldEngine.generate_world_candidates() for LLM-driven proposals.
+        Returns candidates only (no direct state mutation).
+        """
+        return self._world_engine.generate_world_candidates(
+            game_id=game_id,
+            current_turn=current_turn,
+        )
+    
+    def _create_world_event_from_candidate(
+        self,
+        turn_index: int,
+        candidate: "CandidateEvent",
+    ) -> SceneEvent:
+        """
+        Create a SceneEvent from a world candidate event.
+        
+        World candidate events are recorded as SceneEvents for consistency
+        with the event log structure.
+        """
+        from ..models.proposals import CandidateEvent
+        
+        return SceneEvent(
+            event_id=f"evt_world_{turn_index:06d}_{uuid.uuid4().hex[:8]}",
+            turn_index=turn_index,
+            scene_id="world_global",
+            trigger="world_candidate",
+            summary=candidate.description,
+            visible_to_player=candidate.visibility == "player_visible",
+            importance=candidate.importance,
+            affected_entities=candidate.target_entity_ids,
+        )
+    
     def _state_to_dict(self, state: CanonicalState) -> Dict[str, Any]:
         return {
             "player_location": state.player_state.location_id,
@@ -726,7 +799,17 @@ class TurnOrchestrator:
         working_state: CanonicalState,
         actors: List[str],
     ) -> List[ProposedAction]:
-        """Process NPC decisions and return proposed actions."""
+        """
+        Process NPC decisions sequentially with working state propagation.
+        
+        Each NPC sees the temporary effects of previous NPC decisions:
+        1. Generate NPC action based on current working state
+        2. Compute state deltas for that action
+        3. Apply deltas to working state (temporary, not canonical)
+        4. Next NPC sees the updated working state
+        
+        This ensures NPCs respond to each other's actions within the same turn.
+        """
         actions = []
         
         for actor_id in actors:
@@ -737,7 +820,8 @@ class TurnOrchestrator:
             if npc_state is None or npc_state.status != "alive":
                 continue
             
-            # Generate NPC action
+            # Generate NPC action based on current working state
+            # (which includes previous NPCs' temporary effects)
             action = self._npc_engine.generate_npc_action(
                 npc_id=actor_id,
                 game_id=game_id,
@@ -746,8 +830,49 @@ class TurnOrchestrator:
             
             if action:
                 actions.append(action)
+                
+                # Compute temporary state deltas for this action
+                temp_deltas = self._compute_state_deltas(action, working_state)
+                
+                # Apply temporary deltas to working state
+                # This allows next NPC to see this NPC's effects
+                for delta in temp_deltas:
+                    self._apply_temporary_delta(working_state, delta)
         
         return actions
+    
+    def _apply_temporary_delta(
+        self,
+        working_state: CanonicalState,
+        delta: StateDelta,
+    ) -> None:
+        """
+        Apply a state delta to working state (temporary, not canonical).
+        
+        This is used for sequential NPC decisions where each NPC
+        needs to see the effects of previous NPCs.
+        """
+        path_parts = delta.path.split(".")
+        
+        if len(path_parts) < 2:
+            return
+        
+        if path_parts[0] == "npcs" and len(path_parts) >= 3:
+            npc_id = path_parts[1]
+            field = path_parts[2]
+            
+            if npc_id in working_state.npc_states:
+                npc = working_state.npc_states[npc_id]
+                if field == "mood" and delta.operation == "set":
+                    npc.mood = delta.new_value
+                elif field == "location_id" and delta.operation == "set":
+                    npc.location_id = delta.new_value
+                elif field == "status" and delta.operation == "set":
+                    npc.status = delta.new_value
+        elif path_parts[0] == "world_state" and len(path_parts) >= 2:
+            field = path_parts[1]
+            if field == "weather" and delta.operation == "set":
+                working_state.world_state.weather = delta.new_value
     
     def _create_player_action(
         self,

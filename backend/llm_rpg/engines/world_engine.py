@@ -46,13 +46,36 @@ class WorldEngine:
         self,
         game_id: str,
         time_delta: int = 1,
+        working_time: Optional[WorldTime] = None,
     ) -> WorldTickEvent:
+        """
+        Advance time and return a WorldTickEvent.
+        
+        CRITICAL: This method does NOT mutate canonical state.
+        Instead, it operates on:
+        1. The provided working_time (if given) - for sequential NPC decisions
+        2. The canonical state's time (read-only) - for initial time tick
+        
+        The returned event contains time_before and time_after.
+        The caller (TurnOrchestrator) is responsible for applying this to working state.
+        
+        Args:
+            game_id: Game identifier
+            time_delta: Number of periods to advance
+            working_time: Optional working time to advance (instead of canonical)
+            
+        Returns:
+            WorldTickEvent with time_before and time_after (no state mutation)
+        """
         state = self._state_manager.get_state(game_id)
         if state is None:
             raise ValueError(f"State not found: {game_id}")
         
-        world_state = state.world_state
-        old_time = world_state.current_time
+        # Use working_time if provided, otherwise read from canonical state (read-only)
+        if working_time is not None:
+            old_time = working_time
+        else:
+            old_time = state.world_state.current_time
         
         new_period = self._advance_period(old_time.period, time_delta)
         new_day = old_time.day
@@ -71,7 +94,8 @@ class WorldEngine:
             period=new_period,
         )
         
-        world_state.current_time = new_time
+        # DO NOT mutate state here - just return the event
+        # The caller is responsible for applying to working state
         
         event = WorldTickEvent(
             event_id=f"evt_world_tick_{game_id}_{new_time}",

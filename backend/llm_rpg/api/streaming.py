@@ -293,14 +293,16 @@ async def generate_narration_stream(
             temperature=0.8,
             max_tokens=500,
         ):
-            accumulated_text.append(chunk)
-            yield chunk
+            # Check forbidden info BEFORE yielding
+            sanitized_chunk = chunk
+            for info in forbidden_info:
+                if info and info in chunk:
+                    sanitized_chunk = chunk.replace(info, "...")
+            
+            accumulated_text.append(sanitized_chunk)
+            yield sanitized_chunk
     
     full_text = "".join(accumulated_text)
-    
-    for info in forbidden_info:
-        if info and info in full_text:
-            sanitized = full_text.replace(info, "...")
 
 
 async def execute_turn_stream(

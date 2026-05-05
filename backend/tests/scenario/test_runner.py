@@ -502,3 +502,111 @@ class TestMockLLMProviderIntegration:
         
         result = provider.generate_json('{"type": "test"}')
         assert isinstance(result, dict)
+
+
+class TestCoreLoopScenarios:
+    """Test core game loop scenarios."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.mock_provider = MockLLMProvider()
+        self.runner = ScenarioRunner(llm_provider=self.mock_provider)
+
+    def test_core_loop_order_explicit(self):
+        """Test that core loop executes in documented order."""
+        result = self.runner.run_custom_scenario(
+            "core_loop_order_test",
+            "session_core_001",
+            steps=[
+                {"action": "start_transaction", "expected": "transaction_created"},
+                {"action": "parse_intent_llm", "expected": "intent_parsed"},
+                {"action": "world_tick_deterministic", "expected": "time_advanced"},
+                {"action": "scene_candidates_llm", "expected": "candidates_generated"},
+                {"action": "collect_actors", "expected": "actors_collected"},
+                {"action": "npc_proposals_sequential", "expected": "npc_decisions"},
+                {"action": "resolve_conflicts", "expected": "conflicts_resolved"},
+                {"action": "validate_actions", "expected": "validation_passed"},
+                {"action": "atomic_commit", "expected": "state_committed"},
+                {"action": "write_memories", "expected": "chronicle_written"},
+                {"action": "record_audit", "expected": "audit_logged"},
+                {"action": "generate_narration", "expected": "narration_output"},
+            ]
+        )
+        
+        assert result is not None
+        assert result.status == "passed"
+        assert len(result.steps) == 12
+
+    def test_fallback_matrix_coverage(self):
+        """Test all fallback scenarios in fallback matrix."""
+        result = self.runner.run_custom_scenario(
+            "fallback_matrix_test",
+            "session_fallback_001",
+            steps=[
+                {"action": "test_intent_fallback", "expected": "keyword_parser_used"},
+                {"action": "test_world_fallback", "expected": "rule_events_used"},
+                {"action": "test_scene_fallback", "expected": "triggers_used"},
+                {"action": "test_npc_fallback", "expected": "goal_idle_used"},
+                {"action": "test_narration_fallback", "expected": "template_used"},
+                {"action": "test_parse_failure", "expected": "repair_or_fallback"},
+                {"action": "test_validator_rejection", "expected": "rollback"},
+                {"action": "test_timeout", "expected": "deterministic_fallback"},
+                {"action": "test_perspective_leak", "expected": "sanitized_or_rejected"},
+            ]
+        )
+        
+        assert result is not None
+        assert result.status == "passed"
+        assert len(result.steps) == 9
+
+    def test_memory_writes_complete(self):
+        """Test that all memory types are written."""
+        result = self.runner.run_custom_scenario(
+            "memory_writes_test",
+            "session_memory_001",
+            steps=[
+                {"action": "execute_turn", "expected": "turn_completed"},
+                {"action": "verify_world_chronicle", "expected": "chronicle_exists"},
+                {"action": "verify_scene_summary", "expected": "scene_summary_exists"},
+                {"action": "verify_npc_subjective", "expected": "npc_summaries_exist"},
+            ]
+        )
+        
+        assert result is not None
+        assert result.status == "passed"
+        assert len(result.steps) == 4
+
+    def test_audit_replay_no_llm_recall(self):
+        """Test that audit data enables replay without LLM."""
+        result = self.runner.run_custom_scenario(
+            "audit_replay_test",
+            "session_audit_001",
+            steps=[
+                {"action": "execute_turn_with_proposals", "expected": "proposals_logged"},
+                {"action": "verify_proposal_audits", "expected": "all_fields_present"},
+                {"action": "replay_from_audit", "expected": "replay_success"},
+                {"action": "verify_no_llm_calls", "expected": "zero_llm_calls"},
+            ]
+        )
+        
+        assert result is not None
+        assert result.status == "passed"
+        assert len(result.steps) == 4
+
+    def test_working_state_for_npc_decisions(self):
+        """Test that NPC decisions use working state, not canonical."""
+        result = self.runner.run_custom_scenario(
+            "npc_working_state_test",
+            "session_npc_001",
+            steps=[
+                {"action": "npc_a_decision", "expected": "npc_a_proposal"},
+                {"action": "apply_to_working_state", "expected": "working_state_updated"},
+                {"action": "npc_b_decision", "expected": "npc_b_sees_npc_a_effect"},
+                {"action": "verify_canonical_unchanged", "expected": "canonical_intact"},
+                {"action": "atomic_commit", "expected": "both_committed"},
+            ]
+        )
+        
+        assert result is not None
+        assert result.status == "passed"
+        assert len(result.steps) == 5

@@ -21,6 +21,7 @@ from llm_rpg.core.audit import (
     MemoryDecisionReason,
     TurnStateDeltaAudit,
     TurnEventAudit,
+    ProposalAuditEntry,
 )
 from llm_rpg.core.replay import (
     get_replay_store,
@@ -938,3 +939,277 @@ class TestIntegrationAuditReplay:
         )
 
         assert result.success is True
+
+
+class TestProposalAudit:
+    """Test proposal audit functionality."""
+
+    def setup_method(self):
+        """Reset audit logger before each test."""
+        reset_audit_logger()
+        self.audit_logger = get_audit_logger()
+        self.store = self.audit_logger.get_store()
+
+    def test_log_proposal_success(self):
+        """Test logging a successful proposal."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="input_intent",
+            prompt_template_id="intent_parse_v1",
+            model_name="gpt-4",
+            input_tokens=500,
+            output_tokens=150,
+            latency_ms=800,
+            raw_output_preview='{"intent_type": "move", "target": "north"}',
+            parsed_proposal={"intent_type": "move", "target": "north"},
+            confidence=0.85,
+        )
+
+        assert audit.audit_id is not None
+        assert audit.session_id == "session_001"
+        assert audit.turn_no == 5
+        assert audit.proposal_type == "input_intent"
+        assert audit.prompt_template_id == "intent_parse_v1"
+        assert audit.parse_success is True
+        assert audit.validation_passed is True
+        assert audit.fallback_used is False
+        assert audit.confidence == 0.85
+
+        stored = self.store.get_proposal_audit(audit.audit_id)
+        assert stored is not None
+        assert stored.audit_id == audit.audit_id
+
+    def test_log_proposal_with_fallback(self):
+        """Test logging a proposal that used fallback."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="npc_action",
+            fallback_used=True,
+            fallback_reason="LLM timeout after 30s",
+            fallback_strategy="goal_idle_behavior",
+            confidence=0.0,
+        )
+
+        assert audit.fallback_used is True
+        assert audit.fallback_reason == "LLM timeout after 30s"
+        assert audit.fallback_strategy == "goal_idle_behavior"
+        assert audit.confidence == 0.0
+
+    def test_log_proposal_with_rejection(self):
+        """Test logging a rejected proposal."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="scene_event",
+            rejected=True,
+            rejection_reason="Invalid scene scope - global event not allowed",
+            validation_errors=["Scene proposal cannot create global events"],
+            validation_passed=False,
+        )
+
+        assert audit.rejected is True
+        assert audit.rejection_reason == "Invalid scene scope - global event not allowed"
+        assert len(audit.validation_errors) == 1
+        assert audit.validation_passed is False
+
+    def test_log_proposal_with_repair(self):
+        """Test logging a proposal that required repair."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="world_tick",
+            parse_success=False,
+            repair_attempts=2,
+            repair_strategies_tried=["json_fix", "schema_correction"],
+            repair_success=True,
+            raw_output_preview='{"time_delta": 1, "events": [}',
+        )
+
+        assert audit.parse_success is False
+        assert audit.repair_attempts == 2
+        assert len(audit.repair_strategies_tried) == 2
+        assert audit.repair_success is True
+
+    def test_log_proposal_with_perspective_check(self):
+        """Test logging a proposal with perspective safety check."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="narration",
+            perspective_check_passed=False,
+            forbidden_info_detected=["npc_001_secret_identity", "hidden_treasure_location"],
+            validation_errors=["Narration contains forbidden information"],
+        )
+
+        assert audit.perspective_check_passed is False
+        assert len(audit.forbidden_info_detected) == 2
+        assert "npc_001_secret_identity" in audit.forbidden_info_detected
+
+    def test_get_proposal_audits_by_turn(self):
+        """Test retrieving proposal audits by turn."""
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="input_intent",
+        )
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="npc_action",
+        )
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=6,
+            proposal_type="scene_event",
+        )
+
+        turn_5_audits = self.store.get_proposal_audits_by_turn("session_001", 5)
+        assert len(turn_5_audits) == 2
+
+        turn_6_audits = self.store.get_proposal_audits_by_turn("session_001", 6)
+        assert len(turn_6_audits) == 1
+
+    def test_get_proposal_audits_by_type(self):
+        """Test filtering proposal audits by type."""
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="input_intent",
+        )
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="npc_action",
+        )
+        self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=6,
+            proposal_type="input_intent",
+        )
+
+        intent_audits = self.store.get_proposal_audits_by_session(
+            "session_001",
+            proposal_type="input_intent",
+        )
+        assert len(intent_audits) == 2
+
+        npc_audits = self.store.get_proposal_audits_by_session(
+            "session_001",
+            proposal_type="npc_action",
+        )
+        assert len(npc_audits) == 1
+
+    def test_proposal_audit_committed_event_ids(self):
+        """Test that committed event IDs are recorded."""
+        audit = self.audit_logger.log_proposal(
+            session_id="session_001",
+            turn_no=5,
+            proposal_type="scene_event",
+            committed_event_ids=["evt_001", "evt_002", "evt_003"],
+        )
+
+        assert len(audit.committed_event_ids) == 3
+        assert "evt_001" in audit.committed_event_ids
+        assert "evt_002" in audit.committed_event_ids
+        assert "evt_003" in audit.committed_event_ids
+
+
+class TestReplayWithProposalAudits:
+    """Test replay with proposal audit data."""
+
+    def setup_method(self):
+        """Reset both audit and replay systems."""
+        reset_audit_logger()
+        reset_replay_store()
+        self.audit_logger = get_audit_logger()
+        self.replay_store = get_replay_store()
+        self.replay_engine = self.replay_store.get_replay_engine()
+
+    def test_replay_with_proposal_audits_no_llm_recall(self):
+        """Test that replay uses proposal audit data without re-calling LLM."""
+        snapshot = self.replay_store.create_snapshot(
+            session_id="session_001",
+            turn_no=10,
+            world_state={"current_time": "Day 1"},
+            player_state={"hp": 100},
+        )
+
+        proposal_audits = {
+            11: [
+                {
+                    "audit_id": "prop_001",
+                    "proposal_type": "input_intent",
+                    "parsed_proposal": {"intent_type": "move", "target": "north"},
+                    "confidence": 0.85,
+                    "fallback_used": False,
+                },
+                {
+                    "audit_id": "prop_002",
+                    "proposal_type": "npc_action",
+                    "parsed_proposal": {"action_type": "idle"},
+                    "confidence": 0.5,
+                    "fallback_used": False,
+                },
+            ],
+        }
+
+        events = [
+            ReplayEvent(
+                event_id="evt_011",
+                event_type="player_input",
+                turn_no=11,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={"raw_input": "go north"},
+            ),
+        ]
+
+        result = self.replay_engine.replay_with_proposal_audits(
+            session_id="session_001",
+            start_turn=11,
+            end_turn=11,
+            events=events,
+            proposal_audits=proposal_audits,
+            perspective=ReplayPerspective.ADMIN,
+        )
+
+        assert result.success is True
+        assert len(result.steps) == 1
+        assert len(result.steps[0].proposal_audits) == 2
+
+    def test_get_proposal_audit_summary(self):
+        """Test summarizing proposal audits for a turn."""
+        proposal_audits = [
+            {
+                "proposal_type": "input_intent",
+                "confidence": 0.85,
+                "fallback_used": False,
+                "rejected": False,
+            },
+            {
+                "proposal_type": "npc_action",
+                "confidence": 0.5,
+                "fallback_used": True,
+                "fallback_reason": "timeout",
+                "rejected": False,
+            },
+            {
+                "proposal_type": "scene_event",
+                "confidence": 0.7,
+                "fallback_used": False,
+                "rejected": True,
+                "rejection_reason": "invalid scope",
+            },
+        ]
+
+        summary = self.replay_engine.get_proposal_audit_summary(proposal_audits)
+
+        assert summary["total"] == 3
+        assert summary["by_type"]["input_intent"] == 1
+        assert summary["by_type"]["npc_action"] == 1
+        assert summary["by_type"]["scene_event"] == 1
+        assert summary["fallbacks"] == 1
+        assert summary["rejections"] == 1
+        assert 0.6 < summary["avg_confidence"] < 0.7

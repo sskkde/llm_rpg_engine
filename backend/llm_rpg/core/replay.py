@@ -80,6 +80,9 @@ class ReplayStep(BaseModel):
     context_build_ids: List[str] = Field(default_factory=list)
     validation_ids: List[str] = Field(default_factory=list)
     
+    # Proposal audit data (replay-safe - no re-calling LLM)
+    proposal_audits: List[Dict[str, Any]] = Field(default_factory=list)
+    
     # Timing
     duration_ms: Optional[int] = Field(None)
     timestamp: datetime = Field(default_factory=datetime.now)
@@ -639,6 +642,88 @@ class ReplayEngine:
                 })
         
         return report
+    
+    def replay_with_proposal_audits(
+        self,
+        session_id: str,
+        start_turn: int,
+        end_turn: int,
+        events: List[ReplayEvent],
+        proposal_audits: Dict[int, List[Dict[str, Any]]],
+        base_state: Optional[Dict[str, Any]] = None,
+        perspective: ReplayPerspective = ReplayPerspective.ADMIN,
+    ) -> ReplayResult:
+        """
+        Replay turns with proposal audit data (no LLM re-calls needed).
+        
+        Args:
+            session_id: Game session ID
+            start_turn: Starting turn number
+            end_turn: Ending turn number
+            events: All events to consider
+            proposal_audits: Dict mapping turn_no -> list of proposal audit entries
+            base_state: Optional base state
+            perspective: Viewing perspective
+        
+        Returns:
+            ReplayResult with proposal audit data included for each step
+        """
+        result = self.replay_turn_range(
+            session_id=session_id,
+            start_turn=start_turn,
+            end_turn=end_turn,
+            events=events,
+            base_state=base_state,
+            perspective=perspective,
+        )
+        
+        # Attach proposal audits to each step
+        for step in result.steps:
+            turn_audits = proposal_audits.get(step.turn_no, [])
+            step.proposal_audits = turn_audits
+        
+        return result
+    
+    def get_proposal_audit_summary(
+        self,
+        proposal_audits: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Summarize proposal audits for a turn.
+        
+        Returns statistics about proposals without needing to re-call LLM.
+        """
+        if not proposal_audits:
+            return {
+                "total": 0,
+                "by_type": {},
+                "fallbacks": 0,
+                "rejections": 0,
+                "avg_confidence": 0.0,
+            }
+        
+        by_type: Dict[str, int] = {}
+        fallbacks = 0
+        rejections = 0
+        total_confidence = 0.0
+        
+        for audit in proposal_audits:
+            ptype = audit.get("proposal_type", "unknown")
+            by_type[ptype] = by_type.get(ptype, 0) + 1
+            
+            if audit.get("fallback_used"):
+                fallbacks += 1
+            if audit.get("rejected"):
+                rejections += 1
+            total_confidence += audit.get("confidence", 0.5)
+        
+        return {
+            "total": len(proposal_audits),
+            "by_type": by_type,
+            "fallbacks": fallbacks,
+            "rejections": rejections,
+            "avg_confidence": total_confidence / len(proposal_audits) if proposal_audits else 0.0,
+        }
 
 
 class ReplayStore:

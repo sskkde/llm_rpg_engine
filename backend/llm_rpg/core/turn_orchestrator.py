@@ -1,25 +1,111 @@
 """
 Deterministic Turn Transaction Spine
 
-This module implements the turn pipeline with atomic commit/rollback semantics:
-1. Record input
-2. Parse intent
-3. Read canonical state (immutable working copy)
-4. World tick
-5. Action scheduling
-6. NPC decision loop
-7. Conflict resolution
-8. Validation
-9. Commit event/state/memory/summary/audit (atomic)
-10. Build player-visible projection
-11. Generate narration
-12. Return result
+This module implements the turn pipeline with atomic commit/rollback semantics.
 
-Key invariants:
-- Canonical state is never mutated before validation
-- Validation failures result in no committed state delta
+=============================================================================
+EXPLICIT CORE LOOP ORDER (Task 8 - Final Integration)
+=============================================================================
+
+The turn orchestrator executes the following steps in exact order:
+
+1. START TRANSACTION
+   - Create TurnTransaction record
+   - Record world_time_before for rollback reference
+
+2. LLM/RULE INPUT INTENT
+   - Try ProposalPipeline.generate_input_intent() for LLM-driven parsing
+   - Fallback to _parse_intent_keyword() for deterministic keyword parsing
+   - Audit records: prompt_template_id, raw_output_reference, repair_trace,
+     fallback_reason if used
+
+3. DETERMINISTIC TIME TICK + LLM WORLD CANDIDATES
+   - WorldEngine.advance_time() is DETERMINISTIC (rule-driven)
+   - Then request WorldTickProposal via ProposalPipeline for global/offscreen events
+   - World proposals are CANDIDATES only - no direct state mutation
+   - Fallback: WorldEngine.check_world_events() if LLM fails
+
+4. LLM/RULE SCENE CANDIDATES
+   - SceneEngine.generate_scene_candidates() for current-scene events
+   - Scene proposals are CANDIDATES only - no direct state mutation
+   - Fallback: ActionScheduler.collect_scene_triggers() if LLM fails
+
+5. COLLECT ACTORS
+   - ActionScheduler.collect_actors() from current scene state
+   - Returns list of actor_ids (player + NPCs in scene)
+
+6. SEQUENTIAL LLM/RULE NPC PROPOSALS (with working/temporary state)
+   - For each NPC actor:
+     a. Build NPC context with perspective filtering
+     b. Request NPCActionProposal via ProposalPipeline
+     c. Apply proposal to WORKING STATE (not canonical)
+     d. Next NPC sees the temporary effects of previous NPC decisions
+   - Fallback: NPCEngine goal/idle behavior if LLM fails
+   - CRITICAL: Canonical state remains unchanged until atomic commit
+
+7. SCHEDULER/CONFLICT RESOLVER
+   - ActionScheduler.resolve_conflicts() is RULE-DRIVEN (deterministic)
+   - Resolves conflicts between player action and NPC proposals
+   - Winner determined by priority, not LLM
+
+8. VALIDATOR
+   - Validator.validate_action() and validate_state_delta() are RULE-DRIVEN
+   - All proposals must pass validation before commit
+   - Rejection triggers rollback with audit record
+
+9. ATOMIC COMMIT
+   - All events recorded to EventLog
+   - All state deltas applied to CanonicalState
+   - All changes committed together or rolled back together
+
+10. MEMORY WRITES (World Chronicle, Scene Summary, NPCSubjectiveSummary)
+    - MemoryWriter.write_turn_summary() -> World Chronicle
+    - MemoryWriter.write_scene_summary() -> Scene Summary
+    - MemoryWriter.write_npc_subjective_summary() -> NPC Subjective Summary
+    - These are POST-COMMIT operations (after validation passes)
+
+11. AUDIT
+    - Record complete audit trail for replay
+    - Includes: prompt/template id, proposal type, raw output reference,
+      parsed proposal, repair trace, rejection reason, fallback reason,
+      committed event ids
+
+12. LLM/RULE NARRATION (from committed facts only)
+    - NarrationEngine uses only COMMITTED state
+    - NarrationProposal cannot invent uncommitted facts
+    - Fallback: template-based narration if LLM fails
+
+=============================================================================
+FALLBACK MATRIX
+=============================================================================
+
+| Failure Point          | Fallback Strategy                           | Audit Record         |
+|------------------------|---------------------------------------------|----------------------|
+| Input Intent LLM       | Keyword-based parser (_parse_intent_keyword)| fallback_reason      |
+| World Tick LLM         | WorldEngine.check_world_events()            | fallback_reason      |
+| Scene Candidates LLM   | ActionScheduler.collect_scene_triggers()    | fallback_reason      |
+| NPC Action LLM         | Goal/idle behavior from NPCEngine           | fallback_reason      |
+| Narration LLM          | Template-based _generate_text()             | fallback_reason      |
+| Parse Failure          | JSON repair -> fallback if repair fails     | repair_trace         |
+| Schema Validation      | Reject proposal, use fallback               | validation_errors    |
+| Validator Rejection    | Rollback transaction, no state change       | rejection_reason     |
+| Timeout                | Use deterministic fallback                  | fallback_reason      |
+| Perspective Leak       | Sanitize or reject proposal                 | validation_errors    |
+
+=============================================================================
+KEY INVARIANTS
+=============================================================================
+- Canonical state is NEVER mutated before validation passes
+- LLM outputs are PROPOSALS only - never direct state mutation
+- All proposals have deterministic fallback
+- Validation failures result in NO committed state delta
 - Failed validation writes audit error
-- Commit is atomic - all or nothing
+- Commit is ATOMIC - all or nothing
+- Narration consumes COMMITTED facts only
+- NPC prompts are perspective-filtered (no hidden info leak)
+- Sequential NPC decisions use working state, not canonical
+
+=============================================================================
 """
 
 import uuid
@@ -59,6 +145,7 @@ from .action_scheduler import ActionScheduler
 from .validator import Validator
 from .perspective import PerspectiveService
 from .context_builder import ContextBuilder
+from .memory_writer import MemoryWriter
 
 from ..engines.world_engine import WorldEngine
 from ..engines.npc_engine import NPCEngine
@@ -100,6 +187,7 @@ class TurnOrchestrator:
         narration_engine: NarrationEngine,
         scene_engine: Optional[SceneEngine] = None,
         proposal_pipeline: Optional[ProposalPipeline] = None,
+        memory_writer: Optional[MemoryWriter] = None,
     ):
         self._state_manager = state_manager
         self._event_log = event_log
@@ -112,8 +200,10 @@ class TurnOrchestrator:
         self._narration_engine = narration_engine
         self._scene_engine = scene_engine
         self._proposal_pipeline = proposal_pipeline
+        self._memory_writer = memory_writer
         
         self._audit_log: List[Dict[str, Any]] = []
+        self._proposal_audits: List[Dict[str, Any]] = []
     
     def execute_turn(
         self,
@@ -279,7 +369,16 @@ class TurnOrchestrator:
                 turn_index=turn_index,
             )
             
-            # Step 10: Build player-visible projection (from committed state)
+            # Step 10: MEMORY WRITES (World Chronicle, Scene Summary, NPCSubjectiveSummary)
+            # These are POST-COMMIT operations - only executed after validation passes
+            memory_result = self._write_memories(
+                turn_index=turn_index,
+                events=events,
+                working_state=working_state,
+                game_id=game_id,
+            )
+            
+            # Step 11: Build player-visible projection (from committed state)
             player_perspective = self._perspective.build_player_perspective(
                 perspective_id=f"player_view_{turn_index}",
                 player_id="player",
@@ -290,7 +389,7 @@ class TurnOrchestrator:
                 base_perspective_id=f"player_view_{turn_index}",
             )
             
-            # Step 11: Generate narration (from committed state only)
+            # Step 12: Generate narration (from committed state only)
             narration = self._narration_engine.generate_narration(
                 game_id=game_id,
                 turn_index=turn_index,
@@ -307,10 +406,20 @@ class TurnOrchestrator:
             )
             self._event_log.record_event(transaction, narration_event)
             
+            # Step 13: AUDIT - Record complete audit trail for replay
+            self._record_turn_audit(
+                transaction=transaction,
+                turn_index=turn_index,
+                events=events,
+                state_deltas=state_deltas,
+                committed_actions=committed_actions,
+                memory_result=memory_result,
+            )
+            
             # Finalize transaction
             self._event_log.commit_turn(transaction)
             
-            # Step 12: Return result
+            # Step 14: Return result
             return {
                 "transaction_id": transaction.transaction_id,
                 "turn_index": turn_index,
@@ -322,6 +431,8 @@ class TurnOrchestrator:
                 "player_state": working_state.player_state.model_dump(),
                 "forbidden_info": narrator_perspective.forbidden_info,
                 "validation_passed": True,
+                "memory_writes": memory_result,
+                "proposal_audits": len(self._proposal_audits),
             }
             
         except TurnValidationError:
@@ -375,18 +486,22 @@ class TurnOrchestrator:
                 
                 # Check if proposal is valid (not a fallback)
                 if proposal and not proposal.is_fallback:
-                    # Record successful LLM parse in audit log
-                    self._audit_log.append({
-                        "audit_id": f"intent_llm_{uuid.uuid4().hex[:8]}",
-                        "timestamp": datetime.now().isoformat(),
-                        "type": "intent_parse_llm_success",
-                        "source": "proposal_pipeline",
-                        "intent_type": proposal.intent_type,
-                        "target": proposal.target,
-                        "confidence": proposal.confidence,
-                        "repair_status": proposal.audit.repair_status.value,
-                        "latency_ms": proposal.audit.latency_ms,
-                    })
+                    # Record successful LLM parse in proposal audit
+                    self._record_proposal_audit(
+                        proposal_type="input_intent",
+                        prompt_template_id=proposal.audit.prompt_template_id,
+                        raw_output_preview=proposal.audit.raw_output_preview,
+                        parsed_proposal={
+                            "intent_type": proposal.intent_type,
+                            "target": proposal.target,
+                            "risk_level": proposal.risk_level,
+                            "confidence": proposal.confidence,
+                        },
+                        repair_trace=proposal.audit.repair_strategies_tried,
+                        rejection_reason=None,
+                        fallback_reason=None,
+                        committed_event_ids=[],
+                    )
                     
                     # Convert InputIntentProposal to ParsedIntent
                     return ParsedIntent(
@@ -398,24 +513,29 @@ class TurnOrchestrator:
                 else:
                     # LLM returned fallback - record reason and use keyword parser
                     fallback_reason = proposal.audit.fallback_reason if proposal else "Unknown error"
-                    self._audit_log.append({
-                        "audit_id": f"intent_fallback_{uuid.uuid4().hex[:8]}",
-                        "timestamp": datetime.now().isoformat(),
-                        "type": "intent_parse_fallback",
-                        "source": "keyword_parser",
-                        "reason": fallback_reason,
-                        "repair_status": proposal.audit.repair_status.value if proposal else "none",
-                    })
+                    self._record_proposal_audit(
+                        proposal_type="input_intent",
+                        prompt_template_id=proposal.audit.prompt_template_id if proposal else None,
+                        raw_output_preview=proposal.audit.raw_output_preview if proposal else "",
+                        parsed_proposal=None,
+                        repair_trace=proposal.audit.repair_strategies_tried if proposal else [],
+                        rejection_reason=None,
+                        fallback_reason=fallback_reason,
+                        committed_event_ids=[],
+                    )
                     
             except Exception as e:
                 # LLM call failed - record error and fall back to keyword parser
-                self._audit_log.append({
-                    "audit_id": f"intent_error_{uuid.uuid4().hex[:8]}",
-                    "timestamp": datetime.now().isoformat(),
-                    "type": "intent_parse_error",
-                    "source": "keyword_parser",
-                    "error": str(e),
-                })
+                self._record_proposal_audit(
+                    proposal_type="input_intent",
+                    prompt_template_id=None,
+                    raw_output_preview="",
+                    parsed_proposal=None,
+                    repair_trace=[],
+                    rejection_reason=None,
+                    fallback_reason=f"Exception: {str(e)}",
+                    committed_event_ids=[],
+                )
         
         # Deterministic keyword-based fallback parser
         return self._parse_intent_keyword(player_input)
@@ -779,6 +899,117 @@ class TurnOrchestrator:
         }
         self._audit_log.append(audit_entry)
         return audit_entry["audit_id"]
+    
+    def _write_memories(
+        self,
+        turn_index: int,
+        events: List[GameEvent],
+        working_state: CanonicalState,
+        game_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Write memory summaries after atomic commit.
+        
+        Creates:
+        - World Chronicle (global turn summary)
+        - Scene Summary (current scene events)
+        - NPCSubjectiveSummary (per-NPC perspective)
+        
+        Returns memory write statistics for audit.
+        """
+        if self._memory_writer is None:
+            return {
+                "memories_created": 0,
+                "world_chronicle": None,
+                "scene_summary": None,
+                "npc_summaries": [],
+            }
+        
+        result = self._memory_writer.process_turn(
+            turn_index=turn_index,
+            events=events,
+            state=working_state,
+        )
+        
+        return {
+            "memories_created": result.get("memories_created", 0),
+            "world_chronicle": result.get("summary_created"),
+            "memory_ids": result.get("memory_ids", []),
+        }
+    
+    def _record_turn_audit(
+        self,
+        transaction: TurnTransaction,
+        turn_index: int,
+        events: List[GameEvent],
+        state_deltas: List[StateDelta],
+        committed_actions: List[CommittedAction],
+        memory_result: Dict[str, Any],
+    ) -> None:
+        """
+        Record complete audit trail for replay.
+        
+        Records:
+        - prompt/template id for each proposal
+        - proposal type
+        - raw output reference
+        - parsed proposal
+        - repair trace
+        - rejection reason (if any)
+        - fallback reason (if any)
+        - committed event ids
+        
+        This enables replay without re-calling LLM.
+        """
+        audit_entry = {
+            "audit_id": f"turn_audit_{turn_index:06d}_{uuid.uuid4().hex[:8]}",
+            "transaction_id": transaction.transaction_id,
+            "turn_index": turn_index,
+            "timestamp": datetime.now().isoformat(),
+            "type": "turn_complete",
+            "events_committed": [e.event_id for e in events],
+            "state_deltas_count": len(state_deltas),
+            "actions_committed": [a.action_id for a in committed_actions],
+            "memory_writes": memory_result,
+            "proposal_audits": self._proposal_audits.copy(),
+        }
+        self._audit_log.append(audit_entry)
+        
+        self._proposal_audits.clear()
+    
+    def _record_proposal_audit(
+        self,
+        proposal_type: str,
+        prompt_template_id: Optional[str],
+        raw_output_preview: str,
+        parsed_proposal: Optional[Dict[str, Any]],
+        repair_trace: List[str],
+        rejection_reason: Optional[str],
+        fallback_reason: Optional[str],
+        committed_event_ids: List[str],
+    ) -> str:
+        """
+        Record audit metadata for a single proposal.
+        
+        This data is stored for replay without re-calling LLM.
+        """
+        audit_id = f"proposal_{proposal_type}_{uuid.uuid4().hex[:8]}"
+        
+        audit_entry = {
+            "audit_id": audit_id,
+            "timestamp": datetime.now().isoformat(),
+            "proposal_type": proposal_type,
+            "prompt_template_id": prompt_template_id,
+            "raw_output_preview": raw_output_preview[:200] if raw_output_preview else "",
+            "parsed_proposal": parsed_proposal,
+            "repair_trace": repair_trace,
+            "rejection_reason": rejection_reason,
+            "fallback_reason": fallback_reason,
+            "committed_event_ids": committed_event_ids,
+        }
+        
+        self._proposal_audits.append(audit_entry)
+        return audit_id
     
     def replay_turns(
         self,

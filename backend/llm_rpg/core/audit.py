@@ -227,6 +227,60 @@ class TurnAuditLog(BaseModel):
     completed_at: Optional[datetime] = Field(None)
 
 
+class ProposalAuditEntry(BaseModel):
+    """Audit entry for a single LLM proposal (for replay without re-calling LLM)."""
+    audit_id: str = Field(..., description="Unique audit identifier")
+    session_id: str = Field(..., description="Game session ID")
+    turn_no: int = Field(..., description="Turn number")
+    
+    # Proposal identification
+    proposal_type: str = Field(..., description="Proposal type (input_intent, world_tick, scene_event, npc_action, narration)")
+    prompt_template_id: Optional[str] = Field(None, description="Prompt template ID used")
+    model_name: Optional[str] = Field(None, description="Model name used")
+    
+    # LLM call info
+    input_tokens: int = Field(default=0, description="Input tokens")
+    output_tokens: int = Field(default=0, description="Output tokens")
+    latency_ms: int = Field(default=0, description="LLM call latency in ms")
+    
+    # Raw output reference (for replay without LLM)
+    raw_output_preview: str = Field(default="", description="Raw LLM output preview (first 500 chars)")
+    
+    # Parsed proposal (structured data for replay)
+    parsed_proposal: Optional[Dict[str, Any]] = Field(None, description="Parsed proposal data")
+    
+    # Repair trace
+    parse_success: bool = Field(default=True, description="Whether initial parse succeeded")
+    repair_attempts: int = Field(default=0, description="Number of repair attempts")
+    repair_strategies_tried: List[str] = Field(default_factory=list, description="Repair strategies attempted")
+    repair_success: Optional[bool] = Field(None, description="Whether repair succeeded")
+    
+    # Validation
+    validation_passed: bool = Field(default=True, description="Whether validation passed")
+    validation_errors: List[str] = Field(default_factory=list, description="Validation errors")
+    
+    # Rejection
+    rejected: bool = Field(default=False, description="Whether proposal was rejected")
+    rejection_reason: Optional[str] = Field(None, description="Rejection reason")
+    
+    # Fallback
+    fallback_used: bool = Field(default=False, description="Whether fallback was used")
+    fallback_reason: Optional[str] = Field(None, description="Fallback reason")
+    fallback_strategy: Optional[str] = Field(None, description="Fallback strategy used")
+    
+    # Perspective safety
+    perspective_check_passed: bool = Field(default=True, description="Whether perspective check passed")
+    forbidden_info_detected: List[str] = Field(default_factory=list, description="Forbidden info detected")
+    
+    # Confidence
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Proposal confidence")
+    
+    # Committed event IDs (for replay)
+    committed_event_ids: List[str] = Field(default_factory=list, description="Event IDs committed from this proposal")
+    
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class ErrorSeverity(str, Enum):
     """Error severity levels."""
     CRITICAL = "critical"
@@ -268,6 +322,72 @@ class ErrorLogEntry(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class ProposalAuditEntry(BaseModel):
+    """Audit entry for LLM proposal processing.
+    
+    Records enough data for replay without re-calling LLM:
+    - prompt/template id
+    - proposal type
+    - raw output reference
+    - parsed proposal
+    - repair trace
+    - rejection reason
+    - fallback reason
+    - committed event ids
+    """
+    audit_id: str = Field(..., description="Unique audit identifier")
+    session_id: Optional[str] = Field(None, description="Game session ID")
+    turn_no: int = Field(..., description="Turn number")
+    
+    # Proposal identification
+    proposal_type: str = Field(..., description="Type: input_intent, world_tick, scene_event, npc_action, narration")
+    proposal_id: Optional[str] = Field(None, description="Proposal ID from ProposalAuditMetadata")
+    
+    # LLM call info
+    prompt_template_id: Optional[str] = Field(None, description="Template ID used for prompt")
+    model_name: Optional[str] = Field(None, description="Model used")
+    input_tokens: int = Field(default=0, description="Input token count")
+    output_tokens: int = Field(default=0, description="Output token count")
+    latency_ms: int = Field(default=0, description="LLM call latency")
+    
+    # Raw output (truncated for storage)
+    raw_output_preview: str = Field(default="", description="First 200 chars of raw LLM output")
+    raw_output_hash: Optional[str] = Field(None, description="Hash of full raw output for reference")
+    
+    # Parsed result
+    parsed_proposal: Optional[Dict[str, Any]] = Field(None, description="Parsed proposal data")
+    parse_success: bool = Field(default=True, description="Whether parsing succeeded")
+    
+    # Repair trace
+    repair_attempts: int = Field(default=0, description="Number of repair attempts")
+    repair_strategies_tried: List[str] = Field(default_factory=list, description="Repair strategies attempted")
+    repair_success: bool = Field(default=True, description="Whether repair succeeded")
+    
+    # Validation
+    validation_passed: bool = Field(default=True, description="Whether validation passed")
+    validation_errors: List[str] = Field(default_factory=list, description="Validation errors")
+    validation_warnings: List[str] = Field(default_factory=list, description="Validation warnings")
+    
+    # Rejection/Fallback
+    rejected: bool = Field(default=False, description="Whether proposal was rejected")
+    rejection_reason: Optional[str] = Field(None, description="Reason for rejection")
+    fallback_used: bool = Field(default=False, description="Whether fallback was used")
+    fallback_reason: Optional[str] = Field(None, description="Reason for fallback")
+    fallback_strategy: Optional[str] = Field(None, description="Fallback strategy used")
+    
+    # Committed events
+    committed_event_ids: List[str] = Field(default_factory=list, description="Event IDs committed from this proposal")
+    
+    # Confidence
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Proposal confidence score")
+    
+    # Perspective safety
+    perspective_check_passed: bool = Field(default=True, description="Whether perspective safety check passed")
+    forbidden_info_detected: List[str] = Field(default_factory=list, description="Forbidden info found in proposal")
+    
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class AuditStore:
     """In-memory storage for audit logs."""
     
@@ -276,6 +396,7 @@ class AuditStore:
         self._context_builds: Dict[str, ContextBuildAudit] = {}
         self._validations: Dict[str, ValidationResultAudit] = {}
         self._turn_audits: Dict[str, TurnAuditLog] = {}
+        self._proposal_audits: Dict[str, ProposalAuditEntry] = {}
         self._errors: Dict[str, ErrorLogEntry] = {}
         
         # Indexes
@@ -283,9 +404,59 @@ class AuditStore:
         self._context_builds_by_session: Dict[str, List[str]] = {}
         self._validations_by_session: Dict[str, List[str]] = {}
         self._turn_audits_by_session: Dict[str, List[str]] = {}
+        self._proposal_audits_by_session: Dict[str, List[str]] = {}
         self._errors_by_session: Dict[str, List[str]] = {}
         
         self._turn_audits_by_turn: Dict[tuple, str] = {}  # (session_id, turn_no) -> audit_id
+        self._proposal_audits_by_turn: Dict[tuple, List[str]] = {}  # (session_id, turn_no) -> [audit_ids]
+    
+    def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
+        """Store a proposal audit entry."""
+        self._proposal_audits[audit.audit_id] = audit
+        
+        if audit.session_id:
+            if audit.session_id not in self._proposal_audits_by_session:
+                self._proposal_audits_by_session[audit.session_id] = []
+            self._proposal_audits_by_session[audit.session_id].append(audit.audit_id)
+        
+        # Index by (session_id, turn_no)
+        if audit.session_id:
+            key = (audit.session_id, audit.turn_no)
+            if key not in self._proposal_audits_by_turn:
+                self._proposal_audits_by_turn[key] = []
+            self._proposal_audits_by_turn[key].append(audit.audit_id)
+        
+        return audit.audit_id
+    
+    def get_proposal_audit(self, audit_id: str) -> Optional[ProposalAuditEntry]:
+        """Get a proposal audit entry by ID."""
+        return self._proposal_audits.get(audit_id)
+    
+    def get_proposal_audits_by_turn(
+        self,
+        session_id: str,
+        turn_no: int,
+    ) -> List[ProposalAuditEntry]:
+        """Get all proposal audits for a specific turn."""
+        key = (session_id, turn_no)
+        audit_ids = self._proposal_audits_by_turn.get(key, [])
+        return [self._proposal_audits[aid] for aid in audit_ids if aid in self._proposal_audits]
+    
+    def get_proposal_audits_by_session(
+        self,
+        session_id: str,
+        proposal_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ProposalAuditEntry]:
+        """Get proposal audits for a session, optionally filtered by type."""
+        audit_ids = self._proposal_audits_by_session.get(session_id, [])
+        audits = [self._proposal_audits[aid] for aid in audit_ids if aid in self._proposal_audits]
+        
+        if proposal_type:
+            audits = [a for a in audits if a.proposal_type == proposal_type]
+        
+        audits.sort(key=lambda a: a.created_at, reverse=True)
+        return audits[:limit]
     
     def store_model_call(self, log: ModelCallLog) -> str:
         """Store a model call log."""
@@ -328,6 +499,21 @@ class AuditStore:
         # Index by (session_id, turn_no)
         key = (audit.session_id, audit.turn_no)
         self._turn_audits_by_turn[key] = audit.audit_id
+        
+        return audit.audit_id
+    
+    def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
+        """Store a proposal audit entry."""
+        self._proposal_audits[audit.audit_id] = audit
+        
+        if audit.session_id not in self._proposal_audits_by_session:
+            self._proposal_audits_by_session[audit.session_id] = []
+        self._proposal_audits_by_session[audit.session_id].append(audit.audit_id)
+        
+        key = (audit.session_id, audit.turn_no)
+        if key not in self._proposal_audits_by_turn:
+            self._proposal_audits_by_turn[key] = []
+        self._proposal_audits_by_turn[key].append(audit.audit_id)
         
         return audit.audit_id
     
@@ -689,6 +875,72 @@ class AuditLogger:
             sanitized = re.sub(pattern, replacement, sanitized, flags=re.IGNORECASE)
         
         return sanitized
+    
+    def log_proposal(
+        self,
+        session_id: Optional[str],
+        turn_no: int,
+        proposal_type: str,
+        proposal_id: Optional[str] = None,
+        prompt_template_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        latency_ms: int = 0,
+        raw_output_preview: str = "",
+        raw_output_hash: Optional[str] = None,
+        parsed_proposal: Optional[Dict[str, Any]] = None,
+        parse_success: bool = True,
+        repair_attempts: int = 0,
+        repair_strategies_tried: Optional[List[str]] = None,
+        repair_success: bool = True,
+        validation_passed: bool = True,
+        validation_errors: Optional[List[str]] = None,
+        validation_warnings: Optional[List[str]] = None,
+        rejected: bool = False,
+        rejection_reason: Optional[str] = None,
+        fallback_used: bool = False,
+        fallback_reason: Optional[str] = None,
+        fallback_strategy: Optional[str] = None,
+        committed_event_ids: Optional[List[str]] = None,
+        confidence: float = 0.5,
+        perspective_check_passed: bool = True,
+        forbidden_info_detected: Optional[List[str]] = None,
+    ) -> ProposalAuditEntry:
+        """Log an LLM proposal with full audit trail for replay."""
+        audit = ProposalAuditEntry(
+            audit_id=f"prop_{uuid.uuid4().hex[:12]}",
+            session_id=session_id,
+            turn_no=turn_no,
+            proposal_type=proposal_type,
+            proposal_id=proposal_id,
+            prompt_template_id=prompt_template_id,
+            model_name=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            raw_output_preview=raw_output_preview[:200] if raw_output_preview else "",
+            raw_output_hash=raw_output_hash,
+            parsed_proposal=parsed_proposal,
+            parse_success=parse_success,
+            repair_attempts=repair_attempts,
+            repair_strategies_tried=repair_strategies_tried or [],
+            repair_success=repair_success,
+            validation_passed=validation_passed,
+            validation_errors=validation_errors or [],
+            validation_warnings=validation_warnings or [],
+            rejected=rejected,
+            rejection_reason=rejection_reason,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            fallback_strategy=fallback_strategy,
+            committed_event_ids=committed_event_ids or [],
+            confidence=confidence,
+            perspective_check_passed=perspective_check_passed,
+            forbidden_info_detected=forbidden_info_detected or [],
+        )
+        self._store.store_proposal_audit(audit)
+        return audit
     
     def get_store(self) -> AuditStore:
         """Get the underlying audit store."""

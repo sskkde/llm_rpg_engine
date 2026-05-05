@@ -283,13 +283,36 @@ class TurnOrchestrator:
                 committed_event_ids=[],
             )
             
-            # Add world candidate events to the event list
+            # Add world candidate events to the event list (with validation)
             for candidate_event in world_proposal.candidate_events:
-                world_event = self._create_world_event_from_candidate(
-                    turn_index=turn_index,
-                    candidate=candidate_event,
+                validation = self._validator.validate_candidate_event(
+                    event_type=candidate_event.event_type,
+                    description=candidate_event.description,
+                    target_entity_ids=candidate_event.target_entity_ids,
+                    effects=candidate_event.effects,
+                    state=working_state,
                 )
-                events.append(world_event)
+                
+                if validation.is_valid:
+                    world_event = self._create_world_event_from_candidate(
+                        turn_index=turn_index,
+                        candidate=candidate_event,
+                    )
+                    events.append(world_event)
+                else:
+                    self._record_proposal_audit(
+                        proposal_type="world_candidate_event",
+                        prompt_template_id=world_proposal.audit.prompt_template_id,
+                        raw_output_preview=candidate_event.description[:200],
+                        parsed_proposal={
+                            "event_type": candidate_event.event_type,
+                            "target_entity_ids": candidate_event.target_entity_ids,
+                        },
+                        repair_trace=[],
+                        rejection_reason=f"Validation failed: {validation.errors}",
+                        fallback_reason=None,
+                        committed_event_ids=[],
+                    )
             
             # Step 5: Generate scene candidates (LLM-driven with deterministic fallback)
             scene_candidates = self._generate_scene_candidates(
@@ -300,12 +323,36 @@ class TurnOrchestrator:
             )
             
             for candidate_event in scene_candidates.candidate_events:
-                scene_event = self._create_scene_event_from_candidate(
-                    turn_index=turn_index,
-                    scene_id=scene_candidates.scene_id,
-                    candidate=candidate_event,
+                validation = self._validator.validate_candidate_event(
+                    event_type=candidate_event.event_type,
+                    description=candidate_event.description,
+                    target_entity_ids=candidate_event.target_entity_ids,
+                    effects=candidate_event.effects,
+                    state=working_state,
                 )
-                events.append(scene_event)
+                
+                if validation.is_valid:
+                    scene_event = self._create_scene_event_from_candidate(
+                        turn_index=turn_index,
+                        scene_id=scene_candidates.scene_id,
+                        candidate=candidate_event,
+                    )
+                    events.append(scene_event)
+                else:
+                    self._record_proposal_audit(
+                        proposal_type="scene_candidate_event",
+                        prompt_template_id=scene_candidates.audit.prompt_template_id,
+                        raw_output_preview=candidate_event.description[:200],
+                        parsed_proposal={
+                            "event_type": candidate_event.event_type,
+                            "scene_id": scene_candidates.scene_id,
+                            "target_entity_ids": candidate_event.target_entity_ids,
+                        },
+                        repair_trace=[],
+                        rejection_reason=f"Validation failed: {validation.errors}",
+                        fallback_reason=None,
+                        committed_event_ids=[],
+                    )
             
             # Step 5: Collect actors
             actors = self._action_scheduler.collect_actors(working_state)
@@ -820,12 +867,11 @@ class TurnOrchestrator:
             if npc_state is None or npc_state.status != "alive":
                 continue
             
-            # Generate NPC action based on current working state
-            # (which includes previous NPCs' temporary effects)
             action = self._npc_engine.generate_npc_action(
                 npc_id=actor_id,
                 game_id=game_id,
                 turn_index=turn_index,
+                working_state=working_state,
             )
             
             if action:

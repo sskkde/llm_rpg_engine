@@ -34,6 +34,7 @@ class NPCEngine:
         npc_id: str,
         game_id: str,
         turn_index: int,
+        working_state: Optional[CanonicalState] = None,
     ) -> Optional[ProposedAction]:
         """
         Generate NPC action using the proposal pipeline.
@@ -45,8 +46,22 @@ class NPCEngine:
         
         The NPC prompt sees only perspective-filtered state - no other NPC
         private memories, no narrator-only hidden facts.
+        
+        Args:
+            npc_id: The NPC's unique identifier
+            game_id: The game session identifier
+            turn_index: Current turn number
+            working_state: Optional working state for sequential NPC decisions.
+                          If provided, NPCs see temporary effects of previous NPCs.
+                          If None, falls back to canonical state.
+        
+        CRITICAL: For sequential NPC decisions within a turn, pass working_state
+        so each NPC can see the temporary effects of previous NPCs' actions.
+        This ensures NPCs respond to each other within the same turn.
         """
-        state = self._state_manager.get_state(game_id)
+        # Use working_state if provided (for sequential NPC decisions),
+        # otherwise fall back to canonical state
+        state = working_state if working_state is not None else self._state_manager.get_state(game_id)
         if state is None:
             return None
         

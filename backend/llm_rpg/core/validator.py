@@ -245,3 +245,182 @@ class Validator:
                 passed=True,
             )],
         )
+    
+    def validate_candidate_event(
+        self,
+        event_type: str,
+        description: str,
+        target_entity_ids: List[str],
+        effects: Dict[str, Any],
+        state: CanonicalState,
+    ) -> ValidationResult:
+        """
+        Validate a candidate event before it is added to the event list.
+        
+        Checks:
+        - Description is non-empty
+        - Target entities exist in state (if specified)
+        - Effects dict is well-formed
+        """
+        checks = []
+        errors = []
+        warnings = []
+        
+        if not description or not description.strip():
+            checks.append(ValidationCheck(
+                check_name="candidate_description",
+                passed=False,
+                reason="Candidate event has empty description",
+            ))
+            errors.append("Candidate event has empty description")
+        else:
+            checks.append(ValidationCheck(
+                check_name="candidate_description",
+                passed=True,
+            ))
+        
+        for entity_id in target_entity_ids:
+            if entity_id.startswith("npc_"):
+                if entity_id not in state.npc_states:
+                    checks.append(ValidationCheck(
+                        check_name="candidate_target_validation",
+                        passed=False,
+                        reason=f"Target NPC {entity_id} not found in state",
+                    ))
+                    errors.append(f"Target NPC {entity_id} not found in state")
+                else:
+                    checks.append(ValidationCheck(
+                        check_name="candidate_target_validation",
+                        passed=True,
+                    ))
+            elif entity_id.startswith("loc_"):
+                if entity_id not in state.location_states:
+                    checks.append(ValidationCheck(
+                        check_name="candidate_target_validation",
+                        passed=False,
+                        reason=f"Target location {entity_id} not found in state",
+                    ))
+                    errors.append(f"Target location {entity_id} not found in state")
+                else:
+                    checks.append(ValidationCheck(
+                        check_name="candidate_target_validation",
+                        passed=True,
+                    ))
+        
+        if not target_entity_ids:
+            checks.append(ValidationCheck(
+                check_name="candidate_target_validation",
+                passed=True,
+            ))
+        
+        if not isinstance(effects, dict):
+            checks.append(ValidationCheck(
+                check_name="candidate_effects_validation",
+                passed=False,
+                reason=f"Effects must be a dict, got {type(effects).__name__}",
+            ))
+            errors.append(f"Effects must be a dict, got {type(effects).__name__}")
+        else:
+            checks.append(ValidationCheck(
+                check_name="candidate_effects_validation",
+                passed=True,
+            ))
+        
+        return ValidationResult(
+            is_valid=all(c.passed for c in checks),
+            checks=checks,
+            errors=errors,
+            warnings=warnings,
+        )
+    
+    def validate_candidate_event(
+        self,
+        event_type: str,
+        description: str,
+        target_entity_ids: List[str],
+        effects: Dict[str, Any],
+        state: CanonicalState,
+    ) -> ValidationResult:
+        """
+        Validate a candidate event from world/scene proposals.
+        
+        Candidate events must pass validation before being committed.
+        This ensures LLM-generated proposals don't bypass rule constraints.
+        """
+        checks = []
+        errors = []
+        warnings = []
+        
+        event_type_check = self._validate_event_type(event_type)
+        checks.append(event_type_check)
+        if not event_type_check.passed:
+            errors.append(event_type_check.reason)
+        
+        targets_check = self._validate_event_targets(target_entity_ids, state)
+        checks.append(targets_check)
+        if not targets_check.passed:
+            errors.append(targets_check.reason)
+        
+        effects_check = self._validate_event_effects(effects, state)
+        checks.append(effects_check)
+        if not effects_check.passed:
+            warnings.append(effects_check.reason)
+        
+        return ValidationResult(
+            is_valid=all(c.passed for c in checks),
+            checks=checks,
+            errors=errors,
+            warnings=warnings,
+        )
+    
+    def _validate_event_type(self, event_type: str) -> ValidationCheck:
+        valid_types = [
+            "world_tick", "scene_trigger", "npc_action", "player_action",
+            "environment_change", "time_advance", "offscreen_activity",
+            "global_event", "location_change", "quest_progress",
+        ]
+        if event_type not in valid_types:
+            return ValidationCheck(
+                check_name="event_type_validation",
+                passed=False,
+                reason=f"Invalid event type: {event_type}",
+            )
+        return ValidationCheck(
+            check_name="event_type_validation",
+            passed=True,
+        )
+    
+    def _validate_event_targets(
+        self,
+        target_entity_ids: List[str],
+        state: CanonicalState,
+    ) -> ValidationCheck:
+        for entity_id in target_entity_ids:
+            if entity_id.startswith("npc_"):
+                if entity_id not in state.npc_states:
+                    return ValidationCheck(
+                        check_name="event_target_validation",
+                        passed=False,
+                        reason=f"Target NPC {entity_id} not found in state",
+                    )
+            elif entity_id.startswith("loc_"):
+                if entity_id not in state.location_states:
+                    return ValidationCheck(
+                        check_name="event_target_validation",
+                        passed=False,
+                        reason=f"Target location {entity_id} not found in state",
+                    )
+        return ValidationCheck(
+            check_name="event_target_validation",
+            passed=True,
+        )
+    
+    def _validate_event_effects(
+        self,
+        effects: Dict[str, Any],
+        state: CanonicalState,
+    ) -> ValidationCheck:
+        return ValidationCheck(
+            check_name="event_effects_validation",
+            passed=True,
+        )

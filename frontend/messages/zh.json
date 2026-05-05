@@ -157,6 +157,7 @@
     "turnNarration": "叙事",
     "expandLogEntry": "展开日志",
     "collapseLogEntry": "收起日志",
+    "showLogEntry": "在叙事栏中显示这条日志",
     "logEntryCount": "{count} 条记录",
     "streaming": "流式传输中...",
     "fallbackMode": "回退模式",

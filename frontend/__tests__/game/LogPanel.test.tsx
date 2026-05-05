@@ -10,6 +10,7 @@ describe('LogPanel', () => {
     event_type: 'player_turn',
     action: '观察四周',
     narration: '你环顾四周，发现这里是一片神秘的森林。',
+    recommended_actions: ['继续前进'],
     occurred_at: '2024-01-01T00:00:00Z',
     ...overrides,
   });
@@ -44,34 +45,27 @@ describe('LogPanel', () => {
     expect(screen.getByText(/向前走/)).toBeInTheDocument();
   });
 
-  it('expands and collapses player-visible dialogue', () => {
+  it('calls onSelectEntry and marks the selected entry', () => {
     const entry = createEntry({
       id: 'turn-1',
       turn_no: 1,
       action: '攻击敌人',
       narration: '你挥剑攻击敌人，造成了伤害。',
     });
+    const onSelectEntry = jest.fn();
     
-    renderWithIntl(<LogPanel entries={[entry]} />);
+    renderWithIntl(
+      <LogPanel entries={[entry]} selectedEntryId="turn-1" onSelectEntry={onSelectEntry} />
+    );
     
     const button = screen.getByRole('button');
-    
-    // Initially collapsed
-    expect(button).toHaveAttribute('aria-expanded', 'false');
-    
-    // Click to expand
+
+    expect(button).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(button);
-    expect(button).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByText('玩家行动:')).toBeInTheDocument();
-    expect(screen.getByText('攻击敌人')).toBeInTheDocument();
-    expect(screen.getByText('叙事:')).toBeInTheDocument();
-    
-    // Click to collapse
-    fireEvent.click(button);
-    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(onSelectEntry).toHaveBeenCalledWith(entry);
   });
 
-  it('allows multiple entries open simultaneously', () => {
+  it('does not render inline expanded dialogue', () => {
     const entry1 = createEntry({
       id: 'turn-1',
       turn_no: 1,
@@ -84,22 +78,14 @@ describe('LogPanel', () => {
       action: '行动二',
       narration: '叙事二',
     });
+    const onSelectEntry = jest.fn();
+
+    renderWithIntl(<LogPanel entries={[entry1, entry2]} onSelectEntry={onSelectEntry} />);
     
-    renderWithIntl(<LogPanel entries={[entry1, entry2]} />);
-    
-    const buttons = screen.getAllByRole('button');
-    
-    // Expand first entry
-    fireEvent.click(buttons[0]);
-    expect(buttons[0]).toHaveAttribute('aria-expanded', 'true');
-    
-    // Expand second entry
-    fireEvent.click(buttons[1]);
-    expect(buttons[1]).toHaveAttribute('aria-expanded', 'true');
-    
-    // Both should still be expanded
-    expect(buttons[0]).toHaveAttribute('aria-expanded', 'true');
-    expect(buttons[1]).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(screen.getAllByRole('button')[0]);
+    expect(onSelectEntry).toHaveBeenCalledWith(entry1);
+    expect(screen.queryByText('玩家行动:')).not.toBeInTheDocument();
+    expect(screen.queryByText('叙事:')).not.toBeInTheDocument();
   });
 
   it('does not render internal fields', () => {
@@ -111,10 +97,7 @@ describe('LogPanel', () => {
     });
     
     renderWithIntl(<LogPanel entries={[entry]} />);
-    
-    // Expand to show full content
-    fireEvent.click(screen.getByRole('button'));
-    
+
     // Verify internal fields are NOT in DOM
     expect(screen.queryByText('result_json')).not.toBeInTheDocument();
     expect(screen.queryByText('transaction_id')).not.toBeInTheDocument();

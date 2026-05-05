@@ -17,6 +17,7 @@ class ParsedNarration(BaseModel):
     text: str
     tone: str = "neutral"
     style_tags: List[str] = []
+    recommended_actions: List[str] = []
     hidden_info_leaked: bool = False
 
 
@@ -60,16 +61,39 @@ class OutputParser:
     
     @staticmethod
     def parse_narration(text: str, forbidden_info: List[str] = None) -> ParsedNarration:
+        data = OutputParser.parse_json(text)
+        if data:
+            narration_text = data.get("text") or data.get("narration") or text
+            recommended_actions = data.get("recommended_actions") or data.get("recommendedActions") or []
+            if not isinstance(recommended_actions, list):
+                recommended_actions = []
+            recommended_actions = [str(action).strip() for action in recommended_actions if str(action).strip()]
+        else:
+            narration_text = text
+            recommended_actions = []
+
         leaked = False
+        forbidden_info = forbidden_info or []
+        safe_narration_text = narration_text
         if forbidden_info:
             for info in forbidden_info:
-                if info.lower() in text.lower():
+                if info.lower() in narration_text.lower():
                     leaked = True
-                    break
+                    safe_narration_text = safe_narration_text.replace(info, "...")
+
+        recommended_action_leaked = False
+        for action in recommended_actions:
+            leaks_forbidden_info = any(info.lower() in action.lower() for info in forbidden_info)
+            if leaks_forbidden_info:
+                leaked = True
+                recommended_action_leaked = True
+        safe_recommended_actions = [] if recommended_action_leaked else recommended_actions
         
         return ParsedNarration(
-            text=text,
-            tone="neutral",
+            text=OutputParser.clean_narration(safe_narration_text),
+            tone=data.get("tone", "neutral") if data else "neutral",
+            style_tags=data.get("style_tags", []) if data and isinstance(data.get("style_tags", []), list) else [],
+            recommended_actions=safe_recommended_actions,
             hidden_info_leaked=leaked,
         )
     
@@ -123,5 +147,18 @@ class OutputParser:
     def clean_narration(text: str) -> str:
         text = re.sub(r'\[.*?\]', '', text)
         text = re.sub(r'\{.*?\}', '', text)
+        lines = text.splitlines()
+        prompt_patterns = [
+            r'^\s*请选择(?:你的)?(?:下一步)?行动\s*[:：].*$',
+            r'^\s*推荐行动\s*[:：].*$',
+            r'^\s*下一步行动\s*[:：].*$',
+        ]
+        text = '\n'.join(
+            line for line in lines
+            if not any(re.match(pattern, line) for pattern in prompt_patterns)
+        )
+        text = re.sub(r'([。！？.!?])\s*请选择(?:你的)?(?:下一步)?行动\s*[:：].*$', r'\1', text)
+        text = re.sub(r'([。！？.!?])\s*推荐行动\s*[:：].*$', r'\1', text)
+        text = re.sub(r'([。！？.!?])\s*下一步行动\s*[:：].*$', r'\1', text)
         text = text.strip()
         return text

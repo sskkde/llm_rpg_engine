@@ -259,6 +259,91 @@ def _is_world_stage_enabled(db: Session) -> bool:
         return False
 
 
+def _is_input_intent_stage_enabled(db: Session) -> bool:
+    """
+    Check if LLM input intent parsing stage is enabled via SystemSettingsService.
+    
+    Input intent stage is enabled when:
+    1. provider_mode is not "mock" (real LLM provider configured)
+    2. Input intent stage is explicitly enabled in settings (future: feature flag)
+    
+    Currently uses the same condition as other LLM stages.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
+def _build_input_intent_context(
+    db: Session,
+    session_id: str,
+    canonical_state: CanonicalState,
+    raw_input: str,
+    current_location_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build context for LLM input intent parsing.
+    
+    Includes: raw input, current location, visible NPCs, available locations.
+    Only player-visible facts — no hidden NPC info.
+    """
+    context: Dict[str, Any] = {
+        "session_id": session_id,
+        "raw_input": raw_input,
+        "constraints": [
+            "只能解析玩家输入为结构化意图",
+            "意图类型必须是: move, talk, inspect, interact, attack, idle, unknown 之一",
+            "目标必须是当前可见的实体或已知地点",
+            "不能虚构不存在的目标",
+        ],
+    }
+    
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+    
+    if session_state:
+        context["current_location_id"] = current_location_id or session_state.current_location_id
+    else:
+        context["current_location_id"] = current_location_id
+    
+    if context["current_location_id"]:
+        location_repo = LocationRepository(db)
+        location = location_repo.get_by_id(context["current_location_id"])
+        if location:
+            context["current_location"] = {
+                "id": location.id,
+                "name": location.name,
+                "code": location.code,
+            }
+    
+    visible_npcs = _get_visible_npcs(db, session_id, context.get("current_location_id"))
+    context["visible_npcs"] = visible_npcs
+    
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    if session and session.world_id:
+        location_repo = LocationRepository(db)
+        all_locations = location_repo.get_by_world(session.world_id)
+        context["available_locations"] = [
+            {"id": loc.id, "name": loc.name, "code": loc.code}
+            for loc in all_locations
+        ]
+    
+    player_state = canonical_state.player_state
+    context["player_state"] = {
+        "name": player_state.name,
+        "realm": player_state.realm,
+        "location_id": context.get("current_location_id"),
+    }
+    
+    return context
+
+
 def _build_world_context_for_turn(
     db: Session,
     session_id: str,
@@ -376,6 +461,190 @@ def _validate_world_proposal(proposal: Any) -> Tuple[bool, List[str]]:
                         errors.append(f"forbidden pattern in event[{i}] description: {pattern}")
 
     return (len(errors) == 0, errors)
+
+
+_VALID_INTENT_TYPES = {"move", "talk", "inspect", "interact", "attack", "idle", "unknown", "action"}
+_VALID_RISK_LEVELS = {"low", "medium", "high"}
+
+
+def _validate_input_intent_proposal(
+    proposal: Any,
+    input_context: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """
+    Validate an input intent proposal.
+    
+    Checks:
+    - proposal is not None
+    - intent_type is valid
+    - risk_level is valid (if present)
+    - target exists if intent_type requires it (move)
+    
+    Returns (is_valid, validation_errors).
+    """
+    errors: List[str] = []
+    
+    if proposal is None:
+        return (False, ["proposal is None"])
+    
+    if not hasattr(proposal, "intent_type"):
+        errors.append("proposal missing intent_type")
+    elif not proposal.intent_type:
+        errors.append("intent_type is empty")
+    elif proposal.intent_type not in _VALID_INTENT_TYPES:
+        errors.append(f"invalid intent_type: {proposal.intent_type}")
+    
+    if hasattr(proposal, "risk_level") and proposal.risk_level:
+        if proposal.risk_level not in _VALID_RISK_LEVELS:
+            errors.append(f"invalid risk_level: {proposal.risk_level}")
+    
+    if hasattr(proposal, "intent_type") and proposal.intent_type == "move":
+        if not hasattr(proposal, "target") or not proposal.target:
+            errors.append("move intent requires a target")
+    
+    return (len(errors) == 0, errors)
+
+
+
+def _execute_input_intent_stage(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    raw_input: str,
+    current_location_id: Optional[str] = None,
+) -> LLMStageResult:
+    """
+    Execute the input intent LLM stage.
+    
+    1. Check if enabled via feature flag
+    2. Build input context from committed state
+    3. Call ProposalPipeline.generate_input_intent()
+    4. Validate parsed intent
+    5. Return LLMStageResult with accepted/rejected status
+    """
+    from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+    
+    stage_name: LLMStageName = "input_intent"
+    timeout = 15.0
+    
+    enabled = _is_input_intent_stage_enabled(db)
+    if not enabled:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=False,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="input_intent_stage_disabled",
+        )
+    
+    input_context = _build_input_intent_context(
+        db=db,
+        session_id=session_id,
+        canonical_state=canonical_state,
+        raw_input=raw_input,
+        current_location_id=current_location_id,
+    )
+    
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        
+        llm_service = _create_llm_service_from_config(db, provider_config)
+        
+        pipeline_config = ProposalConfig(
+            timeout_seconds=timeout,
+            max_tokens=provider_config.get("max_tokens", 200),
+            temperature=provider_config.get("temperature", 0.3),
+        )
+        pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
+        
+    except Exception as e:
+        logger.warning("Failed to configure LLM service for input intent stage: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"llm_config_error: {str(e)[:200]}",
+        )
+    
+    try:
+        proposal = _run_async_safe(
+            pipeline.generate_input_intent(
+                raw_input=raw_input,
+                prompt_template_id="input_intent_v1",
+                session_id=session_id,
+                turn_no=turn_no,
+                context=input_context,
+            )
+        )
+        
+        is_valid, validation_errors = _validate_input_intent_proposal(proposal, input_context)
+        
+        if not is_valid:
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
+                raw_outcome=str(proposal)[:500] if proposal else None,
+                validation_errors=validation_errors,
+            )
+        
+        is_fallback = getattr(proposal, "is_fallback", False)
+        if is_fallback:
+            fallback_reason = "llm_proposal_fallback"
+            audit = getattr(proposal, "audit", None)
+            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
+                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=fallback_reason,
+                raw_outcome=str(proposal)[:500] if proposal else None,
+            )
+        
+        parsed_proposal: Dict[str, Any] = {
+            "intent_type": getattr(proposal, "intent_type", "unknown"),
+            "target": getattr(proposal, "target", None),
+            "target_type": getattr(proposal, "target_type", None),
+            "risk_level": getattr(proposal, "risk_level", "low"),
+            "raw_tokens": getattr(proposal, "raw_tokens", []),
+            "confidence": getattr(proposal, "confidence", 0.5),
+            "parameters": getattr(proposal, "parameters", {}),
+        }
+        
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            raw_outcome=str(proposal)[:500],
+            parsed_proposal=parsed_proposal,
+            accepted=True,
+        )
+        
+    except asyncio.TimeoutError:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="timeout",
+        )
+    except Exception as e:
+        logger.warning("LLM input intent stage failed: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"error: {str(e)[:200]}",
+        )
 
 
 def _execute_world_stage(
@@ -1205,13 +1474,15 @@ def _execute_llm_stages(
     current_location_id: Optional[str] = None,
 ) -> List[LLMStageResult]:
     """
-    Execute LLM-enabled stages for a turn.
+    Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
     
     Stage order:
     0. World stage - generate world progression candidates (pressure, flags, timers)
     1. Scene stage - generate scene event candidates and recommended actions
     2. NPC stage - generate NPC reactions (after scene, before narration)
     3. Narration stage - generate narrative text
+    
+    Note: input_intent stage runs before this function, in execute_turn_service().
     
     Each stage is feature-flagged via SystemSettingsService.
     Proposals are validated before acceptance.
@@ -1759,10 +2030,12 @@ def execute_turn_service(
     1. Initialize session story state if needed (idempotent)
     2. Reconstruct canonical state from DB
     3. Allocate turn number (DB-authoritative)
-    4. Parse player input and determine action type
-    5. Execute action (movement, scene, NPC, quest)
-    6. Commit turn to DB (adventure log, session state, recommended actions)
-    7. Return TurnResult
+    4. Execute input_intent LLM stage (parse player input)
+    5. Parse player input and determine action type (LLM or deterministic fallback)
+    6. Execute action (movement, scene, NPC, quest)
+    7. Commit turn to DB (adventure log, session state, recommended actions)
+    8. Execute remaining LLM stages (world, scene, NPC, narration)
+    9. Return TurnResult
     
     Args:
         db: SQLAlchemy database session
@@ -1835,10 +2108,39 @@ def execute_turn_service(
         if existing_result:
             return existing_result
     
-    # Step 5: Parse player input and determine action type
-    action_type, target = _parse_player_input(player_input)
+    # Get current location before input intent stage
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+    current_location_id = session_state.current_location_id if session_state else None
     
-    # Step 6: Execute action
+    # Step 5: Execute input intent LLM stage (before deterministic parsing)
+    input_intent_result = _execute_input_intent_stage(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        raw_input=player_input,
+        current_location_id=current_location_id,
+    )
+    
+    # Step 6: Parse player input and determine action type
+    # Use LLM intent if accepted, otherwise fall back to deterministic parser
+    action_type = "action"
+    target = None
+    input_intent_metadata: Optional[Dict[str, Any]] = None
+    input_intent_fallback_reason: Optional[str] = None
+    
+    if input_intent_result.accepted and input_intent_result.parsed_proposal:
+        parsed_intent = input_intent_result.parsed_proposal
+        action_type = parsed_intent.get("intent_type", "action")
+        target = parsed_intent.get("target")
+        input_intent_metadata = parsed_intent
+    else:
+        # Fallback to deterministic parser
+        action_type, target = _parse_player_input(player_input)
+        input_intent_fallback_reason = input_intent_result.fallback_reason
+    
+    # Step 7: Execute action
     movement_result: Optional[MovementResult] = None
     state_deltas: Dict[str, Any] = {}
     
@@ -1852,7 +2154,7 @@ def execute_turn_service(
             # Blocked movement - no state mutation
             state_deltas["blocked_reason"] = movement_result.blocked_reason
     
-    # Step 7: Check quest progression
+    # Step 8: Check quest progression
     if movement_result and movement_result.success:
         try:
             quest_results = check_quest_progression(
@@ -1873,8 +2175,7 @@ def execute_turn_service(
             # Quest progression failure should not block the turn
             pass
     
-    # Step 8: Generate recommended actions (deterministic fallback)
-    session_state_repo = SessionStateRepository(db)
+    # Step 9: Generate recommended actions (deterministic fallback)
     session_state = session_state_repo.get_by_session(session_id)
     
     current_location_id = None
@@ -1890,7 +2191,7 @@ def execute_turn_service(
         location_id=current_location_id,
     )
     
-    # Step 9: Build template narration (fallback-safe placeholder)
+    # Step 10: Build template narration (fallback-safe placeholder)
     narration = _build_narration(
         player_input=player_input,
         action_type=action_type,
@@ -1898,13 +2199,13 @@ def execute_turn_service(
         canonical_state=canonical_state,
     )
     
-    # Step 10: Get world time from session state
+    # Step 11: Get world time from session state
     world_time = _get_world_time(session_state)
     
-    # Step 11: Get player state
+    # Step 12: Get player state
     player_state = _get_player_state(canonical_state, current_location_id)
     
-    # Step 12: Commit turn to DB with template narration (durable commit first)
+    # Step 13: Commit turn to DB with template narration (durable commit first)
     transaction_id = f"txn_{session_id}_{turn_no}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     try:
@@ -1922,6 +2223,8 @@ def execute_turn_service(
                 "action_type": action_type,
                 "movement_success": movement_result.success if movement_result else None,
                 "new_location_id": movement_result.new_location_id if movement_result else None,
+                "input_intent": input_intent_metadata,
+                "input_intent_fallback_reason": input_intent_fallback_reason,
                 "llm_stages": [],
             },
             idempotency_key=idempotency_key,
@@ -1933,7 +2236,7 @@ def execute_turn_service(
             turn_no=turn_no,
         )
     
-    # Step 13: Execute LLM stages (scene before narration)
+    # Step 14: Execute LLM stages (scene before narration)
     llm_stage_results = _execute_llm_stages(
         db=db,
         session_id=session_id,
@@ -1946,7 +2249,7 @@ def execute_turn_service(
         current_location_id=current_location_id,
     )
     
-    # Step 14: Determine final recommended actions, scene summary, NPC reactions, and world progression
+    # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
     final_recommended_actions = deterministic_recommended_actions
     scene_event_summary: Optional[Dict[str, Any]] = None
     scene_fallback_reason: Optional[str] = None
@@ -1979,7 +2282,7 @@ def execute_turn_service(
             else:
                 npc_fallback_reason = stage_result.fallback_reason
     
-    # Step 15: If LLM narration accepted, update EventLogModel.narrative_text
+    # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
     final_narration = narration
     for stage_result in llm_stage_results:
         if stage_result.stage_name == "narration" and stage_result.accepted:
@@ -1988,8 +2291,9 @@ def execute_turn_service(
                 event_log_repo = EventLogRepository(db)
                 event_log_repo.update(event.id, {"narrative_text": final_narration})
     
-    # Step 16: Update result_json with LLM stage results, scene summary, and NPC reactions
+    # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
     llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
+    input_intent_stage_json = input_intent_result.to_result_json_dict()
     updated_result_json = {
         "transaction_id": transaction_id,
         "recommended_actions": final_recommended_actions,
@@ -1997,7 +2301,10 @@ def execute_turn_service(
         "action_type": action_type,
         "movement_success": movement_result.success if movement_result else None,
         "new_location_id": movement_result.new_location_id if movement_result else None,
+        "input_intent": input_intent_metadata,
+        "input_intent_fallback_reason": input_intent_fallback_reason,
         "llm_stages": llm_stages_json,
+        "input_intent_stage": input_intent_stage_json,
         "scene_event_summary": scene_event_summary,
         "scene_fallback_reason": scene_fallback_reason,
         "npc_reactions": npc_reactions_for_json,
@@ -2008,17 +2315,17 @@ def execute_turn_service(
     event_log_repo = EventLogRepository(db)
     event_log_repo.update(event.id, {"result_json": updated_result_json})
     
-    # Step 17: Update session state if movement succeeded
+    # Step 18: Update session state if movement succeeded
     if movement_result and movement_result.success and movement_result.new_location_id:
         session_state_repo.create_or_update({
             "session_id": session_id,
             "current_location_id": movement_result.new_location_id,
         })
     
-    # Step 18: Update last played
+    # Step 19: Update last played
     session_repo.update_last_played(session_id)
     
-    # Step 19: Return result
+    # Step 20: Return result
     return TurnResult(
         turn_no=turn_no,
         narration=final_narration,
@@ -2032,7 +2339,7 @@ def execute_turn_service(
         validation_passed=True,
         movement_result=movement_result,
         is_new_turn=is_new,
-        llm_stage_results=llm_stage_results,
+        llm_stage_results=[input_intent_result] + llm_stage_results,
     )
 
 

@@ -13,7 +13,7 @@ export function NarrationPanel({ narration, isStreaming }: NarrationPanelProps) 
   const t = useTranslations('Game');
 
   return (
-    <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-6 min-h-[200px]">
+    <div data-testid="narration-panel" className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-6 min-h-[200px]">
       <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-3">
         {t('narration')}
       </h3>

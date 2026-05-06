@@ -509,6 +509,35 @@ class ModelCallLogRepository(BaseRepository):
             ModelCallLogModel.session_id == session_id
         ).all()
         return sum(log.cost_estimate or 0 for log in result)
+    
+    def get_by_session_turn_prompttype(
+        self,
+        session_id: str,
+        turn_no: Optional[int] = None,
+        prompt_type: Optional[str] = None,
+    ) -> List[ModelCallLogModel]:
+        """
+        Query model call logs by session_id, turn_no, and optional prompt_type.
+        
+        Args:
+            session_id: Session ID to filter by
+            turn_no: Optional turn number to filter by
+            prompt_type: Optional prompt type to filter by
+            
+        Returns:
+            List of matching ModelCallLogModel entries
+        """
+        query = self.db.query(ModelCallLogModel).filter(
+            ModelCallLogModel.session_id == session_id
+        )
+        
+        if turn_no is not None:
+            query = query.filter(ModelCallLogModel.turn_no == turn_no)
+        
+        if prompt_type is not None:
+            query = query.filter(ModelCallLogModel.prompt_type == prompt_type)
+        
+        return query.order_by(ModelCallLogModel.turn_no).all()
 
 
 class CombatSessionRepository(BaseRepository):

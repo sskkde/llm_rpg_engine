@@ -17,6 +17,7 @@ describe('LogPanel', () => {
 
   it('renders empty state', () => {
     renderWithIntl(<LogPanel entries={[]} />);
+    expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
     expect(screen.getByText('暂无回合')).toBeInTheDocument();
   });
 
@@ -29,6 +30,8 @@ describe('LogPanel', () => {
     });
     
     renderWithIntl(<LogPanel entries={[entry]} />);
+    expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
+    expect(screen.getByTestId('adventure-log-entry')).toBeInTheDocument();
     expect(screen.getByText('初始场景')).toBeInTheDocument();
   });
 
@@ -41,6 +44,8 @@ describe('LogPanel', () => {
     });
     
     renderWithIntl(<LogPanel entries={[entry]} />);
+    expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
+    expect(screen.getByTestId('adventure-log-entry')).toBeInTheDocument();
     expect(screen.getByText(/回合 1/)).toBeInTheDocument();
     expect(screen.getByText(/向前走/)).toBeInTheDocument();
   });
@@ -58,10 +63,10 @@ describe('LogPanel', () => {
       <LogPanel entries={[entry]} selectedEntryId="turn-1" onSelectEntry={onSelectEntry} />
     );
     
-    const button = screen.getByRole('button');
+    const button = screen.getByTestId('adventure-log-entry').querySelector('button');
 
     expect(button).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(button);
+    fireEvent.click(button!);
     expect(onSelectEntry).toHaveBeenCalledWith(entry);
   });
 
@@ -82,7 +87,10 @@ describe('LogPanel', () => {
 
     renderWithIntl(<LogPanel entries={[entry1, entry2]} onSelectEntry={onSelectEntry} />);
     
-    fireEvent.click(screen.getAllByRole('button')[0]);
+    const entries = screen.getAllByTestId('adventure-log-entry');
+    expect(entries).toHaveLength(2);
+    
+    fireEvent.click(entries[0].querySelector('button')!);
     expect(onSelectEntry).toHaveBeenCalledWith(entry1);
     expect(screen.queryByText('玩家行动:')).not.toBeInTheDocument();
     expect(screen.queryByText('叙事:')).not.toBeInTheDocument();
@@ -97,6 +105,9 @@ describe('LogPanel', () => {
     });
     
     renderWithIntl(<LogPanel entries={[entry]} />);
+
+    expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
+    expect(screen.getByTestId('adventure-log-entry')).toBeInTheDocument();
 
     // Verify internal fields are NOT in DOM
     expect(screen.queryByText('result_json')).not.toBeInTheDocument();

@@ -19,7 +19,7 @@ Key invariants:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Literal
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -45,6 +45,62 @@ from ..storage.repositories import (
     LocationRepository,
 )
 from ..models.states import CanonicalState
+
+
+# =============================================================================
+# LLM Stage Contract
+# =============================================================================
+
+# Stage names for LLM-enabled turn stages
+LLMStageName = Literal["narration", "scene", "npc", "world", "input_intent"]
+
+
+@dataclass
+class LLMStageResult:
+    """
+    Contract for a single LLM-enabled turn stage.
+    
+    This internal contract is used by execute_turn_service() to track
+    LLM stage execution without changing the public API schema.
+    
+    Fields:
+        stage_name: The stage identifier (narration, scene, npc, world, input_intent)
+        enabled: Whether this stage was enabled (via feature flag)
+        timeout: Timeout in seconds for this stage
+        raw_outcome: Raw output from the LLM provider (truncated for storage)
+        parsed_proposal: Parsed and validated proposal from the LLM
+        accepted: Whether the proposal was accepted (passed validation)
+        fallback_reason: Reason for using fallback (if applicable)
+        validation_errors: List of validation errors (if rejected)
+        model_call_id: DB identifier for the model_call_logs entry (if real provider call)
+    
+    Invariants:
+        - If accepted is True, validation_errors must be empty
+        - If fallback_reason is not None, raw_outcome may be empty
+        - model_call_id is only set for real provider calls, not mocks
+        - parsed_proposal is None if parsing failed or fallback used
+    """
+    stage_name: LLMStageName
+    enabled: bool
+    timeout: float
+    raw_outcome: Optional[str] = None
+    parsed_proposal: Optional[Dict[str, Any]] = None
+    accepted: bool = False
+    fallback_reason: Optional[str] = None
+    validation_errors: List[str] = field(default_factory=list)
+    model_call_id: Optional[str] = None
+    
+    def to_result_json_dict(self) -> Dict[str, Any]:
+        """Convert LLMStageResult to a dict for storage in result_json."""
+        return {
+            "stage_name": self.stage_name,
+            "enabled": self.enabled,
+            "timeout": self.timeout,
+            "accepted": self.accepted,
+            "fallback_reason": self.fallback_reason,
+            "validation_errors": self.validation_errors,
+            "model_call_id": self.model_call_id,
+        }
 
 
 class TurnServiceError(Exception):
@@ -91,6 +147,44 @@ class TurnResult:
     validation_passed: bool = True
     movement_result: Optional[MovementResult] = None
     is_new_turn: bool = True
+    llm_stage_results: List[LLMStageResult] = field(default_factory=list)
+
+
+def _execute_llm_stages(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    player_input: str,
+) -> List[LLMStageResult]:
+    """
+    Execute LLM-enabled stages for a turn.
+    
+    This is a hook point for LLM stage execution. Currently returns empty
+    results as a placeholder. Actual LLM calls will be added in Tasks 3-6.
+    
+    Stages (in execution order):
+    1. input_intent: Parse player input into structured intent
+    2. world: Generate world tick candidates
+    3. scene: Generate scene event candidates
+    4. npc: Generate NPC action proposals
+    5. narration: Generate narration from committed state
+    
+    Each stage is feature-flagged via SystemSettingsService.
+    Proposals are validated before acceptance.
+    Fallback to deterministic behavior on timeout/parse failure/validation rejection.
+    
+    Args:
+        db: SQLAlchemy database session
+        session_id: The session ID
+        turn_no: The allocated turn number
+        canonical_state: Reconstructed canonical state (read-only)
+        player_input: The player's input text
+        
+    Returns:
+        List of LLMStageResult objects, one per stage executed
+    """
+    return []
 
 
 def execute_turn_service(
@@ -271,6 +365,7 @@ def execute_turn_service(
                 "action_type": action_type,
                 "movement_success": movement_result.success if movement_result else None,
                 "new_location_id": movement_result.new_location_id if movement_result else None,
+                "llm_stages": [],  # List of LLM stage metadata entries
             },
             idempotency_key=idempotency_key,
         )

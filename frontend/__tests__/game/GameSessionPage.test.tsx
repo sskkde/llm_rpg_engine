@@ -66,6 +66,8 @@ describe('GameSessionPage - adventure log loading', () => {
     renderPage();
 
     await waitFor(() => {
+      expect(screen.getByTestId('narration-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
       expect(screen.getByText('你站在一座古老的山门前，云雾缭绕。')).toBeInTheDocument();
     });
   });
@@ -95,6 +97,8 @@ describe('GameSessionPage - adventure log loading', () => {
     renderPage();
 
     await waitFor(() => {
+      expect(screen.getByTestId('narration-panel')).toBeInTheDocument();
+      expect(screen.getAllByTestId('adventure-log-entry')).toHaveLength(2);
       expect(screen.getByText('你环顾四周，发现一条蜿蜒的小路通向山林深处。')).toBeInTheDocument();
     });
   });
@@ -127,7 +131,8 @@ describe('GameSessionPage - adventure log loading', () => {
       expect(screen.getByText('最新回合叙事。')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: /在叙事栏中显示这条日志/ })[0]);
+    const logEntries = screen.getAllByTestId('adventure-log-entry');
+    fireEvent.click(logEntries[0].querySelector('button')!);
 
     expect(screen.getByText('初始场景叙事。')).toBeInTheDocument();
   });
@@ -148,8 +153,12 @@ describe('GameSessionPage - adventure log loading', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '检查石阶' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: '前往试炼堂' })).toBeInTheDocument();
+      expect(screen.getByTestId('recommended-actions')).toBeInTheDocument();
     });
+
+    const actionButtons = screen.getAllByTestId('recommended-action-button');
+    expect(actionButtons).toHaveLength(2);
+    expect(actionButtons[0]).toHaveTextContent('检查石阶');
+    expect(actionButtons[1]).toHaveTextContent('前往试炼堂');
   });
 });

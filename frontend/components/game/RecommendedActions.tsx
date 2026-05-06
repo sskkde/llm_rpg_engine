@@ -16,7 +16,7 @@ export function RecommendedActions({ actions, onSelect, isDisabled }: Recommende
   if (actions.length === 0) return null;
 
   return (
-    <div>
+    <div data-testid="recommended-actions">
       <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">
         {t('recommendedActions')}
       </h3>
@@ -28,6 +28,7 @@ export function RecommendedActions({ actions, onSelect, isDisabled }: Recommende
             size="sm"
             onClick={() => onSelect(action)}
             disabled={isDisabled}
+            data-testid="recommended-action-button"
           >
             {action}
           </Button>

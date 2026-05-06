@@ -30,6 +30,12 @@ from .turn_output import finalize_turn_output
 from ..storage.models import UserModel
 
 from ..core.turn_orchestrator import TurnOrchestrator, TurnValidationError
+from ..core.turn_service import (
+    execute_turn_service,
+    SessionNotFoundError as TurnServiceSessionNotFoundError,
+    TurnServiceError,
+    TurnValidationError as TurnServiceValidationError,
+)
 from ..core.event_log import EventLog
 from ..core.canonical_state import CanonicalStateManager
 from ..core.action_scheduler import ActionScheduler
@@ -317,91 +323,22 @@ async def execute_turn_stream(
     """
     event_id = str(uuid.uuid4())
     
-    # Initialize LLM service based on system settings
-    from ..services.settings import SystemSettingsService
-    settings_service = SystemSettingsService(db)
-    provider_config = settings_service.get_provider_config()
-    
-    provider_error = None
-    if use_mock or provider_config["provider_mode"] == "mock":
-        provider = MockLLMProvider()
-    elif provider_config["provider_mode"] == "custom":
-        settings = settings_service.get_settings()
-        custom_key = settings_service.get_effective_custom_api_key()
-        custom_url = settings_service.get_effective_custom_base_url()
-        if not custom_url:
-            provider_error = "Custom provider requires custom_base_url"
-        elif not custom_key:
-            if settings.custom_api_key_encrypted:
-                provider_error = "Custom provider API key cannot be decrypted. Set a new custom API key in system settings."
-            else:
-                provider_error = "Custom provider requires custom API key"
-        else:
-            from ..llm.service import OpenAIProvider
-            provider = OpenAIProvider(
-                api_key=custom_key,
-                base_url=custom_url,
-                model=provider_config.get("default_model"),
-                temperature=provider_config.get("temperature"),
-                max_tokens=provider_config.get("max_tokens"),
-            )
-    else:
-        effective_key = settings_service.get_effective_openai_key()
-        if effective_key:
-            from ..llm.service import OpenAIProvider
-            provider = OpenAIProvider(
-                api_key=effective_key,
-                model=provider_config.get("default_model"),
-                temperature=provider_config.get("temperature"),
-                max_tokens=provider_config.get("max_tokens"),
-            )
-        elif provider_config["provider_mode"] == "openai":
-            provider_error = "No effective OpenAI API key available"
-        else:
-            provider = MockLLMProvider()
-    
-    if provider_error:
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": turn_index,
-                "error_type": "provider_error",
-                "message": provider_error,
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
-        return
-
-    llm_service = get_llm_service(provider=provider, db_session=db)
-    
     try:
         # 1. Emit turn_started
         yield format_sse(
             "turn_started",
             {
                 "session_id": session_id,
-                "turn_index": turn_index,
+                "turn_index": None,
                 "player_input": player_input,
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_start"
         )
         
-        # Get orchestrator with LLM service for proposal pipeline
-        orchestrator = get_or_create_orchestrator(game_id, llm_service=llm_service)
-        
-        # Initialize game state if needed
-        existing_state = orchestrator._state_manager.get_state(game_id)
-        if existing_state is None:
-            _initialize_game_state(game_id, orchestrator._state_manager)
-        
-        # Execute turn (non-streaming for the core logic)
-        result = orchestrator.execute_turn(
+        result = execute_turn_service(
+            db=db,
             session_id=session_id,
-            game_id=game_id,
-            turn_index=turn_index,
             player_input=player_input,
         )
         
@@ -410,11 +347,11 @@ async def execute_turn_stream(
             "event_committed",
             {
                 "session_id": session_id,
-                "turn_index": turn_index,
-                "transaction_id": result.get("transaction_id"),
-                "events_committed": result.get("events_committed", 0),
-                "actions_committed": result.get("actions_committed", 0),
-                "world_time": result.get("world_time"),
+                "turn_index": result.turn_no,
+                "transaction_id": result.transaction_id,
+                "events_committed": result.events_committed,
+                "actions_committed": result.actions_committed,
+                "world_time": result.world_time,
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_committed"
@@ -423,90 +360,65 @@ async def execute_turn_stream(
         # Small delay to ensure frontend processes the commit event
         await asyncio.sleep(0.05)
         
-        accumulated_narration = []
-        async for chunk in generate_narration_stream(
-            game_id=game_id,
-            turn_index=turn_index,
-            session_id=session_id,
-            llm_service=llm_service,
-            orchestrator=orchestrator,
-            forbidden_info=result.get("forbidden_info", []),
-        ):
-            accumulated_narration.append(chunk)
+        if result.narration:
             yield format_sse(
                 "narration_delta",
                 {
-                    "delta": chunk,
-                    "turn_index": turn_index,
+                    "delta": result.narration,
+                    "turn_index": result.turn_no,
                 },
                 event_id=f"{event_id}_delta"
             )
-            # Small delay for natural streaming effect
             await asyncio.sleep(0.01)
-        
-        # Get full narration
-        full_narration = "".join(accumulated_narration) if accumulated_narration else result.get("narration", "")
-        narration, recommended_actions = finalize_turn_output(
-            full_narration,
-            forbidden_info=result.get("forbidden_info", []),
-        )
-        
-        # 4. Persist adventure log, session state, and last_played BEFORE turn_completed
-        event_log_repo = EventLogRepository(db)
-        event_log_repo.create_or_get_player_turn(
-            session_id=session_id,
-            turn_no=turn_index,
-            input_text=player_input,
-            narrative_text=narration,
-            result_json={
-                "transaction_id": result.get("transaction_id"),
-                "recommended_actions": recommended_actions,
-            },
-        )
-        
-        from ..storage.repositories import SessionStateRepository
-        state_repo = SessionStateRepository(db)
-        resolved_location_id = _resolve_location_id(
-            result["player_state"].get("location_id"),
-            db,
-            world_id,
-        )
-        state_repo.create_or_update({
-            "session_id": session_id,
-            "current_time": result["world_time"].get("period", "未知"),
-            "time_phase": result["world_time"].get("period", "未知"),
-            "active_mode": "exploration",
-            "current_location_id": resolved_location_id,
-        })
-        
-        session_repo = SessionRepository(db)
-        session_repo.update_last_played(session_id)
         
         # 5. Emit turn_completed
         yield format_sse(
             "turn_completed",
             {
                 "session_id": session_id,
-                "turn_index": turn_index,
-                "narration": narration,
-                "recommended_actions": recommended_actions,
-                "player_state": result.get("player_state"),
-                "world_time": result.get("world_time"),
+                "turn_index": result.turn_no,
+                "narration": result.narration,
+                "recommended_actions": result.recommended_actions,
+                "player_state": result.player_state,
+                "world_time": result.world_time,
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_complete"
         )
         
-    except TurnValidationError as e:
+    except TurnServiceValidationError as e:
         yield format_sse(
             "turn_error",
             {
                 "session_id": session_id,
-                "turn_index": turn_index,
+                "turn_index": e.turn_no,
                 "error_type": "validation_error",
                 "message": str(e),
-                "errors": e.validation_result.errors if e.validation_result else [],
-                "audit_event_id": e.audit_event_id,
+                "errors": e.errors,
+                "timestamp": datetime.now().isoformat(),
+            },
+            event_id=f"{event_id}_error"
+        )
+    except TurnServiceSessionNotFoundError as e:
+        yield format_sse(
+            "turn_error",
+            {
+                "session_id": session_id,
+                "turn_index": e.turn_no,
+                "error_type": "session_not_found",
+                "message": str(e),
+                "timestamp": datetime.now().isoformat(),
+            },
+            event_id=f"{event_id}_error"
+        )
+    except TurnServiceError as e:
+        yield format_sse(
+            "turn_error",
+            {
+                "session_id": session_id,
+                "turn_index": e.turn_no,
+                "error_type": "turn_service_error",
+                "message": str(e),
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_error"
@@ -563,15 +475,11 @@ async def stream_turn(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index without polluting orchestrator cache
-    current_turn = _get_current_turn_index(game_id)
-    next_turn = current_turn + 1
-    
     return StreamingResponse(
         execute_turn_stream(
             session_id=session_id,
             game_id=game_id,
-            turn_index=next_turn,
+            turn_index=0,
             player_input=request.action,
             db=db,
             world_id=session.world_id,
@@ -615,15 +523,11 @@ async def stream_turn_mock(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index without polluting orchestrator cache
-    current_turn = _get_current_turn_index(game_id)
-    next_turn = current_turn + 1
-    
     return StreamingResponse(
         execute_turn_stream(
             session_id=session_id,
             game_id=game_id,
-            turn_index=next_turn,
+            turn_index=0,
             player_input=request.action,
             db=db,
             world_id=session.world_id,

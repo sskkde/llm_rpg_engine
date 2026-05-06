@@ -15,7 +15,7 @@ export function LogPanel({ entries, selectedEntryId, onSelectEntry }: LogPanelPr
 
   if (entries.length === 0) {
     return (
-      <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+      <div data-testid="adventure-log" className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
         <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">
           {t('adventureLog')}
         </h3>
@@ -25,7 +25,7 @@ export function LogPanel({ entries, selectedEntryId, onSelectEntry }: LogPanelPr
   }
 
   return (
-    <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+    <div data-testid="adventure-log" className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
       <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-3">
         {t('adventureLog')}
       </h3>
@@ -40,6 +40,7 @@ export function LogPanel({ entries, selectedEntryId, onSelectEntry }: LogPanelPr
           return (
             <div
               key={entry.id}
+              data-testid="adventure-log-entry"
               className={`text-sm border-l-2 pl-3 ${
                 isSelected
                   ? 'border-indigo-500 dark:border-indigo-400'

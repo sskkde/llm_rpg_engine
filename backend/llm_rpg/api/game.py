@@ -27,6 +27,12 @@ from .turn_factory import build_turn_orchestrator
 from ..storage.models import UserModel
 
 from ..core.turn_orchestrator import TurnOrchestrator, TurnValidationError
+from ..core.turn_service import (
+    execute_turn_service,
+    SessionNotFoundError as TurnServiceSessionNotFoundError,
+    TurnServiceError,
+    TurnValidationError as TurnServiceValidationError,
+)
 from ..core.canonical_state import CanonicalStateManager
 from ..llm.service import LLMService, MockLLMProvider, OpenAIProvider, get_llm_service
 from ..services.settings import SystemSettingsService
@@ -284,77 +290,42 @@ def execute_turn(
             detail="Access denied"
         )
 
-    game_id = f"game_{session_id}"
-
-    orchestrator = get_or_create_orchestrator(game_id, db)
-    existing_state = orchestrator._state_manager.get_state(game_id)
-    if existing_state is None:
-        _initialize_game_state(game_id, orchestrator._state_manager)
-
-    # Get current turn from event log
-    recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
-    if recent_events:
-        current_turn = recent_events[0].turn_index
-    else:
-        current_turn = 0
-
-    next_turn = current_turn + 1
-
     try:
-        result = orchestrator.execute_turn(
+        result = execute_turn_service(
+            db=db,
             session_id=session_id,
-            game_id=game_id,
-            turn_index=next_turn,
             player_input=request.action,
         )
-        narration, recommended_actions = finalize_turn_output(
-            result["narration"],
-            forbidden_info=result.get("forbidden_info", []),
-        )
 
-        # Update session state in database
-        state_repo = SessionStateRepository(db)
-        resolved_location_id = _resolve_location_id(
-            result["player_state"].get("location_id"),
-            db,
-            session,
+        return TurnResponse(
+            turn_index=result.turn_no,
+            narration=result.narration,
+            recommended_actions=result.recommended_actions,
+            world_time=result.world_time,
+            player_state=result.player_state,
+            events_committed=result.events_committed,
+            actions_committed=result.actions_committed,
+            validation_passed=result.validation_passed,
+            transaction_id=result.transaction_id or "",
         )
-        state_repo.create_or_update({
-            "session_id": session_id,
-            "current_time": result["world_time"].get("period", "未知"),
-            "time_phase": result["world_time"].get("period", "未知"),
-            "active_mode": "exploration",
-            "current_location_id": resolved_location_id,
-        })
-        
-        # Update last played
-        session_repo.update_last_played(session_id)
-        
-        # Create player_turn adventure log entry
-        event_log_repo = EventLogRepository(db)
-        event_log_repo.create_or_get_player_turn(
-            session_id=session_id,
-            turn_no=next_turn,
-            input_text=request.action,
-            narrative_text=narration,
-            result_json={
-                "transaction_id": result["transaction_id"],
-                "recommended_actions": recommended_actions,
+    except TurnServiceValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": str(e),
+                "errors": e.errors,
             },
         )
-        
-        return TurnResponse(
-            turn_index=result["turn_index"],
-            narration=narration,
-            recommended_actions=recommended_actions,
-            world_time=result["world_time"],
-            player_state=result["player_state"],
-            events_committed=result["events_committed"],
-            actions_committed=result["actions_committed"],
-            validation_passed=result["validation_passed"],
-            transaction_id=result["transaction_id"],
+    except TurnServiceSessionNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
         )
-        
+    except TurnServiceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
     except TurnValidationError as e:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

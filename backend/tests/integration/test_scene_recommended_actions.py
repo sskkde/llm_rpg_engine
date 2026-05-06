@@ -135,7 +135,7 @@ def test_locations(db: Session, test_world: WorldModel, test_chapter: ChapterMod
             name="秘境入口",
             tags=["dungeon", "danger_high"],
             description="秘境入口",
-            access_rules={"item_required": "gate_key", "quest_completed": "investigate_cliff"},
+            access_rules={"item_required": "gate_key", "quest_completed": "investigate_anomaly"},
         ),
     ]
     for loc in locations:

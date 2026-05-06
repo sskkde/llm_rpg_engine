@@ -161,7 +161,7 @@ LOCATIONS_CONFIG = [
         "chapter_no": 2,
         "tags": ["dungeon", "danger_high", "key_location"],
         "description": "山林深处隐蔽着一处石门，石门缝隙里吹出寒气。这里是通往异变核心的入口。",
-        "access_rules": {"item_required": "gate_key", "quest_completed": "investigate_cliff"},
+        "access_rules": {"item_required": "gate_key", "quest_completed": "investigate_anomaly"},
     },
     {
         "code": "core",

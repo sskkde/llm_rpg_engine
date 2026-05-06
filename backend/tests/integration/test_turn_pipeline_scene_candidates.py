@@ -407,3 +407,271 @@ class TestAuditLoggingForSceneCandidates:
         
         engine.clear_audit_log()
         assert len(engine.get_audit_log()) == 0
+
+
+class TestSceneStageRecommendedActions:
+    """Tests for scene stage influencing recommended_actions."""
+    
+    def test_scene_proposal_influences_recommended_actions_when_accepted(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch, MagicMock, AsyncMock
+        from llm_rpg.models.proposals import (
+            SceneEventProposal,
+            CandidateEvent,
+            ProposalAuditMetadata,
+            ProposalType,
+            ProposalSource,
+            ValidationStatus,
+        )
+        from llm_rpg.llm.service import MockLLMProvider, LLMService
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        scene_recommended = ["探索洞穴", "与神秘人交谈", "检查石碑", "返回入口"]
+        
+        mock_proposal = SceneEventProposal(
+            scene_id="test_scene",
+            scene_name="Test Scene",
+            candidate_events=[
+                CandidateEvent(
+                    event_type="discovery",
+                    description="你发现了一个隐藏的洞穴入口。",
+                    importance=0.8,
+                )
+            ],
+            recommended_actions=scene_recommended,
+            confidence=0.9,
+            audit=ProposalAuditMetadata(
+                proposal_type=ProposalType.SCENE_EVENT,
+                source_engine=ProposalSource.SCENE_ENGINE,
+                validation_status=ValidationStatus.PASSED,
+            ),
+            is_fallback=False,
+        )
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
+            with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
+                mock_provider = MockLLMProvider()
+                mock_service = LLMService(provider=mock_provider, db_session=None)
+                mock_create.return_value = mock_service
+                
+                with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
+                    mock_pipeline_instance = MagicMock()
+                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    MockPipeline.return_value = mock_pipeline_instance
+                    
+                    response = client.post(
+                        f"/game/sessions/{session_id}/turn",
+                        json={"action": "探索"},
+                        headers=auth_headers
+                    )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["recommended_actions"] == scene_recommended
+        assert len(data["recommended_actions"]) <= 4
+    
+    def test_fallback_to_deterministic_actions_on_scene_rejection(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch
+        from llm_rpg.llm.service import MockLLMProvider, LLMService
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
+            with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
+                mock_provider = MockLLMProvider()
+                mock_service = LLMService(provider=mock_provider, db_session=None)
+                mock_create.return_value = mock_service
+                
+                response = client.post(
+                    f"/game/sessions/{session_id}/turn",
+                    json={"action": "观察"},
+                    headers=auth_headers
+                )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data["recommended_actions"], list)
+        assert len(data["recommended_actions"]) <= 4
+        for action in data["recommended_actions"]:
+            assert isinstance(action, str)
+    
+    def test_scene_event_summary_in_result_json(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch, MagicMock, AsyncMock
+        from llm_rpg.models.proposals import (
+            SceneEventProposal,
+            CandidateEvent,
+            ProposalAuditMetadata,
+            ProposalType,
+            ProposalSource,
+            ValidationStatus,
+        )
+        from llm_rpg.llm.service import MockLLMProvider, LLMService
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        mock_proposal = SceneEventProposal(
+            scene_id="test_scene",
+            scene_name="Ancient Temple",
+            candidate_events=[
+                CandidateEvent(
+                    event_type="atmosphere",
+                    description="古老的符文在墙上闪烁。",
+                    importance=0.6,
+                )
+            ],
+            recommended_actions=["检查符文", "继续探索"],
+            confidence=0.8,
+            audit=ProposalAuditMetadata(
+                proposal_type=ProposalType.SCENE_EVENT,
+                source_engine=ProposalSource.SCENE_ENGINE,
+                validation_status=ValidationStatus.PASSED,
+            ),
+            is_fallback=False,
+        )
+        
+        from llm_rpg.storage.repositories import EventLogRepository
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
+            with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
+                mock_provider = MockLLMProvider()
+                mock_service = LLMService(provider=mock_provider, db_session=None)
+                mock_create.return_value = mock_service
+                
+                with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
+                    mock_pipeline_instance = MagicMock()
+                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    MockPipeline.return_value = mock_pipeline_instance
+                    
+                    response = client.post(
+                        f"/game/sessions/{session_id}/turn",
+                        json={"action": "观察"},
+                        headers=auth_headers
+                    )
+        
+        assert response.status_code == 200
+        
+        SessionLocal = sessionmaker(bind=db_engine)
+        db = SessionLocal()
+        try:
+            event_log_repo = EventLogRepository(db)
+            event = event_log_repo.get_by_session_turn_event(session_id, 1, "player_turn")
+            assert event is not None
+            result_json = event.result_json
+            assert "scene_event_summary" in result_json
+            assert result_json["scene_event_summary"] is not None
+            assert result_json["scene_event_summary"]["scene_id"] == "test_scene"
+            assert result_json["scene_event_summary"]["scene_name"] == "Ancient Temple"
+            assert len(result_json["scene_event_summary"]["candidate_events"]) == 1
+        finally:
+            db.close()
+    
+    def test_no_extra_turn_rows_created(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch
+        from llm_rpg.llm.service import MockLLMProvider, LLMService
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
+            with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
+                mock_provider = MockLLMProvider()
+                mock_service = LLMService(provider=mock_provider, db_session=None)
+                mock_create.return_value = mock_service
+                
+                response = client.post(
+                    f"/game/sessions/{session_id}/turn",
+                    json={"action": "观察"},
+                    headers=auth_headers
+                )
+        
+        assert response.status_code == 200
+        
+        from llm_rpg.storage.repositories import EventLogRepository
+        
+        SessionLocal = sessionmaker(bind=db_engine)
+        db = SessionLocal()
+        try:
+            event_log_repo = EventLogRepository(db)
+            events = event_log_repo.get_recent(session_id, limit=10)
+            assert len(events) == 1
+        finally:
+            db.close()
+    
+    def test_recommended_actions_max_four(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch, MagicMock, AsyncMock
+        from llm_rpg.models.proposals import (
+            SceneEventProposal,
+            CandidateEvent,
+            ProposalAuditMetadata,
+            ProposalType,
+            ProposalSource,
+            ValidationStatus,
+        )
+        from llm_rpg.llm.service import MockLLMProvider, LLMService
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        valid_actions = ["行动1", "行动2", "行动3", "行动4"]
+        
+        mock_proposal = SceneEventProposal(
+            scene_id="test_scene",
+            candidate_events=[],
+            recommended_actions=valid_actions,
+            confidence=0.8,
+            audit=ProposalAuditMetadata(
+                proposal_type=ProposalType.SCENE_EVENT,
+                source_engine=ProposalSource.SCENE_ENGINE,
+                validation_status=ValidationStatus.PASSED,
+            ),
+            is_fallback=False,
+        )
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
+            with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
+                mock_provider = MockLLMProvider()
+                mock_service = LLMService(provider=mock_provider, db_session=None)
+                mock_create.return_value = mock_service
+                
+                with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
+                    mock_pipeline_instance = MagicMock()
+                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    MockPipeline.return_value = mock_pipeline_instance
+                    
+                    response = client.post(
+                        f"/game/sessions/{session_id}/turn",
+                        json={"action": "观察"},
+                        headers=auth_headers
+                    )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["recommended_actions"]) == 4
+        assert data["recommended_actions"] == valid_actions
+    
+    def test_scene_stage_disabled_uses_deterministic_actions(
+        self, client, auth_headers, db_engine, sample_world_data
+    ):
+        from unittest.mock import patch
+        
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=False):
+            response = client.post(
+                f"/game/sessions/{session_id}/turn",
+                json={"action": "观察"},
+                headers=auth_headers
+            )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data["recommended_actions"], list)
+        assert len(data["recommended_actions"]) <= 4

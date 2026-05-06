@@ -208,6 +208,9 @@ class SceneEventProposal(BaseModel):
     suggested_transition: Optional[str] = Field(None, description="建议的场景转换")
     transition_reason: Optional[str] = Field(None, description="转换原因")
     
+    # Recommended actions (optional hints for player)
+    recommended_actions: List[str] = Field(default_factory=list, description="推荐行动")
+    
     # Visibility
     visibility: str = Field(default="player_visible", description="可见性")
     

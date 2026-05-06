@@ -199,6 +199,26 @@ def _is_narration_stage_enabled(db: Session) -> bool:
         return False
 
 
+def _is_scene_stage_enabled(db: Session) -> bool:
+    """
+    Check if LLM scene stage is enabled via SystemSettingsService.
+    
+    Scene stage is enabled when:
+    1. provider_mode is not "mock" (real LLM provider configured)
+    2. Scene stage is explicitly enabled in settings (future: feature flag)
+    
+    Currently uses the same condition as narration stage.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
 def _build_narration_context(
     db: Session,
     session_id: str,
@@ -379,6 +399,88 @@ def _get_recent_events(
     return events
 
 
+def _build_scene_context(
+    db: Session,
+    session_id: str,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build scene context from committed state for scene candidate generation.
+    
+    Context includes:
+    - Current location details
+    - Player action type and input
+    - Visible NPCs at location (public identity only)
+    - Active quest states
+    - Recent event log entries
+    - Movement result (if any)
+    - State deltas from this turn
+    
+    Returns a dict suitable for SceneEngine.generate_scene_candidates().
+    """
+    context: Dict[str, Any] = {
+        "session_id": session_id,
+        "player_input": player_input,
+        "action_type": action_type,
+    }
+    
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+    
+    context["current_location_id"] = current_location_id
+    if session_state:
+        context["world_time"] = _get_world_time(session_state)
+        context["active_mode"] = session_state.active_mode
+    else:
+        context["world_time"] = _get_world_time(None)
+    
+    if current_location_id:
+        location_repo = LocationRepository(db)
+        location = location_repo.get_by_id(current_location_id)
+        if location:
+            context["current_location"] = {
+                "id": location.id,
+                "name": location.name,
+                "code": location.code,
+                "description": location.description,
+            }
+    
+    if movement_result:
+        context["movement"] = {
+            "success": movement_result.success,
+            "new_location_name": movement_result.new_location_name,
+            "new_location_code": movement_result.new_location_code,
+            "blocked_reason": movement_result.blocked_reason,
+        }
+    
+    if state_deltas:
+        context["state_deltas"] = state_deltas
+    
+    visible_npcs = _get_visible_npcs(db, session_id, current_location_id)
+    context["visible_npcs"] = visible_npcs
+    
+    active_quests = _get_active_quests(db, session_id)
+    context["active_quests"] = active_quests
+    
+    recent_events = _get_recent_events(db, session_id, limit=5)
+    context["recent_events"] = recent_events
+    
+    player_state = canonical_state.player_state
+    context["player_state"] = {
+        "name": player_state.name,
+        "realm": player_state.realm,
+        "spiritual_power": player_state.spiritual_power,
+        "location_id": current_location_id,
+    }
+    
+    return context
+
+
 def _execute_llm_stages(
     db: Session,
     session_id: str,
@@ -393,12 +495,9 @@ def _execute_llm_stages(
     """
     Execute LLM-enabled stages for a turn.
     
-    Currently implements the narration stage:
-    1. Check if narration stage is enabled via SystemSettingsService
-    2. Build narration context from committed state
-    3. Call NarrationEngine/ProposalPipeline.generate_narration() through LLMService
-    4. Parse and validate LLM output
-    5. Return LLMStageResult with accepted/rejected status
+    Stage order (scene runs before narration):
+    1. Scene stage - generate scene event candidates and recommended actions
+    2. Narration stage - generate narrative text
     
     Each stage is feature-flagged via SystemSettingsService.
     Proposals are validated before acceptance.
@@ -419,6 +518,19 @@ def _execute_llm_stages(
         List of LLMStageResult objects, one per stage executed
     """
     results: List[LLMStageResult] = []
+    
+    scene_result = _execute_scene_stage(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    results.append(scene_result)
     
     narration_result = _execute_narration_stage(
         db=db,
@@ -656,6 +768,225 @@ def _check_forbidden_info_leaks(
     return leaks
 
 
+def _validate_scene_proposal(
+    proposal: Any,
+    scene_context: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """
+    Validate a scene event proposal.
+    
+    Checks:
+    - proposal is not None
+    - proposal has required fields (scene_id, candidate_events)
+    - candidate_events have valid structure
+    - No forbidden info leaks in event descriptions
+    - recommended_actions (if present) is a list of strings, max 4
+    
+    Returns (is_valid, validation_errors).
+    """
+    errors = []
+    
+    if proposal is None:
+        return (False, ["proposal is None"])
+    
+    if not hasattr(proposal, "scene_id"):
+        errors.append("proposal missing scene_id")
+    
+    if not hasattr(proposal, "candidate_events"):
+        errors.append("proposal missing candidate_events")
+    else:
+        candidate_events = proposal.candidate_events
+        if not isinstance(candidate_events, list):
+            errors.append("candidate_events is not a list")
+        else:
+            for i, event in enumerate(candidate_events):
+                if not hasattr(event, "event_type"):
+                    errors.append(f"candidate_event[{i}] missing event_type")
+                if not hasattr(event, "description"):
+                    errors.append(f"candidate_event[{i}] missing description")
+    
+    if hasattr(proposal, "recommended_actions"):
+        rec_actions = proposal.recommended_actions
+        if rec_actions is not None:
+            if not isinstance(rec_actions, list):
+                errors.append("recommended_actions is not a list")
+            else:
+                if len(rec_actions) > 4:
+                    errors.append(f"recommended_actions has {len(rec_actions)} items, max 4")
+                for i, action in enumerate(rec_actions):
+                    if not isinstance(action, str):
+                        errors.append(f"recommended_actions[{i}] is not a string")
+    
+    if hasattr(proposal, "candidate_events"):
+        for event in proposal.candidate_events:
+            if hasattr(event, "description"):
+                desc = event.description
+                forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+                for pattern in forbidden_patterns:
+                    if pattern in desc:
+                        errors.append(f"forbidden pattern in event description: {pattern}")
+    
+    return (len(errors) == 0, errors)
+
+
+def _execute_scene_stage(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+) -> LLMStageResult:
+    """
+    Execute the scene LLM stage.
+    
+    1. Check if enabled via feature flag
+    2. Build scene context from committed state
+    3. Call ProposalPipeline.generate_scene_event()
+    4. Validate output
+    5. Return LLMStageResult with accepted/rejected status
+    
+    The scene stage generates candidate scene events and recommended actions.
+    It does NOT mutate any state - proposals are candidates only.
+    """
+    from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+    
+    stage_name: LLMStageName = "scene"
+    timeout = 30.0
+    
+    enabled = _is_scene_stage_enabled(db)
+    if not enabled:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=False,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="scene_stage_disabled",
+        )
+    
+    scene_context = _build_scene_context(
+        db=db,
+        session_id=session_id,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        
+        llm_service = _create_llm_service_from_config(db, provider_config)
+        
+        pipeline_config = ProposalConfig(
+            timeout_seconds=timeout,
+            max_tokens=provider_config.get("max_tokens", 500),
+            temperature=provider_config.get("temperature", 0.8),
+        )
+        pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
+        
+    except Exception as e:
+        logger.warning("Failed to configure LLM service for scene stage: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"llm_config_error: {str(e)[:200]}",
+        )
+    
+    try:
+        scene_id = current_location_id or "unknown"
+        
+        proposal = _run_async_safe(
+            pipeline.generate_scene_event(
+                scene_id=scene_id,
+                scene_context=scene_context,
+                prompt_template_id="scene_event_v1",
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        )
+        
+        is_valid, validation_errors = _validate_scene_proposal(proposal, scene_context)
+        
+        if not is_valid:
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
+                raw_outcome=str(proposal)[:500] if proposal else None,
+                validation_errors=validation_errors,
+            )
+        
+        is_fallback = getattr(proposal, "is_fallback", False)
+        if is_fallback:
+            fallback_reason = "llm_proposal_fallback"
+            audit = getattr(proposal, "audit", None)
+            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
+                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=fallback_reason,
+                raw_outcome=str(proposal)[:500],
+            )
+        
+        parsed_proposal: Dict[str, Any] = {
+            "scene_id": proposal.scene_id,
+            "scene_name": getattr(proposal, "scene_name", None),
+            "candidate_events": [
+                {
+                    "event_type": e.event_type,
+                    "description": e.description,
+                    "importance": getattr(e, "importance", 0.5),
+                }
+                for e in proposal.candidate_events
+            ],
+        }
+        
+        if hasattr(proposal, "recommended_actions") and proposal.recommended_actions:
+            parsed_proposal["recommended_actions"] = proposal.recommended_actions[:4]
+        
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            raw_outcome=str(proposal)[:500],
+            parsed_proposal=parsed_proposal,
+            accepted=True,
+        )
+        
+    except asyncio.TimeoutError:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="timeout",
+        )
+    except Exception as e:
+        logger.warning("LLM scene stage failed: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"error: {str(e)[:200]}",
+        )
+
+
 def execute_turn_service(
     db: Session,
     session_id: str,
@@ -785,7 +1116,7 @@ def execute_turn_service(
             # Quest progression failure should not block the turn
             pass
     
-    # Step 8: Generate recommended actions
+    # Step 8: Generate recommended actions (deterministic fallback)
     session_state_repo = SessionStateRepository(db)
     session_state = session_state_repo.get_by_session(session_id)
     
@@ -796,7 +1127,7 @@ def execute_turn_service(
     if movement_result and movement_result.success:
         current_location_id = movement_result.new_location_id
     
-    recommended_actions = generate_recommended_actions(
+    deterministic_recommended_actions = generate_recommended_actions(
         db=db,
         session_id=session_id,
         location_id=current_location_id,
@@ -829,7 +1160,7 @@ def execute_turn_service(
             narrative_text=narration,
             result_json={
                 "transaction_id": transaction_id,
-                "recommended_actions": recommended_actions,
+                "recommended_actions": deterministic_recommended_actions,
                 "state_deltas": state_deltas,
                 "action_type": action_type,
                 "movement_success": movement_result.success if movement_result else None,
@@ -845,7 +1176,7 @@ def execute_turn_service(
             turn_no=turn_no,
         )
     
-    # Step 13: Execute LLM narration stage (after durable commit)
+    # Step 13: Execute LLM stages (scene before narration)
     llm_stage_results = _execute_llm_stages(
         db=db,
         session_id=session_id,
@@ -858,7 +1189,26 @@ def execute_turn_service(
         current_location_id=current_location_id,
     )
     
-    # Step 14: If LLM narration accepted, update EventLogModel.narrative_text
+    # Step 14: Determine final recommended actions and scene event summary
+    final_recommended_actions = deterministic_recommended_actions
+    scene_event_summary: Optional[Dict[str, Any]] = None
+    scene_fallback_reason: Optional[str] = None
+    
+    for stage_result in llm_stage_results:
+        if stage_result.stage_name == "scene":
+            if stage_result.accepted and stage_result.parsed_proposal:
+                scene_recommended = stage_result.parsed_proposal.get("recommended_actions", [])
+                if scene_recommended and isinstance(scene_recommended, list):
+                    final_recommended_actions = scene_recommended[:4]
+                scene_event_summary = {
+                    "scene_id": stage_result.parsed_proposal.get("scene_id"),
+                    "scene_name": stage_result.parsed_proposal.get("scene_name"),
+                    "candidate_events": stage_result.parsed_proposal.get("candidate_events", []),
+                }
+            else:
+                scene_fallback_reason = stage_result.fallback_reason
+    
+    # Step 15: If LLM narration accepted, update EventLogModel.narrative_text
     final_narration = narration
     for stage_result in llm_stage_results:
         if stage_result.stage_name == "narration" and stage_result.accepted:
@@ -867,21 +1217,37 @@ def execute_turn_service(
                 event_log_repo = EventLogRepository(db)
                 event_log_repo.update(event.id, {"narrative_text": final_narration})
     
-    # Step 15: Update session state if movement succeeded
+    # Step 16: Update result_json with LLM stage results and scene summary
+    llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
+    updated_result_json = {
+        "transaction_id": transaction_id,
+        "recommended_actions": final_recommended_actions,
+        "state_deltas": state_deltas,
+        "action_type": action_type,
+        "movement_success": movement_result.success if movement_result else None,
+        "new_location_id": movement_result.new_location_id if movement_result else None,
+        "llm_stages": llm_stages_json,
+        "scene_event_summary": scene_event_summary,
+        "scene_fallback_reason": scene_fallback_reason,
+    }
+    event_log_repo = EventLogRepository(db)
+    event_log_repo.update(event.id, {"result_json": updated_result_json})
+    
+    # Step 17: Update session state if movement succeeded
     if movement_result and movement_result.success and movement_result.new_location_id:
         session_state_repo.create_or_update({
             "session_id": session_id,
             "current_location_id": movement_result.new_location_id,
         })
     
-    # Step 16: Update last played
+    # Step 18: Update last played
     session_repo.update_last_played(session_id)
     
-    # Step 17: Return result
+    # Step 19: Return result
     return TurnResult(
         turn_no=turn_no,
         narration=final_narration,
-        recommended_actions=recommended_actions,
+        recommended_actions=final_recommended_actions,
         state_deltas=state_deltas,
         world_time=world_time,
         player_state=player_state,

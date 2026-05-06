@@ -57,6 +57,17 @@ class ReplayEvent(BaseModel):
     data: Dict[str, Any] = Field(default_factory=dict)
 
 
+class LLMStageMetadata(BaseModel):
+    """Metadata for a single LLM stage from result_json."""
+    stage_name: str = Field(...)
+    enabled: bool = Field(default=False)
+    timeout: float = Field(default=0.0)
+    accepted: bool = Field(default=False)
+    fallback_reason: Optional[str] = Field(None)
+    validation_errors: List[str] = Field(default_factory=list)
+    model_call_id: Optional[str] = Field(None)
+
+
 class ReplayStep(BaseModel):
     """A single step in the replay."""
     step_no: int = Field(...)
@@ -82,6 +93,12 @@ class ReplayStep(BaseModel):
     
     # Proposal audit data (replay-safe - no re-calling LLM)
     proposal_audits: List[Dict[str, Any]] = Field(default_factory=list)
+    
+    # LLM stage metadata from result_json (replay-safe)
+    llm_stages: List[LLMStageMetadata] = Field(default_factory=list)
+    
+    # Additional result_json data (filtered by perspective)
+    result_metadata: Dict[str, Any] = Field(default_factory=dict)
     
     # Timing
     duration_ms: Optional[int] = Field(None)
@@ -307,24 +324,27 @@ class ReplayEngine:
         for turn_no in sorted(events_by_turn.keys()):
             turn_events = events_by_turn[turn_no]
             
-            # Capture state before
             state_before = deepcopy(current_state)
             
-            # Process events for this turn
             state_deltas: List[Dict[str, Any]] = []
             player_input = None
+            result_json = None
             
             for event in turn_events:
-                # Apply state deltas from event
                 if "state_deltas" in event.data:
                     for delta_data in event.data["state_deltas"]:
                         delta = StateDelta(**delta_data)
                         state_deltas.append(delta_data)
                         self._state_reconstructor._apply_delta(current_state, delta)
                 
-                # Extract player input
                 if event.event_type == "player_input" and "raw_input" in event.data:
                     player_input = event.data["raw_input"]
+                
+                if "result_json" in event.data:
+                    result_json = event.data["result_json"]
+            
+            llm_stages = self.extract_llm_stage_metadata(result_json, perspective)
+            result_metadata = self.extract_result_metadata(result_json, perspective)
             
             step_no += 1
             step = ReplayStep(
@@ -335,6 +355,8 @@ class ReplayEngine:
                 state_after=self._filter_state_for_perspective(deepcopy(current_state), perspective),
                 events=self._filter_events_for_perspective(turn_events, perspective),
                 state_deltas=state_deltas,
+                llm_stages=llm_stages,
+                result_metadata=result_metadata,
             )
             steps.append(step)
         
@@ -418,6 +440,7 @@ class ReplayEngine:
             state_before = deepcopy(current_state)
             state_deltas: List[Dict[str, Any]] = []
             player_input = None
+            result_json = None
             
             for event in turn_events:
                 if "state_deltas" in event.data:
@@ -428,6 +451,12 @@ class ReplayEngine:
                 
                 if event.event_type == "player_input" and "raw_input" in event.data:
                     player_input = event.data["raw_input"]
+                
+                if "result_json" in event.data:
+                    result_json = event.data["result_json"]
+            
+            llm_stages = self.extract_llm_stage_metadata(result_json, perspective)
+            result_metadata = self.extract_result_metadata(result_json, perspective)
             
             step_no += 1
             step = ReplayStep(
@@ -438,6 +467,8 @@ class ReplayEngine:
                 state_after=self._filter_state_for_perspective(deepcopy(current_state), perspective),
                 events=self._filter_events_for_perspective(turn_events, perspective),
                 state_deltas=state_deltas,
+                llm_stages=llm_stages,
+                result_metadata=result_metadata,
             )
             steps.append(step)
         
@@ -725,6 +756,71 @@ class ReplayEngine:
             "rejections": rejections,
             "avg_confidence": total_confidence / len(proposal_audits) if proposal_audits else 0.0,
         }
+    
+    def extract_llm_stage_metadata(
+        self,
+        result_json: Optional[Dict[str, Any]],
+        perspective: ReplayPerspective,
+    ) -> List[LLMStageMetadata]:
+        if not result_json:
+            return []
+        
+        llm_stages_data = result_json.get("llm_stages", [])
+        if not llm_stages_data:
+            return []
+        
+        metadata_list = []
+        for stage_data in llm_stages_data:
+            if not isinstance(stage_data, dict):
+                continue
+            
+            metadata = LLMStageMetadata(
+                stage_name=stage_data.get("stage_name", ""),
+                enabled=stage_data.get("enabled", False),
+                timeout=stage_data.get("timeout", 0.0),
+                accepted=stage_data.get("accepted", False),
+                fallback_reason=stage_data.get("fallback_reason"),
+                validation_errors=stage_data.get("validation_errors", []),
+                model_call_id=stage_data.get("model_call_id"),
+            )
+            metadata_list.append(metadata)
+        
+        return metadata_list
+    
+    def extract_result_metadata(
+        self,
+        result_json: Optional[Dict[str, Any]],
+        perspective: ReplayPerspective,
+    ) -> Dict[str, Any]:
+        if not result_json:
+            return {}
+        
+        allowed_keys = {
+            "world_progression",
+            "npc_reactions",
+            "scene_event_summary",
+            "parsed_intent",
+            "memory_persistence",
+        }
+        
+        metadata = {}
+        for key in allowed_keys:
+            if key in result_json:
+                value = result_json[key]
+                
+                if perspective == ReplayPerspective.PLAYER:
+                    if key == "npc_reactions" and isinstance(value, list):
+                        value = [
+                            {
+                                k: v for k, v in reaction.items()
+                                if k not in ("hidden_motivation", "internal_state")
+                            }
+                            for reaction in value
+                        ]
+                
+                metadata[key] = value
+        
+        return metadata
 
 
 class ReplayStore:

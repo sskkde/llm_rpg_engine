@@ -1213,3 +1213,235 @@ class TestReplayWithProposalAudits:
         assert summary["fallbacks"] == 1
         assert summary["rejections"] == 1
         assert 0.6 < summary["avg_confidence"] < 0.7
+
+
+class TestReplayWithLLMStageMetadata:
+    """Test replay with LLM stage metadata from result_json."""
+
+    def setup_method(self):
+        """Reset both audit and replay systems."""
+        reset_audit_logger()
+        reset_replay_store()
+        self.audit_logger = get_audit_logger()
+        self.replay_store = get_replay_store()
+        self.replay_engine = self.replay_store.get_replay_engine()
+
+    def test_replay_extract_llm_stage_metadata(self):
+        result_json = {
+            "llm_stages": [
+                {
+                    "stage_name": "input_intent",
+                    "enabled": True,
+                    "timeout": 15.0,
+                    "accepted": True,
+                    "fallback_reason": None,
+                    "validation_errors": [],
+                    "model_call_id": "mc_001",
+                },
+                {
+                    "stage_name": "world",
+                    "enabled": True,
+                    "timeout": 30.0,
+                    "accepted": True,
+                    "fallback_reason": None,
+                    "validation_errors": [],
+                    "model_call_id": "mc_002",
+                },
+                {
+                    "stage_name": "npc",
+                    "enabled": True,
+                    "timeout": 30.0,
+                    "accepted": False,
+                    "fallback_reason": "validation_failed",
+                    "validation_errors": ["Invalid action type"],
+                    "model_call_id": None,
+                },
+            ],
+        }
+
+        metadata = self.replay_engine.extract_llm_stage_metadata(
+            result_json, ReplayPerspective.ADMIN
+        )
+
+        assert len(metadata) == 3
+        assert metadata[0].stage_name == "input_intent"
+        assert metadata[0].accepted is True
+        assert metadata[2].accepted is False
+        assert metadata[2].fallback_reason == "validation_failed"
+
+    def test_replay_extract_llm_stage_metadata_empty(self):
+        metadata = self.replay_engine.extract_llm_stage_metadata(
+            None, ReplayPerspective.ADMIN
+        )
+        assert metadata == []
+
+        metadata = self.replay_engine.extract_llm_stage_metadata(
+            {}, ReplayPerspective.ADMIN
+        )
+        assert metadata == []
+
+    def test_replay_step_includes_llm_stages(self):
+        result_json = {
+            "llm_stages": [
+                {
+                    "stage_name": "narration",
+                    "enabled": True,
+                    "accepted": True,
+                    "fallback_reason": None,
+                },
+            ],
+            "parsed_intent": {"intent_type": "talk"},
+        }
+
+        events = [
+            ReplayEvent(
+                event_id="evt_llm_1",
+                event_type="player_input",
+                turn_no=1,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={
+                    "raw_input": "talk to npc",
+                    "result_json": result_json,
+                },
+            ),
+        ]
+
+        result = self.replay_engine.replay_turn_range(
+            session_id="session_llm_test",
+            start_turn=1,
+            end_turn=1,
+            events=events,
+            perspective=ReplayPerspective.ADMIN,
+        )
+
+        assert result.success is True
+        assert len(result.steps) == 1
+        assert len(result.steps[0].llm_stages) == 1
+        assert result.steps[0].llm_stages[0].stage_name == "narration"
+
+    def test_replay_result_metadata_extraction(self):
+        result_json = {
+            "world_progression": {"time_delta": 1},
+            "npc_reactions": [
+                {"npc_name": "Guide", "action_type": "talk", "hidden_motivation": "secret"}
+            ],
+            "parsed_intent": {"intent_type": "move"},
+            "raw_prompt": "should not be included",
+        }
+
+        metadata = self.replay_engine.extract_result_metadata(
+            result_json, ReplayPerspective.ADMIN
+        )
+
+        assert "world_progression" in metadata
+        assert "npc_reactions" in metadata
+        assert "parsed_intent" in metadata
+        assert "raw_prompt" not in metadata
+
+    def test_replay_result_metadata_player_perspective_filters_hidden(self):
+        result_json = {
+            "npc_reactions": [
+                {
+                    "npc_name": "Guide",
+                    "action_type": "talk",
+                    "hidden_motivation": "secret plan",
+                    "internal_state": "suspicious",
+                    "summary": "greets player",
+                }
+            ],
+        }
+
+        metadata = self.replay_engine.extract_result_metadata(
+            result_json, ReplayPerspective.PLAYER
+        )
+
+        assert "npc_reactions" in metadata
+        reaction = metadata["npc_reactions"][0]
+        assert "hidden_motivation" not in reaction
+        assert "internal_state" not in reaction
+        assert reaction.get("summary") == "greets player"
+
+    def test_replay_with_full_llm_stages(self):
+        result_json = {
+            "llm_stages": [
+                {"stage_name": "input_intent", "enabled": True, "accepted": True},
+                {"stage_name": "world", "enabled": True, "accepted": True},
+                {"stage_name": "scene", "enabled": True, "accepted": False, "fallback_reason": "timeout"},
+                {"stage_name": "npc", "enabled": True, "accepted": True},
+                {"stage_name": "narration", "enabled": True, "accepted": True},
+            ],
+            "world_progression": {"time_delta": 1},
+            "npc_reactions": [{"npc_name": "NPC", "action_type": "idle"}],
+            "parsed_intent": {"intent_type": "move"},
+            "memory_persistence": {"facts_written": 2},
+        }
+
+        events = [
+            ReplayEvent(
+                event_id="evt_full_llm",
+                event_type="player_input",
+                turn_no=1,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={
+                    "raw_input": "move north",
+                    "result_json": result_json,
+                    "state_deltas": [
+                        {"path": "player_state.location", "old_value": "A", "new_value": "B", "operation": "set"},
+                    ],
+                },
+            ),
+        ]
+
+        result = self.replay_engine.replay_turn_range(
+            session_id="session_full_llm",
+            start_turn=1,
+            end_turn=1,
+            events=events,
+            perspective=ReplayPerspective.ADMIN,
+        )
+
+        assert result.success is True
+        assert len(result.steps[0].llm_stages) == 5
+        assert result.steps[0].result_metadata.get("parsed_intent") is not None
+
+    def test_replay_from_snapshot_with_llm_stages(self):
+        snapshot = self.replay_store.create_snapshot(
+            session_id="session_snapshot_llm",
+            turn_no=10,
+            world_state={"current_time": "Day 1"},
+            player_state={"hp": 100},
+        )
+
+        result_json = {
+            "llm_stages": [
+                {"stage_name": "narration", "enabled": True, "accepted": True},
+            ],
+        }
+
+        events = [
+            ReplayEvent(
+                event_id="evt_snapshot_llm",
+                event_type="player_input",
+                turn_no=11,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={
+                    "raw_input": "rest",
+                    "result_json": result_json,
+                },
+            ),
+        ]
+
+        result = self.replay_store.replay_from_snapshot(
+            session_id="session_snapshot_llm",
+            snapshot_id=snapshot.snapshot_id,
+            target_turn=11,
+            events=events,
+            perspective=ReplayPerspective.ADMIN,
+        )
+
+        assert result.success is True
+        assert len(result.steps) == 1
+        assert len(result.steps[0].llm_stages) == 1

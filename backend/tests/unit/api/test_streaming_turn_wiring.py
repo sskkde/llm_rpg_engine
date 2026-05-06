@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from typing import AsyncGenerator
 
 from llm_rpg.api.turn_factory import build_turn_orchestrator
+from llm_rpg.api.streaming import get_or_create_orchestrator, _game_orchestrators
 from llm_rpg.llm.service import LLMService, MockLLMProvider
 from llm_rpg.llm.proposal_pipeline import ProposalPipeline, create_proposal_pipeline
 from llm_rpg.core.turn_orchestrator import TurnOrchestrator
@@ -231,3 +232,63 @@ class TestStreamingTurnWiringIntegration:
         # Verify orchestrator is functional
         assert orchestrator._proposal_pipeline is not None
         assert orchestrator._proposal_pipeline._llm_service is llm_service
+
+
+class TestGetOrCreateOrchestratorPassesLLMService:
+    """Tests for get_or_create_orchestrator passing llm_service to cached orchestrator."""
+
+    def test_get_or_create_orchestrator_passes_llm_service(self):
+        """
+        get_or_create_orchestrator creates an orchestrator with pipeline when llm_service is passed.
+        
+        This test verifies that calling get_or_create_orchestrator with llm_service
+        creates an orchestrator that has a proposal pipeline.
+        """
+        # Clean up cache before test
+        _game_orchestrators.clear()
+        
+        try:
+            mock_provider = MockLLMProvider()
+            mock_service = LLMService(provider=mock_provider)
+            
+            # Call get_or_create_orchestrator with llm_service
+            orchestrator = get_or_create_orchestrator("test_game_pipeline", llm_service=mock_service)
+            
+            # Verify orchestrator has pipeline
+            assert orchestrator is not None
+            assert isinstance(orchestrator, TurnOrchestrator)
+            assert orchestrator._proposal_pipeline is not None
+            assert isinstance(orchestrator._proposal_pipeline, ProposalPipeline)
+        finally:
+            # Clean up cache after test
+            _game_orchestrators.clear()
+
+    def test_get_or_create_orchestrator_caches_instance(self):
+        """
+        get_or_create_orchestrator returns the same cached orchestrator on subsequent calls.
+        
+        This test verifies that the orchestrator is cached and reused.
+        """
+        # Clean up cache before test
+        _game_orchestrators.clear()
+        
+        try:
+            mock_provider = MockLLMProvider()
+            mock_service = LLMService(provider=mock_provider)
+            
+            # First call creates orchestrator
+            orchestrator1 = get_or_create_orchestrator("test_game_cache", llm_service=mock_service)
+            
+            # Second call returns same instance
+            orchestrator2 = get_or_create_orchestrator("test_game_cache", llm_service=mock_service)
+            
+            # Verify same instance
+            assert orchestrator1 is orchestrator2
+            assert id(orchestrator1) == id(orchestrator2)
+            
+            # Verify it's in the cache
+            assert "test_game_cache" in _game_orchestrators
+            assert _game_orchestrators["test_game_cache"] is orchestrator1
+        finally:
+            # Clean up cache after test
+            _game_orchestrators.clear()

@@ -18,6 +18,10 @@ Key invariants:
 - Both endpoints produce identical DB side effects
 """
 
+import asyncio
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Literal
 from datetime import datetime
@@ -43,8 +47,16 @@ from ..storage.repositories import (
     SessionStateRepository,
     EventLogRepository,
     LocationRepository,
+    SessionNPCStateRepository,
+    NPCTemplateRepository,
+    SessionQuestStateRepository,
+    QuestTemplateRepository,
 )
 from ..models.states import CanonicalState
+
+from ..llm.service import LLMService, MockLLMProvider
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -150,25 +162,243 @@ class TurnResult:
     llm_stage_results: List[LLMStageResult] = field(default_factory=list)
 
 
+def _run_async_safe(coro):
+    """
+    Run an async coroutine safely, handling nested event loops.
+    
+    If called from within an already-running event loop (e.g., streaming endpoint),
+    runs the coroutine in a separate thread with its own event loop.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    
+    if loop is not None and loop.is_running():
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result(timeout=60)
+    else:
+        return asyncio.run(coro)
+
+
+def _is_narration_stage_enabled(db: Session) -> bool:
+    """
+    Check if LLM narration stage is enabled via SystemSettingsService.
+    
+    Narration is enabled when the provider_mode is not "mock",
+    indicating a real LLM provider is configured.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
+def _build_narration_context(
+    db: Session,
+    session_id: str,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build narration context from committed state only.
+    
+    CRITICAL: Only includes player-visible facts. No hidden NPC info.
+    
+    Context includes:
+    - Session state (current location, world time)
+    - Action result (movement success/blocked, quest progression)
+    - Visible NPCs at location (public identity only, NO hidden_identity)
+    - Recent event log entries (last 5 turns)
+    - Current location details
+    - State deltas from this turn
+    
+    Args:
+        db: SQLAlchemy database session
+        session_id: The session ID
+        canonical_state: Reconstructed canonical state (read-only)
+        player_input: The player's input text
+        action_type: The parsed action type
+        movement_result: Optional movement result from this turn
+        state_deltas: Optional state deltas from this turn
+        current_location_id: The current location ID after any movement
+        
+    Returns:
+        Dict with narration context for LLM
+    """
+    context: Dict[str, Any] = {
+        "session_id": session_id,
+        "player_input": player_input,
+        "action_type": action_type,
+        "constraints": [
+            "只能描述玩家可见的场景和事件",
+            "不能泄露隐藏的秘密或未揭示的信息",
+            "不能添加未发生的事件或未提交的状态变化",
+            "叙事必须基于已提交的事实",
+        ],
+    }
+    
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+    
+    if session_state:
+        context["world_time"] = _get_world_time(session_state)
+        context["current_location_id"] = current_location_id or session_state.current_location_id
+        context["active_mode"] = session_state.active_mode
+    else:
+        context["world_time"] = _get_world_time(None)
+        context["current_location_id"] = current_location_id
+    
+    player_state = canonical_state.player_state
+    context["player_state"] = {
+        "name": player_state.name,
+        "realm": player_state.realm,
+        "spiritual_power": player_state.spiritual_power,
+        "location_id": context["current_location_id"],
+    }
+    
+    if context["current_location_id"]:
+        location_repo = LocationRepository(db)
+        location = location_repo.get_by_id(context["current_location_id"])
+        if location:
+            context["current_location"] = {
+                "name": location.name,
+                "code": location.code,
+                "description": location.description,
+            }
+    
+    if movement_result:
+        context["movement"] = {
+            "success": movement_result.success,
+            "new_location_name": movement_result.new_location_name,
+            "new_location_code": movement_result.new_location_code,
+            "blocked_reason": movement_result.blocked_reason,
+            "narration_hint": movement_result.narration_hint,
+        }
+    
+    if state_deltas:
+        context["state_deltas"] = state_deltas
+    
+    visible_npcs = _get_visible_npcs(db, session_id, context.get("current_location_id"))
+    context["visible_npcs"] = visible_npcs
+    
+    if state_deltas and "quest_progression" in state_deltas:
+        context["quest_progression"] = state_deltas["quest_progression"]
+    
+    active_quests = _get_active_quests(db, session_id)
+    context["active_quests"] = active_quests
+    
+    recent_events = _get_recent_events(db, session_id, limit=5)
+    context["recent_events"] = recent_events
+    
+    return context
+
+
+def _get_visible_npcs(
+    db: Session,
+    session_id: str,
+    location_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Get visible NPCs at a location (public identity only).
+    
+    CRITICAL: Never includes hidden_identity from NPCTemplateModel.
+    Only includes public_identity, name, and role_type.
+    """
+    if not location_id:
+        return []
+    
+    npc_state_repo = SessionNPCStateRepository(db)
+    npc_states = npc_state_repo.get_by_session(session_id)
+    
+    visible_npcs = []
+    npc_template_repo = NPCTemplateRepository(db)
+    
+    for npc_state in npc_states:
+        if npc_state.current_location_id == location_id:
+            npc_template = npc_template_repo.get_by_id(npc_state.npc_template_id)
+            if npc_template:
+                visible_npcs.append({
+                    "name": npc_template.name,
+                    "public_identity": npc_template.public_identity,
+                    "role_type": npc_template.role_type,
+                    "mood": npc_state.status_flags.get("mood", "neutral") if npc_state.status_flags else "neutral",
+                })
+    
+    return visible_npcs
+
+
+def _get_active_quests(db: Session, session_id: str) -> List[Dict[str, Any]]:
+    """Get active quests for the session."""
+    quest_state_repo = SessionQuestStateRepository(db)
+    quest_states = quest_state_repo.get_by_session(session_id)
+    
+    active_quests = []
+    quest_template_repo = QuestTemplateRepository(db)
+    
+    for qs in quest_states:
+        if qs.status == "active":
+            quest_template = quest_template_repo.get_by_id(qs.quest_template_id)
+            if quest_template:
+                active_quests.append({
+                    "name": quest_template.name,
+                    "current_step_no": qs.current_step_no,
+                    "status": qs.status,
+                })
+    
+    return active_quests
+
+
+def _get_recent_events(
+    db: Session,
+    session_id: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """Get recent event log entries for narration context."""
+    event_log_repo = EventLogRepository(db)
+    recent = event_log_repo.get_recent(session_id, limit=limit)
+    
+    events = []
+    for event in reversed(recent):
+        events.append({
+            "turn_no": event.turn_no,
+            "event_type": event.event_type,
+            "narrative_text": event.narrative_text,
+            "input_text": event.input_text,
+        })
+    
+    return events
+
+
 def _execute_llm_stages(
     db: Session,
     session_id: str,
     turn_no: int,
     canonical_state: CanonicalState,
     player_input: str,
+    action_type: str = "action",
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn.
     
-    This is a hook point for LLM stage execution. Currently returns empty
-    results as a placeholder. Actual LLM calls will be added in Tasks 3-6.
-    
-    Stages (in execution order):
-    1. input_intent: Parse player input into structured intent
-    2. world: Generate world tick candidates
-    3. scene: Generate scene event candidates
-    4. npc: Generate NPC action proposals
-    5. narration: Generate narration from committed state
+    Currently implements the narration stage:
+    1. Check if narration stage is enabled via SystemSettingsService
+    2. Build narration context from committed state
+    3. Call NarrationEngine/ProposalPipeline.generate_narration() through LLMService
+    4. Parse and validate LLM output
+    5. Return LLMStageResult with accepted/rejected status
     
     Each stage is feature-flagged via SystemSettingsService.
     Proposals are validated before acceptance.
@@ -180,11 +410,250 @@ def _execute_llm_stages(
         turn_no: The allocated turn number
         canonical_state: Reconstructed canonical state (read-only)
         player_input: The player's input text
+        action_type: The parsed action type
+        movement_result: Optional movement result from this turn
+        state_deltas: Optional state deltas from this turn
+        current_location_id: The current location ID after any movement
         
     Returns:
         List of LLMStageResult objects, one per stage executed
     """
-    return []
+    results: List[LLMStageResult] = []
+    
+    narration_result = _execute_narration_stage(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    results.append(narration_result)
+    
+    return results
+
+
+def _execute_narration_stage(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+) -> LLMStageResult:
+    """
+    Execute the narration LLM stage.
+    
+    1. Check if enabled via feature flag
+    2. Build narration context from committed state
+    3. Call LLM via ProposalPipeline.generate_narration()
+    4. Validate output (non-empty, no forbidden info)
+    5. Return LLMStageResult
+    """
+    from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+    
+    stage_name: LLMStageName = "narration"
+    timeout = 30.0
+    
+    enabled = _is_narration_stage_enabled(db)
+    if not enabled:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=False,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="narration_stage_disabled",
+        )
+    
+    narration_context = _build_narration_context(
+        db=db,
+        session_id=session_id,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        
+        llm_service = _create_llm_service_from_config(db, provider_config)
+        
+        pipeline_config = ProposalConfig(
+            timeout_seconds=timeout,
+            max_tokens=provider_config.get("max_tokens", 500),
+            temperature=provider_config.get("temperature", 0.8),
+        )
+        pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
+        
+    except Exception as e:
+        logger.warning("Failed to configure LLM service for narration: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"llm_config_error: {str(e)[:200]}",
+        )
+    
+    try:
+        proposal = _run_async_safe(
+            pipeline.generate_narration(
+                visible_context=narration_context,
+                prompt_template_id="narration_v1",
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        )
+        
+        narration_text = proposal.text if hasattr(proposal, "text") else ""
+        
+        if not narration_text or not narration_text.strip():
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason="empty_narration_text",
+                raw_outcome=str(proposal)[:500] if proposal else None,
+            )
+        
+        forbidden_leaks = _check_forbidden_info_leaks(narration_context, narration_text)
+        if forbidden_leaks:
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=f"forbidden_info_leak: {', '.join(forbidden_leaks[:3])}",
+                raw_outcome=narration_text[:500],
+                validation_errors=[f"Forbidden info detected: {info}" for info in forbidden_leaks],
+            )
+        
+        is_fallback = getattr(proposal, "is_fallback", False)
+        if is_fallback:
+            fallback_reason = "llm_proposal_fallback"
+            audit = getattr(proposal, "audit", None)
+            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
+                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=fallback_reason,
+                raw_outcome=narration_text[:500],
+            )
+        
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            raw_outcome=narration_text[:500],
+            parsed_proposal={"text": narration_text},
+            accepted=True,
+        )
+        
+    except asyncio.TimeoutError:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="timeout",
+        )
+    except Exception as e:
+        logger.warning("LLM narration stage failed: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"error: {str(e)[:200]}",
+        )
+
+
+def _create_llm_service_from_config(
+    db: Session,
+    provider_config: Dict[str, Any],
+) -> LLMService:
+    """
+    Create an LLMService configured from SystemSettingsService.
+    
+    Uses the provider_mode and API keys from settings.
+    """
+    from ..llm.service import OpenAIProvider
+    
+    provider_mode = provider_config.get("provider_mode", "auto")
+    default_model = provider_config.get("default_model", "gpt-4")
+    custom_base_url = provider_config.get("custom_base_url")
+    
+    from ..services.settings import SystemSettingsService
+    settings_service = SystemSettingsService(db)
+    
+    if provider_mode == "custom" and custom_base_url:
+        api_key = settings_service.get_effective_custom_api_key()
+        if api_key:
+            provider = OpenAIProvider(
+                api_key=api_key,
+                model=default_model,
+                base_url=custom_base_url,
+            )
+            return LLMService(provider=provider, db_session=db)
+    
+    if provider_mode in ("openai", "auto"):
+        api_key = settings_service.get_effective_openai_key()
+        if api_key:
+            provider = OpenAIProvider(
+                api_key=api_key,
+                model=default_model,
+            )
+            return LLMService(provider=provider, db_session=db)
+    
+    return LLMService(provider=MockLLMProvider(), db_session=db)
+
+
+def _check_forbidden_info_leaks(
+    narration_context: Dict[str, Any],
+    narration_text: str,
+) -> List[str]:
+    """
+    Check if narration text leaks forbidden information.
+    
+    Forbidden info includes:
+    - NPC hidden_identity values
+    - Any info that should not be player-visible
+    """
+    leaks = []
+    
+    visible_npcs = narration_context.get("visible_npcs", [])
+    for npc in visible_npcs:
+        hidden = npc.get("hidden_identity")
+        if hidden and hidden in narration_text:
+            leaks.append(f"hidden_identity leak: {hidden[:50]}")
+    
+    forbidden_patterns = [
+        "隐藏身份",
+        "真实身份",
+        "秘密身份",
+        "hidden_identity",
+        "secret_identity",
+    ]
+    for pattern in forbidden_patterns:
+        if pattern in narration_text:
+            leaks.append(f"forbidden pattern: {pattern}")
+    
+    return leaks
 
 
 def execute_turn_service(
@@ -333,7 +802,7 @@ def execute_turn_service(
         location_id=current_location_id,
     )
     
-    # Step 9: Build narration
+    # Step 9: Build template narration (fallback-safe placeholder)
     narration = _build_narration(
         player_input=player_input,
         action_type=action_type,
@@ -347,7 +816,7 @@ def execute_turn_service(
     # Step 11: Get player state
     player_state = _get_player_state(canonical_state, current_location_id)
     
-    # Step 12: Commit turn to DB
+    # Step 12: Commit turn to DB with template narration (durable commit first)
     transaction_id = f"txn_{session_id}_{turn_no}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     try:
@@ -365,7 +834,7 @@ def execute_turn_service(
                 "action_type": action_type,
                 "movement_success": movement_result.success if movement_result else None,
                 "new_location_id": movement_result.new_location_id if movement_result else None,
-                "llm_stages": [],  # List of LLM stage metadata entries
+                "llm_stages": [],
             },
             idempotency_key=idempotency_key,
         )
@@ -376,20 +845,42 @@ def execute_turn_service(
             turn_no=turn_no,
         )
     
-    # Step 13: Update session state if movement succeeded
+    # Step 13: Execute LLM narration stage (after durable commit)
+    llm_stage_results = _execute_llm_stages(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    
+    # Step 14: If LLM narration accepted, update EventLogModel.narrative_text
+    final_narration = narration
+    for stage_result in llm_stage_results:
+        if stage_result.stage_name == "narration" and stage_result.accepted:
+            if stage_result.parsed_proposal and "text" in stage_result.parsed_proposal:
+                final_narration = stage_result.parsed_proposal["text"]
+                event_log_repo = EventLogRepository(db)
+                event_log_repo.update(event.id, {"narrative_text": final_narration})
+    
+    # Step 15: Update session state if movement succeeded
     if movement_result and movement_result.success and movement_result.new_location_id:
         session_state_repo.create_or_update({
             "session_id": session_id,
             "current_location_id": movement_result.new_location_id,
         })
     
-    # Step 14: Update last played
+    # Step 16: Update last played
     session_repo.update_last_played(session_id)
     
-    # Step 15: Return result
+    # Step 17: Return result
     return TurnResult(
         turn_no=turn_no,
-        narration=narration,
+        narration=final_narration,
         recommended_actions=recommended_actions,
         state_deltas=state_deltas,
         world_time=world_time,
@@ -400,6 +891,7 @@ def execute_turn_service(
         validation_passed=True,
         movement_result=movement_result,
         is_new_turn=is_new,
+        llm_stage_results=llm_stage_results,
     )
 
 

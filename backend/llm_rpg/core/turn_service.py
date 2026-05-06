@@ -41,7 +41,7 @@ from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
 from .quest_progression import check_quest_progression, QuestProgressionError
 
-from ..storage.models import SessionModel, EventLogModel
+from ..storage.models import SessionModel, EventLogModel, MemorySummaryModel, MemoryFactModel
 from ..storage.repositories import (
     SessionRepository,
     SessionStateRepository,
@@ -51,6 +51,8 @@ from ..storage.repositories import (
     NPCTemplateRepository,
     SessionQuestStateRepository,
     QuestTemplateRepository,
+    MemorySummaryRepository,
+    MemoryFactRepository,
 )
 from ..models.states import CanonicalState
 
@@ -822,6 +824,7 @@ def _build_narration_context(
     - Recent event log entries (last 5 turns)
     - Current location details
     - State deltas from this turn
+    - Relevant memory summaries (world/scene level, NO NPC subjective)
     
     Args:
         db: SQLAlchemy database session
@@ -914,6 +917,16 @@ def _build_narration_context(
         ]
         if player_visible_reactions:
             context["npc_reactions"] = player_visible_reactions
+    
+    # Retrieve relevant memory summaries (world/scene level only, NO NPC subjective)
+    memory_summaries = _retrieve_memories_for_context(
+        db=db,
+        session_id=session_id,
+        scope_type="world",
+        limit=3,
+    )
+    if memory_summaries:
+        context["memory_context"] = memory_summaries
     
     return context
 
@@ -1153,6 +1166,7 @@ def _build_npc_context(
     - Recent visible events
     - Player action context
     - Other NPCs' visible reactions (from sequential processing)
+    - NPC subjective memories (scoped by NPC ID)
     
     NEVER includes:
     - hidden_identity from NPCTemplateModel
@@ -1218,6 +1232,17 @@ def _build_npc_context(
             }
             for action in recent_npc_actions
         ]
+    
+    # Retrieve NPC subjective memories (scoped by NPC ID)
+    npc_memories = _retrieve_memories_for_context(
+        db=db,
+        session_id=session_id,
+        scope_type="npc",
+        scope_ref_id=npc_id,
+        limit=5,
+    )
+    if npc_memories:
+        context["subjective_memories"] = npc_memories
     
     return context
 
@@ -2325,7 +2350,34 @@ def execute_turn_service(
     # Step 19: Update last played
     session_repo.update_last_played(session_id)
     
-    # Step 20: Return result
+    # Step 20: Persist perspective-aware memories (non-fatal)
+    memory_result = None
+    if _is_memory_stage_enabled(db):
+        memory_result = _persist_turn_memories(
+            db=db,
+            session_id=session_id,
+            turn_no=turn_no,
+            event_id=event.id,
+            action_type=action_type,
+            player_input=player_input,
+            movement_result=movement_result,
+            state_deltas=state_deltas,
+            current_location_id=current_location_id,
+            npc_reactions=npc_reactions_for_json,
+            world_progression=world_progression,
+            scene_event_summary=scene_event_summary,
+        )
+        
+        if memory_result:
+            updated_result_json["memory_persistence"] = {
+                "summaries_created": memory_result.get("summaries_created", 0),
+                "facts_created": memory_result.get("facts_created", 0),
+                "npc_memories_created": memory_result.get("npc_memories_created", 0),
+                "fallback_reason": memory_result.get("fallback_reason"),
+            }
+            event_log_repo.update(event.id, {"result_json": updated_result_json})
+    
+    # Step 21: Return result
     return TurnResult(
         turn_no=turn_no,
         narration=final_narration,
@@ -2484,3 +2536,290 @@ def _get_player_state(
         "realm": player_state.realm,
         "spiritual_power": player_state.spiritual_power,
     }
+
+
+def _is_memory_stage_enabled(db: Session) -> bool:
+    """
+    Check if memory persistence stage is enabled via SystemSettingsService.
+    
+    Memory stage is enabled when:
+    1. provider_mode is not "mock" (real LLM provider configured)
+    
+    Currently uses the same condition as other LLM stages.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
+def _persist_turn_memories(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    event_id: str,
+    action_type: str,
+    player_input: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+    npc_reactions: Optional[List[Dict[str, Any]]] = None,
+    world_progression: Optional[Dict[str, Any]] = None,
+    scene_event_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Persist perspective-aware memory summaries and facts after a successful turn.
+    
+    Memory is derived from:
+    - Accepted events (player action, movement)
+    - Visible NPC reactions (player-visible only)
+    - State deltas (location changes, quest progression)
+    - World progression metadata
+    - Scene event summary
+    
+    Memory scopes:
+    - world: World-level chronicle summary
+    - session: Session-level summary
+    - scene: Scene-level summary for current location
+    - npc: NPC subjective memory (scoped by NPC ID, not player-visible)
+    
+    NPC subjective memory is NEVER included in player-visible output.
+    
+    Returns metadata about memory write success/failure (non-fatal).
+    """
+    memory_summary_repo = MemorySummaryRepository(db)
+    memory_fact_repo = MemoryFactRepository(db)
+    
+    result = {
+        "summaries_created": 0,
+        "facts_created": 0,
+        "npc_memories_created": 0,
+        "fallback_reason": None,
+    }
+    
+    try:
+        # 1. Create world/session chronicle summary
+        summary_parts = []
+        if action_type:
+            summary_parts.append(f"玩家执行了{action_type}动作")
+        if player_input:
+            summary_parts.append(f"输入: {player_input[:100]}")
+        if movement_result and movement_result.success:
+            summary_parts.append(f"移动到{movement_result.new_location_name}")
+        if state_deltas and "quest_progression" in state_deltas:
+            for qp in state_deltas["quest_progression"]:
+                summary_parts.append(f"任务进展: {qp.get('quest_name', '未知任务')}")
+        
+        if summary_parts:
+            chronicle_text = f"回合{turn_no}: " + "; ".join(summary_parts)
+            
+            memory_summary_repo.create({
+                "id": f"sum_world_{session_id}_{turn_no}",
+                "session_id": session_id,
+                "scope_type": "world",
+                "scope_ref_id": None,
+                "summary_text": chronicle_text,
+                "source_turn_range": {"start": turn_no, "end": turn_no},
+                "importance_score": 0.5,
+            })
+            result["summaries_created"] += 1
+        
+        # 2. Create scene summary for current location
+        if current_location_id and scene_event_summary:
+            scene_text = f"场景{current_location_id} 回合{turn_no}: "
+            candidate_events = scene_event_summary.get("candidate_events", [])
+            if candidate_events:
+                event_descriptions = [e.get("description", "")[:50] for e in candidate_events[:3]]
+                scene_text += "; ".join(event_descriptions)
+            
+            memory_summary_repo.create({
+                "id": f"sum_scene_{session_id}_{turn_no}_{current_location_id}",
+                "session_id": session_id,
+                "scope_type": "scene",
+                "scope_ref_id": current_location_id,
+                "summary_text": scene_text,
+                "source_turn_range": {"start": turn_no, "end": turn_no},
+                "importance_score": 0.4,
+            })
+            result["summaries_created"] += 1
+        
+        # 3. Create facts from state deltas
+        if state_deltas:
+            if "location_id" in state_deltas:
+                memory_fact_repo.create({
+                    "id": f"fact_loc_{session_id}_{turn_no}",
+                    "session_id": session_id,
+                    "fact_type": "location_change",
+                    "subject_ref": "player",
+                    "fact_key": "current_location",
+                    "fact_value": state_deltas["location_id"],
+                    "confidence": 1.0,
+                    "source_event_id": event_id,
+                })
+                result["facts_created"] += 1
+            
+            if "quest_progression" in state_deltas:
+                for i, qp in enumerate(state_deltas["quest_progression"]):
+                    quest_name = qp.get("quest_name", "unknown")
+                    memory_fact_repo.create({
+                        "id": f"fact_quest_{session_id}_{turn_no}_{i}",
+                        "session_id": session_id,
+                        "fact_type": "quest_progress",
+                        "subject_ref": quest_name,
+                        "fact_key": "progression",
+                        "fact_value": qp.get("message", ""),
+                        "confidence": 0.9,
+                        "source_event_id": event_id,
+                    })
+                    result["facts_created"] += 1
+        
+        # 4. Create NPC subjective memories (scoped by NPC, NOT player-visible)
+        # CRITICAL: These are private NPC memories, never exposed to player narration
+        if npc_reactions:
+            for reaction in npc_reactions:
+                if reaction.get("accepted") and reaction.get("npc_id"):
+                    npc_id = reaction.get("npc_id")
+                    npc_name = reaction.get("npc_name", "unknown")
+                    summary = reaction.get("summary", "")
+                    
+                    # NPC subjective memory - scoped by NPC ID
+                    memory_summary_repo.create({
+                        "id": f"sum_npc_{npc_id}_{session_id}_{turn_no}",
+                        "session_id": session_id,
+                        "scope_type": "npc",
+                        "scope_ref_id": npc_id,
+                        "summary_text": f"{npc_name}的主观记忆: {summary}",
+                        "source_turn_range": {"start": turn_no, "end": turn_no},
+                        "importance_score": 0.6,
+                    })
+                    result["npc_memories_created"] += 1
+                    
+                    # NPC belief fact (what NPC believes about player action)
+                    if action_type and summary:
+                        memory_fact_repo.create({
+                            "id": f"fact_npc_belief_{npc_id}_{session_id}_{turn_no}",
+                            "session_id": session_id,
+                            "fact_type": "npc_belief",
+                            "subject_ref": npc_id,
+                            "fact_key": "player_action_observation",
+                            "fact_value": f"玩家执行了{action_type}: {summary[:100]}",
+                            "confidence": 0.8,
+                            "source_event_id": event_id,
+                        })
+                        result["facts_created"] += 1
+        
+        # 5. Create world progression facts (if available)
+        if world_progression:
+            candidate_events = world_progression.get("candidate_events", [])
+            for i, event in enumerate(candidate_events[:3]):
+                event_type = event.get("event_type", "unknown")
+                description = event.get("description", "")
+                if description:
+                    memory_fact_repo.create({
+                        "id": f"fact_world_{session_id}_{turn_no}_{i}",
+                        "session_id": session_id,
+                        "fact_type": "world_event",
+                        "subject_ref": "world",
+                        "fact_key": event_type,
+                        "fact_value": description[:200],
+                        "confidence": event.get("importance", 0.5),
+                        "source_event_id": event_id,
+                    })
+                    result["facts_created"] += 1
+        
+    except Exception as e:
+        # Memory write failure is non-fatal - record fallback reason
+        logger.warning("Memory persistence failed for session %s turn %s: %s", session_id, turn_no, e)
+        result["fallback_reason"] = f"memory_write_error: {str(e)[:200]}"
+    
+    return result
+
+
+def _retrieve_memories_for_context(
+    db: Session,
+    session_id: str,
+    scope_type: str,
+    scope_ref_id: Optional[str] = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve relevant memory summaries for context building.
+    
+    Memory is retrieved based on scope:
+    - world: World-level chronicles
+    - session: Session-level summaries
+    - scene: Scene-level summaries for location
+    - npc: NPC subjective memory (scoped by NPC ID)
+    
+    CRITICAL: NPC subjective memory is NEVER returned for player/narrator contexts.
+    """
+    memory_summary_repo = MemorySummaryRepository(db)
+    
+    summaries = memory_summary_repo.get_by_scope(
+        session_id=session_id,
+        scope_type=scope_type,
+        scope_ref_id=scope_ref_id,
+    )
+    
+    # Sort by importance and limit
+    sorted_summaries = sorted(
+        summaries,
+        key=lambda s: s.importance_score,
+        reverse=True,
+    )[:limit]
+    
+    return [
+        {
+            "summary_id": s.id,
+            "summary_text": s.summary_text,
+            "importance": s.importance_score,
+            "turn_range": s.source_turn_range,
+        }
+        for s in sorted_summaries
+    ]
+
+
+def _retrieve_facts_for_context(
+    db: Session,
+    session_id: str,
+    fact_type: Optional[str] = None,
+    subject_ref: Optional[str] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve relevant memory facts for context building.
+    
+    Facts are retrieved based on type and subject.
+    """
+    memory_fact_repo = MemoryFactRepository(db)
+    
+    facts = []
+    if fact_type:
+        facts = memory_fact_repo.get_by_type(session_id, fact_type)
+    elif subject_ref:
+        facts = memory_fact_repo.get_by_subject(session_id, subject_ref)
+    else:
+        facts = memory_fact_repo.get_by_session(session_id)
+    
+    # Sort by confidence and limit
+    sorted_facts = sorted(
+        facts,
+        key=lambda f: f.confidence,
+        reverse=True,
+    )[:limit]
+    
+    return [
+        {
+            "fact_id": f.id,
+            "fact_type": f.fact_type,
+            "subject": f.subject_ref,
+            "key": f.fact_key,
+            "value": f.fact_value,
+            "confidence": f.confidence,
+        }
+        for f in sorted_facts
+    ]

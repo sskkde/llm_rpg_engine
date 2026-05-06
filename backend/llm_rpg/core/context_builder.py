@@ -18,6 +18,110 @@ from .retrieval import RetrievalSystem
 from .perspective import PerspectiveService
 
 
+def _retrieve_memories_for_narration_context(
+    db,
+    session_id: str,
+    current_location_id: Optional[str] = None,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve relevant memories for narration context.
+    
+    CRITICAL: Only retrieves world/session/scene memories, NEVER NPC subjective memories.
+    """
+    from ..storage.repositories import MemorySummaryRepository
+    
+    memory_repo = MemorySummaryRepository(db)
+    
+    summaries = []
+    
+    # Get world-level chronicles
+    world_summaries = memory_repo.get_by_scope(
+        session_id=session_id,
+        scope_type="world",
+    )
+    summaries.extend(world_summaries[:limit])
+    
+    # Get scene-level summaries for current location
+    if current_location_id:
+        scene_summaries = memory_repo.get_by_scope(
+            session_id=session_id,
+            scope_type="scene",
+            scope_ref_id=current_location_id,
+        )
+        summaries.extend(scene_summaries[:limit])
+    
+    # Sort by importance and return as dicts
+    sorted_summaries = sorted(
+        summaries,
+        key=lambda s: s.importance_score,
+        reverse=True,
+    )[:limit]
+    
+    return [
+        {
+            "summary_text": s.summary_text,
+            "importance": s.importance_score,
+        }
+        for s in sorted_summaries
+    ]
+
+
+def _retrieve_memories_for_npc_context(
+    db,
+    session_id: str,
+    npc_id: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve relevant memories for NPC context.
+    
+    Includes NPC subjective memories scoped by NPC ID.
+    """
+    from ..storage.repositories import MemorySummaryRepository, MemoryFactRepository
+    
+    memory_repo = MemorySummaryRepository(db)
+    fact_repo = MemoryFactRepository(db)
+    
+    summaries = []
+    
+    # Get NPC subjective memories
+    npc_summaries = memory_repo.get_by_scope(
+        session_id=session_id,
+        scope_type="npc",
+        scope_ref_id=npc_id,
+    )
+    summaries.extend(npc_summaries[:limit])
+    
+    # Get NPC belief facts
+    npc_beliefs = fact_repo.get_by_subject(session_id, npc_id)
+    
+    # Sort by importance and return as dicts
+    sorted_summaries = sorted(
+        summaries,
+        key=lambda s: s.importance_score,
+        reverse=True,
+    )[:limit]
+    
+    result = [
+        {
+            "summary_text": s.summary_text,
+            "importance": s.importance_score,
+        }
+        for s in sorted_summaries
+    ]
+    
+    # Add belief facts
+    for fact in npc_beliefs[:limit]:
+        result.append({
+            "fact_type": fact.fact_type,
+            "fact_value": fact.fact_value,
+            "confidence": fact.confidence,
+        })
+    
+    return result
+
+
 class ContextBuilder:
     """
     Builds context packs for different perspectives.

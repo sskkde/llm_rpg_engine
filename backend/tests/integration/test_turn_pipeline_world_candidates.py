@@ -526,5 +526,141 @@ class TestWorldCandidatesDeterministicTime:
         assert event.time_after.period != event.time_before.period
 
 
+class TestWorldStageInTurnService:
+    """Tests for world stage integration in turn_service."""
+
+    def test_world_stage_disabled_returns_noop(self):
+        from llm_rpg.core.turn_service import _execute_world_stage, LLMStageResult
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(
+                entity_id="w1", world_id="test",
+                current_time=WorldTime(calendar="std", season="春", day=1, period="卯时"),
+                weather="晴", global_flags={},
+            ),
+            player_state=PlayerState(entity_id="p1", name="P", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="s1", scene_id="s1", location_id="loc1", active_actor_ids=[],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from llm_rpg.storage.database import Base
+
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(bind=engine)
+        SessionLocal = sessionmaker(bind=engine)
+        db = SessionLocal()
+
+        try:
+            with patch("llm_rpg.core.turn_service._is_world_stage_enabled", return_value=False):
+                result = _execute_world_stage(
+                    db=db, session_id="test_session", turn_no=1,
+                    canonical_state=state, current_location_id="loc1",
+                )
+                assert isinstance(result, LLMStageResult)
+                assert result.stage_name == "world"
+                assert result.enabled is False
+                assert result.accepted is False
+                assert result.fallback_reason == "world_stage_disabled"
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_world_proposal_bounded_pressure_metadata(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_world_proposal(is_fallback=False, confidence=0.9)
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="global_flags.danger_level",
+                operation="set",
+                value=0.3,
+                reason="深夜妖气加重",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is True
+        assert len(errors) == 0
+        assert len(proposal.candidate_events) > 0
+        assert proposal.candidate_events[0].event_type == "time_based"
+        assert "danger_level" in proposal.candidate_events[0].effects
+
+    def test_invalid_world_candidate_rejected_safely(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_world_proposal(is_fallback=False)
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="player_state.hp",
+                operation="set",
+                value=0,
+                reason="test",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is False
+        assert len(errors) > 0
+
+    def test_world_progression_metadata_in_result_json(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_world_proposal(is_fallback=False, confidence=0.85)
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="global_flags.event_active",
+                operation="set",
+                value=True,
+                reason="test",
+            )
+        ]
+        is_valid, _ = _validate_world_proposal(proposal)
+        assert is_valid is True
+        parsed = {
+            "time_description": proposal.time_description,
+            "candidate_events": [
+                {
+                    "event_type": e.event_type,
+                    "description": e.description,
+                    "effects": e.effects,
+                    "importance": e.importance,
+                    "visibility": e.visibility,
+                }
+                for e in proposal.candidate_events
+            ],
+            "state_deltas": [
+                {
+                    "path": d.path,
+                    "operation": d.operation,
+                    "value": d.value,
+                    "reason": d.reason,
+                }
+                for d in proposal.state_deltas
+            ],
+            "confidence": proposal.confidence,
+        }
+        assert "candidate_events" in parsed
+        assert "state_deltas" in parsed
+        assert "confidence" in parsed
+        assert parsed["confidence"] == 0.85
+
+    def test_public_response_contains_world_time_and_player_state(self):
+        state = create_mock_state()
+        from llm_rpg.core.turn_service import _get_world_time, _get_player_state
+        world_time = _get_world_time(None)
+        assert "calendar" in world_time
+        assert "season" in world_time
+        assert "period" in world_time
+        player_state = _get_player_state(state, "square")
+        assert "name" in player_state
+        assert "realm" in player_state
+        assert "location_id" in player_state
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

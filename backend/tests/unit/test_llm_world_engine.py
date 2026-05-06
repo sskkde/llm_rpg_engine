@@ -639,5 +639,110 @@ class TestWorldTickExceptionFallback:
         assert proposal.confidence == 0.0
 
 
+class TestWorldStageValidation:
+    """Tests for world proposal validation in turn_service."""
+
+    def test_validate_world_proposal_none(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        is_valid, errors = _validate_world_proposal(None)
+        assert is_valid is False
+        assert "proposal is None" in errors
+
+    def test_validate_world_proposal_valid(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_proposal()
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="global_flags.danger_level",
+                operation="set",
+                value=0.3,
+                reason="深夜妖气加重",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is True
+        assert len(errors) == 0
+
+    def test_validate_world_proposal_forbidden_pattern(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        proposal = create_mock_proposal()
+        proposal.candidate_events[0].description = "隐藏身份的秘密被发现"
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is False
+        assert any("forbidden pattern" in e for e in errors)
+
+    def test_validate_world_proposal_invalid_delta_path(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_proposal()
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="player_state.hp",
+                operation="set",
+                value=0,
+                reason="test",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is False
+        assert any("not in allowed paths" in e for e in errors)
+
+    def test_validate_world_proposal_valid_delta_paths(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_proposal()
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="global_flags.event_triggered",
+                operation="set",
+                value=True,
+                reason="test",
+            ),
+            StateDeltaCandidate(
+                path="quest_progress.main_quest",
+                operation="set",
+                value="step_2",
+                reason="test",
+            ),
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is True
+
+    def test_validate_world_proposal_empty_candidate_events(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import StateDeltaCandidate
+        proposal = create_mock_proposal()
+        proposal.candidate_events = []
+        proposal.state_deltas = [
+            StateDeltaCandidate(
+                path="global_flags.test",
+                operation="set",
+                value=True,
+                reason="test",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is True
+
+    def test_validate_world_proposal_empty_event_type(self):
+        from llm_rpg.core.turn_service import _validate_world_proposal
+        from llm_rpg.models.proposals import CandidateEvent
+        proposal = create_mock_proposal()
+        proposal.candidate_events = [
+            CandidateEvent(
+                event_type="",
+                description="test event",
+                target_entity_ids=[],
+                effects={},
+                importance=0.5,
+                visibility="player_visible",
+            )
+        ]
+        is_valid, errors = _validate_world_proposal(proposal)
+        assert is_valid is False
+        assert any("empty event_type" in e for e in errors)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

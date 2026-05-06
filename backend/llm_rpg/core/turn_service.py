@@ -239,6 +239,297 @@ def _is_npc_stage_enabled(db: Session) -> bool:
         return False
 
 
+def _is_world_stage_enabled(db: Session) -> bool:
+    """
+    Check if LLM world progression stage is enabled via SystemSettingsService.
+    
+    World stage is enabled when:
+    1. provider_mode is not "mock" (real LLM provider configured)
+    2. World stage is explicitly enabled in settings (future: feature flag)
+    
+    Currently uses the same condition as narration/scene/NPC stages.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
+def _build_world_context_for_turn(
+    db: Session,
+    session_id: str,
+    canonical_state: CanonicalState,
+    current_location_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build world context from committed state for world progression candidates.
+    
+    Includes: world time, location, session flags, quest state.
+    Only player-visible / world-visible facts — no hidden NPC info.
+    """
+    context: Dict[str, Any] = {
+        "session_id": session_id,
+        "constraints": [
+            "只能生成世界压力摘要、地点标记、任务计时器、预定事件提示、势力压力笔记",
+            "不能直接修改玩家状态或隐藏NPC信息",
+            "提案仅作为候选，不直接变更状态",
+        ],
+    }
+
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+
+    if session_state:
+        context["world_time"] = _get_world_time(session_state)
+        context["current_location_id"] = current_location_id or session_state.current_location_id
+        context["global_flags"] = session_state.global_flags_json or {}
+    else:
+        context["world_time"] = _get_world_time(None)
+        context["current_location_id"] = current_location_id
+        context["global_flags"] = {}
+
+    player_state = canonical_state.player_state
+    context["player_state"] = {
+        "name": player_state.name,
+        "realm": player_state.realm,
+        "location_id": context["current_location_id"],
+    }
+
+    if context["current_location_id"]:
+        location_repo = LocationRepository(db)
+        location = location_repo.get_by_id(context["current_location_id"])
+        if location:
+            context["current_location"] = {
+                "name": location.name,
+                "code": location.code,
+            }
+
+    active_quests = _get_active_quests(db, session_id)
+    context["active_quests"] = active_quests
+
+    recent_events = _get_recent_events(db, session_id, limit=3)
+    context["recent_events"] = recent_events
+
+    return context
+
+
+# Allowed fields for world progression proposals (bounded validation)
+_WORLD_PROPOSAL_ALLOWED_EVENT_FIELDS = {"event_type", "description", "effects", "importance", "visibility"}
+_WORLD_PROPOSAL_ALLOWED_DELTA_PATHS = {
+    "global_flags",
+    "quest_progress",
+    "location_flags",
+    "scheduled_event_hints",
+    "faction_pressure",
+}
+
+
+def _validate_world_proposal(proposal: Any) -> Tuple[bool, List[str]]:
+    """
+    Validate a world tick proposal. Only bounded fields are accepted.
+    
+    Checks:
+    - proposal is not None
+    - candidate_events have only allowed fields
+    - state_deltas target only allowed paths
+    - No forbidden info leaks
+    """
+    errors: List[str] = []
+
+    if proposal is None:
+        return (False, ["proposal is None"])
+
+    if not hasattr(proposal, "candidate_events"):
+        errors.append("proposal missing candidate_events")
+    elif not isinstance(proposal.candidate_events, list):
+        errors.append("candidate_events is not a list")
+    else:
+        for i, event in enumerate(proposal.candidate_events):
+            if hasattr(event, "event_type") and not event.event_type:
+                errors.append(f"candidate_event[{i}] has empty event_type")
+            if hasattr(event, "description") and not event.description:
+                errors.append(f"candidate_event[{i}] has empty description")
+
+    if not hasattr(proposal, "state_deltas"):
+        errors.append("proposal missing state_deltas")
+    elif not isinstance(proposal.state_deltas, list):
+        errors.append("state_deltas is not a list")
+    else:
+        for i, delta in enumerate(proposal.state_deltas):
+            if hasattr(delta, "path"):
+                path_root = delta.path.split(".")[0] if delta.path else ""
+                if path_root not in _WORLD_PROPOSAL_ALLOWED_DELTA_PATHS:
+                    errors.append(
+                        f"state_delta[{i}] path '{delta.path}' not in allowed paths"
+                    )
+
+    if hasattr(proposal, "candidate_events") and isinstance(proposal.candidate_events, list):
+        for i, event in enumerate(proposal.candidate_events):
+            if hasattr(event, "description"):
+                forbidden = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+                for pattern in forbidden:
+                    if pattern in event.description:
+                        errors.append(f"forbidden pattern in event[{i}] description: {pattern}")
+
+    return (len(errors) == 0, errors)
+
+
+def _execute_world_stage(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    current_location_id: Optional[str] = None,
+) -> LLMStageResult:
+    """
+    Execute the world progression LLM stage.
+    
+    1. Check if enabled via feature flag
+    2. Build world context from committed state
+    3. Call ProposalPipeline.generate_world_tick()
+    4. Validate candidates (bounded fields only)
+    5. Return LLMStageResult with accepted/rejected status
+    """
+    from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+
+    stage_name: LLMStageName = "world"
+    timeout = 30.0
+
+    enabled = _is_world_stage_enabled(db)
+    if not enabled:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=False,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="world_stage_disabled",
+        )
+
+    world_context = _build_world_context_for_turn(
+        db=db,
+        session_id=session_id,
+        canonical_state=canonical_state,
+        current_location_id=current_location_id,
+    )
+
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+
+        llm_service = _create_llm_service_from_config(db, provider_config)
+
+        pipeline_config = ProposalConfig(
+            timeout_seconds=timeout,
+            max_tokens=provider_config.get("max_tokens", 500),
+            temperature=provider_config.get("temperature", 0.8),
+        )
+        pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
+
+    except Exception as e:
+        logger.warning("Failed to configure LLM service for world stage: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"llm_config_error: {str(e)[:200]}",
+        )
+
+    try:
+        proposal = _run_async_safe(
+            pipeline.generate_world_tick(
+                world_context=world_context,
+                prompt_template_id="world_tick_v1",
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        )
+
+        is_valid, validation_errors = _validate_world_proposal(proposal)
+
+        if not is_valid:
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
+                raw_outcome=str(proposal)[:500] if proposal else None,
+                validation_errors=validation_errors,
+            )
+
+        is_fallback = getattr(proposal, "is_fallback", False)
+        if is_fallback:
+            fallback_reason = "llm_proposal_fallback"
+            audit = getattr(proposal, "audit", None)
+            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
+                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=timeout,
+                accepted=False,
+                fallback_reason=fallback_reason,
+                raw_outcome=str(proposal)[:500] if proposal else None,
+            )
+
+        parsed_proposal: Dict[str, Any] = {
+            "time_description": getattr(proposal, "time_description", ""),
+            "candidate_events": [
+                {
+                    "event_type": getattr(e, "event_type", "unknown"),
+                    "description": getattr(e, "description", ""),
+                    "effects": getattr(e, "effects", {}),
+                    "importance": getattr(e, "importance", 0.5),
+                    "visibility": getattr(e, "visibility", "player_visible"),
+                }
+                for e in proposal.candidate_events
+            ],
+            "state_deltas": [
+                {
+                    "path": getattr(d, "path", ""),
+                    "operation": getattr(d, "operation", "set"),
+                    "value": getattr(d, "value", None),
+                    "reason": getattr(d, "reason", ""),
+                }
+                for d in proposal.state_deltas
+            ],
+            "confidence": getattr(proposal, "confidence", 0.5),
+        }
+
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            raw_outcome=str(proposal)[:500],
+            parsed_proposal=parsed_proposal,
+            accepted=True,
+        )
+
+    except asyncio.TimeoutError:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="timeout",
+        )
+    except Exception as e:
+        logger.warning("LLM world stage failed: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"error: {str(e)[:200]}",
+        )
+
+
 def _build_narration_context(
     db: Session,
     session_id: str,
@@ -917,6 +1208,7 @@ def _execute_llm_stages(
     Execute LLM-enabled stages for a turn.
     
     Stage order:
+    0. World stage - generate world progression candidates (pressure, flags, timers)
     1. Scene stage - generate scene event candidates and recommended actions
     2. NPC stage - generate NPC reactions (after scene, before narration)
     3. Narration stage - generate narrative text
@@ -940,6 +1232,15 @@ def _execute_llm_stages(
         List of LLMStageResult objects, one per stage executed
     """
     results: List[LLMStageResult] = []
+    
+    world_result = _execute_world_stage(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        current_location_id=current_location_id,
+    )
+    results.append(world_result)
     
     scene_result = _execute_scene_stage(
         db=db,
@@ -1645,15 +1946,22 @@ def execute_turn_service(
         current_location_id=current_location_id,
     )
     
-    # Step 14: Determine final recommended actions, scene summary, and NPC reactions
+    # Step 14: Determine final recommended actions, scene summary, NPC reactions, and world progression
     final_recommended_actions = deterministic_recommended_actions
     scene_event_summary: Optional[Dict[str, Any]] = None
     scene_fallback_reason: Optional[str] = None
     npc_reactions_for_json: List[Dict[str, Any]] = []
     npc_fallback_reason: Optional[str] = None
+    world_progression: Optional[Dict[str, Any]] = None
+    world_fallback_reason: Optional[str] = None
     
     for stage_result in llm_stage_results:
-        if stage_result.stage_name == "scene":
+        if stage_result.stage_name == "world":
+            if stage_result.accepted and stage_result.parsed_proposal:
+                world_progression = stage_result.parsed_proposal
+            else:
+                world_fallback_reason = stage_result.fallback_reason
+        elif stage_result.stage_name == "scene":
             if stage_result.accepted and stage_result.parsed_proposal:
                 scene_recommended = stage_result.parsed_proposal.get("recommended_actions", [])
                 if scene_recommended and isinstance(scene_recommended, list):
@@ -1694,6 +2002,8 @@ def execute_turn_service(
         "scene_fallback_reason": scene_fallback_reason,
         "npc_reactions": npc_reactions_for_json,
         "npc_fallback_reason": npc_fallback_reason,
+        "world_progression": world_progression,
+        "world_fallback_reason": world_fallback_reason,
     }
     event_log_repo = EventLogRepository(db)
     event_log_repo.update(event.id, {"result_json": updated_result_json})

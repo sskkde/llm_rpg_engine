@@ -1,6 +1,20 @@
 """
 Turn Orchestrator
 
+DEPRECATED: This module is NOT the active production gameplay path.
+
+The authoritative turn execution is handled by:
+- `llm_rpg.core.turn_service.execute_turn_service()` - single durable turn boundary
+- `llm_rpg.api.game` - production game endpoints
+- `llm_rpg.api.streaming` - streaming turn endpoints
+
+This file remains for reference only. Do not use for new gameplay features.
+All turn execution must go through execute_turn_service() to ensure:
+- DB-authoritative state persistence
+- LLM stage evidence tracking
+- Proper audit logging
+- Transaction atomicity
+
 Explicit runtime boundary for turn pipeline orchestration.
 Coordinates the 12-step turn transaction process.
 """

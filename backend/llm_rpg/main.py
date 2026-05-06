@@ -277,6 +277,12 @@ def perform_turn(session_id: str, inp: InputModel) -> TurnResult:
 if APP_ENV in ("development", "testing"):
     @app.post("/dev/saves", response_model=str)
     def create_save_legacy() -> str:
+        """
+        DEPRECATED: Legacy dev-only endpoint, not authoritative.
+
+        Use POST /saves for production save creation.
+        This endpoint uses in-memory state and is not persisted.
+        """
         session_id = str(uuid.uuid4())
         game_id = f"game_{session_id[:8]}"
         
@@ -320,10 +326,17 @@ if APP_ENV in ("development", "testing"):
     
     @app.get("/dev/saves", response_model=List[str])
     def list_saves_legacy() -> List[str]:
+        """DEPRECATED: Legacy dev-only endpoint. Use GET /saves."""
         return list(sessions.keys())
     
     @app.get("/dev/sessions/{session_id}/snapshot")
     def get_snapshot_legacy(session_id: str) -> dict:
+        """
+        DEPRECATED: Legacy dev-only endpoint, not authoritative.
+
+        Use GET /sessions/{session_id}/snapshot for production.
+        This endpoint uses in-memory state and is not persisted.
+        """
         session = sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -340,6 +353,12 @@ if APP_ENV in ("development", "testing"):
     
     @app.post("/dev/sessions/{session_id}/turn", response_model=TurnResult)
     def perform_turn_legacy(session_id: str, inp: InputModel) -> TurnResult:
+        """
+        DEPRECATED: Legacy dev-only endpoint, not authoritative.
+
+        Use POST /game/sessions/{session_id}/turn for production.
+        This endpoint uses in-memory state and bypasses execute_turn_service().
+        """
         session = sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
@@ -393,6 +412,7 @@ if APP_ENV in ("development", "testing"):
 
     @app.get("/dev/sessions/{session_id}/logs")
     def get_logs_legacy(session_id: str) -> List[str]:
+        """DEPRECATED: Legacy dev-only endpoint. Use GET /debug/sessions/{session_id}/logs."""
         session = sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")

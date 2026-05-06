@@ -255,6 +255,17 @@ class TurnEventAuditResponse(BaseModel):
     summary: Optional[str] = None
 
 
+class LLMStageEvidenceResponse(BaseModel):
+    """Evidence from a single LLM-enabled turn stage."""
+    stage_name: str
+    enabled: bool
+    timeout: float
+    accepted: bool
+    fallback_reason: Optional[str] = None
+    validation_errors: List[str] = []
+    model_call_id: Optional[str] = None
+
+
 class TurnDebugResponse(BaseModel):
     audit_id: str
     session_id: str
@@ -275,6 +286,9 @@ class TurnDebugResponse(BaseModel):
     turn_duration_ms: Optional[int] = None
     started_at: datetime
     completed_at: Optional[datetime] = None
+    # LLM Stage Evidence
+    llm_stages: List[LLMStageEvidenceResponse] = []
+    fallback_reasons: List[str] = []
 
 
 class ReplayEventResponse(BaseModel):
@@ -565,6 +579,7 @@ def get_turn_debug(
     session_id: str,
     turn_no: int,
     current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
 ):
     """
     Get detailed debug information for a specific turn.
@@ -575,6 +590,7 @@ def get_turn_debug(
     - Validation checks
     - Model call IDs
     - State delta IDs
+    - LLM stage evidence (accepted/rejected proposals, fallback reasons)
 
     Requires admin role.
     """
@@ -590,6 +606,32 @@ def get_turn_debug(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Turn audit not found for session {session_id}, turn {turn_no}"
         )
+
+    llm_stages = []
+    fallback_reasons = []
+
+    event_log_repo = EventLogRepository(db)
+    event_log = event_log_repo.get_by_session_and_turn(session_id, turn_no)
+
+    if event_log and event_log.result_json:
+        result_json = event_log.result_json
+
+        llm_stages_data = result_json.get("llm_stages", [])
+        for stage_data in llm_stages_data:
+            llm_stages.append(LLMStageEvidenceResponse(
+                stage_name=stage_data.get("stage_name", ""),
+                enabled=stage_data.get("enabled", False),
+                timeout=stage_data.get("timeout", 0.0),
+                accepted=stage_data.get("accepted", False),
+                fallback_reason=stage_data.get("fallback_reason"),
+                validation_errors=stage_data.get("validation_errors", []),
+                model_call_id=stage_data.get("model_call_id"),
+            ))
+
+        for stage_name in ["world", "scene", "npc", "narration"]:
+            fallback_key = f"{stage_name}_fallback_reason"
+            if fallback_key in result_json:
+                fallback_reasons.append(f"{stage_name}: {result_json[fallback_key]}")
 
     return TurnDebugResponse(
         audit_id=turn_audit.audit_id,
@@ -629,6 +671,8 @@ def get_turn_debug(
         turn_duration_ms=turn_audit.turn_duration_ms,
         started_at=turn_audit.started_at,
         completed_at=turn_audit.completed_at,
+        llm_stages=llm_stages,
+        fallback_reasons=fallback_reasons,
     )
 
 
@@ -986,6 +1030,8 @@ class TurnTimelineResponse(BaseModel):
     turn_duration_ms: Optional[int] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    llm_stages: List[LLMStageEvidenceResponse] = []
+    fallback_reasons: List[str] = []
 
     class Config:
         from_attributes = True
@@ -1210,6 +1256,32 @@ def get_turn_timeline(
             detail=f"Turn {turn_no} not found"
         )
 
+    llm_stages = []
+    fallback_reasons = []
+
+    event_log_repo = EventLogRepository(db)
+    event_log = event_log_repo.get_by_session_and_turn(session_id, turn_no)
+
+    if event_log and event_log.result_json:
+        result_json = event_log.result_json
+
+        llm_stages_data = result_json.get("llm_stages", [])
+        for stage_data in llm_stages_data:
+            llm_stages.append(LLMStageEvidenceResponse(
+                stage_name=stage_data.get("stage_name", ""),
+                enabled=stage_data.get("enabled", False),
+                timeout=stage_data.get("timeout", 0.0),
+                accepted=stage_data.get("accepted", False),
+                fallback_reason=stage_data.get("fallback_reason"),
+                validation_errors=stage_data.get("validation_errors", []),
+                model_call_id=stage_data.get("model_call_id"),
+            ))
+
+        for stage_name in ["world", "scene", "npc", "narration"]:
+            fallback_key = f"{stage_name}_fallback_reason"
+            if fallback_key in result_json:
+                fallback_reasons.append(f"{stage_name}: {result_json[fallback_key]}")
+
     return TurnTimelineResponse(
         turn_no=turn.turn_no,
         session_id=turn.session_id,
@@ -1239,6 +1311,8 @@ def get_turn_timeline(
         turn_duration_ms=turn.turn_duration_ms,
         started_at=turn.started_at,
         completed_at=turn.completed_at,
+        llm_stages=llm_stages,
+        fallback_reasons=fallback_reasons,
     )
 
 

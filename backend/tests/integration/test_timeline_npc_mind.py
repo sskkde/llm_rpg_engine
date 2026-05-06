@@ -36,6 +36,12 @@ from llm_rpg.observability.npc_mind import (
     NPCForbiddenKnowledge,
     NPCRecentContext,
 )
+from llm_rpg.core.replay import (
+    get_replay_store,
+    reset_replay_store,
+    ReplayPerspective,
+    ReplayEvent,
+)
 
 
 class TestTimelineViewer:
@@ -741,3 +747,316 @@ class TestNPCMindAPITests:
         )
         
         assert response.status_code == 422
+
+
+class TestLLMStageEvidence:
+    """Test LLM stage evidence in debug output."""
+
+    def setup_method(self):
+        """Reset audit logger before each test."""
+        reset_audit_logger()
+        self.audit_logger = get_audit_logger()
+
+    def test_turn_debug_includes_llm_stages(self, db_session: Session):
+        """Test that turn debug output includes LLM stage evidence from result_json."""
+        from llm_rpg.storage.models import SessionModel, EventLogModel, UserModel
+
+        admin_user = UserModel(
+            id="admin_llm_test_user",
+            username="admin_llm_test_user",
+            email="admin@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+
+        session = SessionModel(
+            id="test_llm_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+
+        event_log = EventLogModel(
+            id="evt_llm_001",
+            session_id="test_llm_session",
+            turn_no=1,
+            event_type="player_input",
+            input_text="test action",
+            result_json={
+                "llm_stages": [
+                    {
+                        "stage_name": "narration",
+                        "enabled": True,
+                        "timeout": 30.0,
+                        "accepted": True,
+                        "fallback_reason": None,
+                        "validation_errors": [],
+                        "model_call_id": "call_001"
+                    },
+                    {
+                        "stage_name": "scene",
+                        "enabled": True,
+                        "timeout": 30.0,
+                        "accepted": False,
+                        "fallback_reason": "Validation failed: too many recommended actions",
+                        "validation_errors": ["recommended_actions exceeds max length"],
+                        "model_call_id": "call_002"
+                    }
+                ],
+                "narration_fallback_reason": None,
+                "scene_fallback_reason": "Validation failed: too many recommended actions"
+            },
+            narrative_text="Test narration"
+        )
+        db_session.add(event_log)
+        db_session.commit()
+
+        retrieved_log = db_session.query(EventLogModel).filter(
+            EventLogModel.session_id == "test_llm_session",
+            EventLogModel.turn_no == 1
+        ).first()
+
+        assert retrieved_log is not None
+        assert retrieved_log.result_json is not None
+
+        llm_stages = retrieved_log.result_json.get("llm_stages", [])
+        assert len(llm_stages) == 2
+
+        narration_stage = next(
+            (s for s in llm_stages if s["stage_name"] == "narration"),
+            None
+        )
+        assert narration_stage is not None
+        assert narration_stage["enabled"] is True
+        assert narration_stage["accepted"] is True
+        assert narration_stage["model_call_id"] == "call_001"
+
+        scene_stage = next(
+            (s for s in llm_stages if s["stage_name"] == "scene"),
+            None
+        )
+        assert scene_stage is not None
+        assert scene_stage["accepted"] is False
+        assert scene_stage["fallback_reason"] == "Validation failed: too many recommended actions"
+
+        fallback_reasons = []
+        for stage_name in ["world", "scene", "npc", "narration"]:
+            fallback_key = f"{stage_name}_fallback_reason"
+            if fallback_key in retrieved_log.result_json:
+                fallback_value = retrieved_log.result_json[fallback_key]
+                if fallback_value is not None:
+                    fallback_reasons.append(f"{stage_name}: {fallback_value}")
+
+        assert len(fallback_reasons) == 1
+        assert "scene:" in fallback_reasons[0]
+
+    def test_turn_timeline_includes_llm_stages(self, db_session: Session):
+        """Test that turn timeline output includes LLM stage evidence from result_json."""
+        from llm_rpg.storage.models import SessionModel, EventLogModel, UserModel
+
+        admin_user = UserModel(
+            id="admin_timeline_llm_test_user",
+            username="admin_timeline_llm_test_user",
+            email="admin_timeline@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+
+        session = SessionModel(
+            id="test_timeline_llm_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+
+        event_log = EventLogModel(
+            id="evt_timeline_llm_001",
+            session_id="test_timeline_llm_session",
+            turn_no=1,
+            event_type="player_input",
+            input_text="test action",
+            result_json={
+                "llm_stages": [
+                    {
+                        "stage_name": "world",
+                        "enabled": True,
+                        "timeout": 30.0,
+                        "accepted": True,
+                        "fallback_reason": None,
+                        "validation_errors": [],
+                        "model_call_id": None
+                    }
+                ]
+            },
+            narrative_text="Test narration"
+        )
+        db_session.add(event_log)
+        db_session.commit()
+
+        retrieved_log = db_session.query(EventLogModel).filter(
+            EventLogModel.session_id == "test_timeline_llm_session",
+            EventLogModel.turn_no == 1
+        ).first()
+
+        assert retrieved_log is not None
+        assert retrieved_log.result_json is not None
+
+        llm_stages = retrieved_log.result_json.get("llm_stages", [])
+        assert len(llm_stages) == 1
+        assert llm_stages[0]["stage_name"] == "world"
+        assert llm_stages[0]["accepted"] is True
+
+
+class TestHiddenInfoProtection:
+    """Test that player role cannot see NPC hidden info in debug output."""
+
+    def test_player_role_cannot_see_hidden_identity_in_npc_mind(self, client: TestClient):
+        """Test that player role cannot see NPC hidden identity via mind endpoint."""
+        register_response = client.post("/auth/register", json={
+            "username": "hidden_info_test_user",
+            "password": "password123"
+        })
+        assert register_response.status_code == 201
+        token = register_response.json()["access_token"]
+
+        response = client.get(
+            "/debug/sessions/test_session/npcs/npc_001/mind?role=player",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 403
+
+    def test_auditor_role_sees_redacted_hidden_info(self, client: TestClient):
+        """Test that auditor role sees redacted hidden info, not raw data."""
+        register_response = client.post("/auth/register", json={
+            "username": "auditor_hidden_test_user",
+            "password": "password123"
+        })
+        assert register_response.status_code == 201
+        token = register_response.json()["access_token"]
+
+        viewer = NPCMindViewer()
+        mind_view = viewer.get_npc_mind("test_session", "npc_001", ViewRole.AUDITOR)
+
+        assert mind_view is not None
+        assert mind_view.profile.hidden_identity == "[REDACTED - UNAUTHORIZED ACCESS]"
+        assert mind_view.state.hidden_plan_state == "[REDACTED - UNAUTHORIZED ACCESS]"
+
+        for secret in mind_view.secrets:
+            assert secret.description == "[REDACTED - UNAUTHORIZED ACCESS]"
+
+        for knowledge in mind_view.forbidden_knowledge:
+            assert knowledge.description == "[REDACTED - UNAUTHORIZED ACCESS]"
+
+    def test_admin_role_can_see_hidden_info(self, client: TestClient):
+        """Test that admin role can see hidden info."""
+        viewer = NPCMindViewer()
+        mind_view = viewer.get_npc_mind("test_session", "npc_001", ViewRole.ADMIN)
+
+        assert mind_view is not None
+        assert mind_view.profile.hidden_identity is not None
+        assert mind_view.profile.hidden_identity != "[REDACTED - UNAUTHORIZED ACCESS]"
+
+    def test_player_role_replay_no_hidden_info(self):
+        """Test that replay with player perspective excludes hidden info."""
+        reset_replay_store()
+        replay_store = get_replay_store()
+        replay_engine = replay_store.get_replay_engine()
+
+        snapshot = replay_store.create_snapshot(
+            session_id="test_hidden_replay",
+            turn_no=1,
+            world_state={"current_time": "Day 1"},
+            player_state={"hp": 100},
+            npc_states={
+                "npc_secret": {
+                    "name": "Mysterious Stranger",
+                    "hidden_identity": "Actually the villain",
+                    "hidden_plan_state": "Planning to betray the player",
+                    "secrets": ["Knows the truth about the world"],
+                    "forbidden_knowledge": ["Ancient forbidden ritual"],
+                }
+            },
+        )
+
+        events = [
+            ReplayEvent(
+                event_id="evt_hidden_001",
+                event_type="player_input",
+                turn_no=2,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={"raw_input": "talk to stranger"},
+            ),
+        ]
+
+        result = replay_engine.replay_from_snapshot(
+            session_id="test_hidden_replay",
+            snapshot_id=snapshot.snapshot_id,
+            target_turn=2,
+            events=events,
+            perspective=ReplayPerspective.PLAYER,
+        )
+
+        assert result.success is True
+
+        npc_data = result.final_state.get("npc_states", {}).get("npc_secret", {})
+
+        assert "hidden_identity" not in npc_data
+        assert "hidden_plan_state" not in npc_data
+        assert "secrets" not in npc_data
+        assert "forbidden_knowledge" not in npc_data
+
+        assert npc_data.get("name") == "Mysterious Stranger"
+
+    def test_admin_role_replay_includes_hidden_info(self):
+        """Test that replay with admin perspective includes hidden info."""
+        reset_replay_store()
+        replay_store = get_replay_store()
+        replay_engine = replay_store.get_replay_engine()
+
+        snapshot = replay_store.create_snapshot(
+            session_id="test_admin_replay",
+            turn_no=1,
+            world_state={"current_time": "Day 1"},
+            player_state={"hp": 100},
+            npc_states={
+                "npc_secret": {
+                    "name": "Mysterious Stranger",
+                    "hidden_identity": "Actually the villain",
+                    "hidden_plan_state": "Planning to betray the player",
+                }
+            },
+        )
+
+        events = [
+            ReplayEvent(
+                event_id="evt_admin_001",
+                event_type="player_input",
+                turn_no=2,
+                timestamp=datetime.now(),
+                visible_to_player=True,
+                data={},
+            ),
+        ]
+
+        result = replay_engine.replay_from_snapshot(
+            session_id="test_admin_replay",
+            snapshot_id=snapshot.snapshot_id,
+            target_turn=2,
+            events=events,
+            perspective=ReplayPerspective.ADMIN,
+        )
+
+        assert result.success is True
+
+        npc_data = result.final_state.get("npc_states", {}).get("npc_secret", {})
+
+        assert "hidden_identity" in npc_data
+        assert npc_data["hidden_identity"] == "Actually the villain"
+        assert "hidden_plan_state" in npc_data
+        assert npc_data["hidden_plan_state"] == "Planning to betray the player"

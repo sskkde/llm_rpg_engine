@@ -480,6 +480,7 @@ class ReplayEngine:
                 for npc_id, npc_state in filtered["npc_states"].items():
                     if isinstance(npc_state, dict):
                         npc_state.pop("hidden_plan_state", None)
+                        npc_state.pop("hidden_identity", None)
                         npc_state.pop("secrets", None)
                         npc_state.pop("forbidden_knowledge", None)
             

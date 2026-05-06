@@ -1060,3 +1060,268 @@ class TestHiddenInfoProtection:
         assert npc_data["hidden_identity"] == "Actually the villain"
         assert "hidden_plan_state" in npc_data
         assert npc_data["hidden_plan_state"] == "Planning to betray the player"
+
+
+class TestMemoryPersistence:
+    """Test memory persistence after turn execution."""
+
+    def test_turn_writes_perspective_scoped_memory(self, db_session: Session):
+        """Test that turn execution writes perspective-scoped memories."""
+        from llm_rpg.storage.models import SessionModel, EventLogModel, UserModel, MemorySummaryModel, MemoryFactModel
+        from llm_rpg.core.turn_service import _persist_turn_memories
+        
+        admin_user = UserModel(
+            id="admin_memory_test_user",
+            username="admin_memory_test_user",
+            email="admin_memory@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        
+        session = SessionModel(
+            id="test_memory_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+        
+        event_log = EventLogModel(
+            id="evt_memory_001",
+            session_id="test_memory_session",
+            turn_no=1,
+            event_type="player_input",
+            input_text="前往试炼堂",
+            narrative_text="你来到了试炼堂。",
+            result_json={},
+        )
+        db_session.add(event_log)
+        db_session.commit()
+        
+        from llm_rpg.core.turn_service import MovementResult
+        movement_result = MovementResult(
+            success=True,
+            new_location_id="loc_trial_hall",
+            new_location_name="试炼堂",
+            new_location_code="trial_hall",
+        )
+        
+        memory_result = _persist_turn_memories(
+            db=db_session,
+            session_id="test_memory_session",
+            turn_no=1,
+            event_id="evt_memory_001",
+            action_type="move",
+            player_input="前往试炼堂",
+            movement_result=movement_result,
+            state_deltas={"location_id": "loc_trial_hall"},
+            current_location_id="loc_trial_hall",
+            npc_reactions=[],
+            world_progression=None,
+            scene_event_summary=None,
+        )
+        
+        assert memory_result is not None
+        assert memory_result.get("summaries_created", 0) >= 1
+        assert memory_result.get("facts_created", 0) >= 1
+        
+        summaries = db_session.query(MemorySummaryModel).filter(
+            MemorySummaryModel.session_id == "test_memory_session"
+        ).all()
+        assert len(summaries) >= 1
+        
+        facts = db_session.query(MemoryFactModel).filter(
+            MemoryFactModel.session_id == "test_memory_session"
+        ).all()
+        assert len(facts) >= 1
+        
+        location_fact = next(
+            (f for f in facts if f.fact_type == "location_change"),
+            None
+        )
+        assert location_fact is not None
+        assert location_fact.fact_value == "loc_trial_hall"
+
+    def test_npc_subjective_memory_isolation(self, db_session: Session):
+        """Test that NPC subjective memory is scoped by NPC ID and not player-visible."""
+        from llm_rpg.storage.models import SessionModel, EventLogModel, UserModel, MemorySummaryModel
+        from llm_rpg.core.turn_service import _persist_turn_memories
+        
+        admin_user = UserModel(
+            id="admin_npc_memory_user",
+            username="admin_npc_memory_user",
+            email="admin_npc@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        
+        session = SessionModel(
+            id="test_npc_memory_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+        
+        event_log = EventLogModel(
+            id="evt_npc_memory_001",
+            session_id="test_npc_memory_session",
+            turn_no=1,
+            event_type="player_input",
+            input_text="与师姐交谈",
+            narrative_text="你与师姐交谈。",
+            result_json={},
+        )
+        db_session.add(event_log)
+        db_session.commit()
+        
+        npc_reactions = [
+            {
+                "npc_id": "npc_001",
+                "npc_name": "师姐",
+                "accepted": True,
+                "action_type": "talk",
+                "summary": "师姐微笑着回应你的问候",
+                "visible_to_player": True,
+            }
+        ]
+        
+        memory_result = _persist_turn_memories(
+            db=db_session,
+            session_id="test_npc_memory_session",
+            turn_no=1,
+            event_id="evt_npc_memory_001",
+            action_type="talk",
+            player_input="与师姐交谈",
+            movement_result=None,
+            state_deltas={},
+            current_location_id="loc_trial_hall",
+            npc_reactions=npc_reactions,
+            world_progression=None,
+            scene_event_summary=None,
+        )
+        
+        assert memory_result is not None
+        assert memory_result.get("npc_memories_created", 0) >= 1
+        
+        npc_memories = db_session.query(MemorySummaryModel).filter(
+            MemorySummaryModel.session_id == "test_npc_memory_session",
+            MemorySummaryModel.scope_type == "npc",
+            MemorySummaryModel.scope_ref_id == "npc_001",
+        ).all()
+        
+        assert len(npc_memories) >= 1
+        assert "师姐的主观记忆" in npc_memories[0].summary_text
+
+    def test_no_hidden_memory_leakage_to_player_narration(self, db_session: Session):
+        """Test that NPC subjective memory does not leak to player-visible narration context."""
+        from llm_rpg.storage.models import SessionModel, UserModel, MemorySummaryModel
+        from llm_rpg.core.context_builder import _retrieve_memories_for_narration_context
+        
+        admin_user = UserModel(
+            id="admin_leakage_test_user",
+            username="admin_leakage_test_user",
+            email="admin_leakage@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        
+        session = SessionModel(
+            id="test_leakage_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+        
+        world_memory = MemorySummaryModel(
+            id="sum_world_leakage",
+            session_id="test_leakage_session",
+            scope_type="world",
+            summary_text="Player entered the trial hall",
+            importance_score=0.7,
+        )
+        db_session.add(world_memory)
+        
+        npc_secret_memory = MemorySummaryModel(
+            id="sum_npc_secret",
+            session_id="test_leakage_session",
+            scope_type="npc",
+            scope_ref_id="npc_secret",
+            summary_text="NPC secretly plans to betray the player",
+            importance_score=0.9,
+        )
+        db_session.add(npc_secret_memory)
+        db_session.commit()
+        
+        narration_memories = _retrieve_memories_for_narration_context(
+            db=db_session,
+            session_id="test_leakage_session",
+            limit=10,
+        )
+        
+        memory_texts = [m["summary_text"] for m in narration_memories]
+        
+        assert "Player entered the trial hall" in memory_texts
+        assert not any("betray" in text.lower() for text in memory_texts)
+        assert not any("secretly plans" in text.lower() for text in memory_texts)
+
+    def test_memory_write_failure_is_non_fatal(self, db_session: Session):
+        """Test that memory write failure does not roll back the committed turn."""
+        from llm_rpg.storage.models import SessionModel, EventLogModel, UserModel
+        from llm_rpg.core.turn_service import _persist_turn_memories
+        
+        admin_user = UserModel(
+            id="admin_failure_test_user",
+            username="admin_failure_test_user",
+            email="admin_failure@test.com",
+            password_hash="hashed",
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        
+        session = SessionModel(
+            id="test_failure_session",
+            user_id=admin_user.id,
+            world_id="test_world",
+            status="active"
+        )
+        db_session.add(session)
+        
+        event_log = EventLogModel(
+            id="evt_failure_001",
+            session_id="test_failure_session",
+            turn_no=1,
+            event_type="player_input",
+            input_text="test action",
+            narrative_text="Test narration",
+            result_json={},
+        )
+        db_session.add(event_log)
+        db_session.commit()
+        
+        memory_result = _persist_turn_memories(
+            db=db_session,
+            session_id="test_failure_session",
+            turn_no=1,
+            event_id="nonexistent_event_id",
+            action_type="action",
+            player_input="test action",
+            movement_result=None,
+            state_deltas={},
+            current_location_id=None,
+            npc_reactions=[],
+            world_progression=None,
+            scene_event_summary=None,
+        )
+        
+        assert memory_result is not None
+        assert memory_result.get("fallback_reason") is not None or memory_result.get("summaries_created", 0) >= 0
+        
+        event_still_exists = db_session.query(EventLogModel).filter(
+            EventLogModel.id == "evt_failure_001"
+        ).first()
+        assert event_still_exists is not None

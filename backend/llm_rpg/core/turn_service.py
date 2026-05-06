@@ -1399,6 +1399,7 @@ def _execute_npc_stage(
                 pipeline.generate_npc_action(
                     npc_id=npc_id,
                     npc_context=npc_context,
+                    prompt_template_id="npc_action_v1",
                     session_id=session_id,
                     turn_no=turn_no,
                 )

@@ -329,7 +329,7 @@ async def execute_turn_stream(
             "turn_started",
             {
                 "session_id": session_id,
-                "turn_index": None,
+                "turn_index": turn_index,
                 "player_input": player_input,
                 "timestamp": datetime.now().isoformat(),
             },

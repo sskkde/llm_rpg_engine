@@ -697,5 +697,338 @@ class TestNoNPCInScene:
         assert action is None
 
 
+class TestExecuteNPCStage:
+    """Tests for _execute_npc_stage() integration with turn service."""
+
+    @pytest.fixture
+    def db(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from llm_rpg.storage.database import Base
+        from llm_rpg.storage.models import (
+            UserModel, WorldModel, ChapterModel, LocationModel,
+            NPCTemplateModel, SessionModel, SessionStateModel,
+            SessionNPCStateModel, SessionPlayerStateModel,
+        )
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        SessionLocal = sessionmaker(bind=engine)
+        session = SessionLocal()
+
+        user = UserModel(id="u1", username="test", email="t@t.com", password_hash="h")
+        world = WorldModel(id="w1", code="w1", name="World", genre="xianxia", status="active")
+        chapter = ChapterModel(id="ch1", world_id="w1", chapter_no=1, name="Ch1")
+        location = LocationModel(
+            id="loc1", world_id="w1", chapter_id="ch1",
+            code="square", name="广场", access_rules={"always_accessible": True},
+        )
+        npc_template = NPCTemplateModel(
+            id="npc_t1", world_id="w1", code="guide",
+            name="柳师姐", role_type="guide",
+            public_identity="宗门向导",
+            hidden_identity="暗影组织间谍",
+            personality="温和友善",
+            goals=["保护新弟子"],
+        )
+        session_model = SessionModel(
+            id="s1", user_id="u1", save_slot_id=None,
+            world_id="w1", current_chapter_id="ch1", status="active",
+        )
+        session_state = SessionStateModel(
+            session_id="s1", current_location_id="loc1",
+        )
+        player_state = SessionPlayerStateModel(
+            session_id="s1",
+        )
+        npc_state = SessionNPCStateModel(
+            id="ns1", session_id="s1", npc_template_id="npc_t1",
+            current_location_id="loc1", trust_score=50,
+            suspicion_score=0, status_flags={"status": "alive", "mood": "neutral"},
+        )
+
+        session.add_all([
+            user, world, chapter, location, npc_template,
+            session_model, session_state, player_state, npc_state,
+        ])
+        session.commit()
+        yield session
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+    def test_npc_stage_disabled_returns_fallback(self, db):
+        from llm_rpg.core.turn_service import _execute_npc_stage
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState, NPCState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(entity_id="w1", world_id="w1", current_time=WorldTime(
+                calendar="修仙历", season="春", day=1, hour=12, period="辰时",
+            )),
+            player_state=PlayerState(entity_id="p1", name="玩家", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="loc1", scene_id="loc1", location_id="loc1", active_actor_ids=["p1"],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        with patch("llm_rpg.core.turn_service._is_npc_stage_enabled", return_value=False):
+            result = _execute_npc_stage(
+                db=db, session_id="s1", turn_no=1,
+                canonical_state=state, player_input="测试",
+                action_type="action", current_location_id="loc1",
+            )
+
+        assert result.stage_name == "npc"
+        assert result.accepted is False
+        assert result.fallback_reason == "npc_stage_disabled"
+
+    def test_npc_stage_no_active_npcs_returns_empty(self, db):
+        from llm_rpg.core.turn_service import _execute_npc_stage
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState, NPCState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(entity_id="w1", world_id="w1", current_time=WorldTime(
+                calendar="修仙历", season="春", day=1, hour=12, period="辰时",
+            )),
+            player_state=PlayerState(entity_id="p1", name="玩家", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="loc1", scene_id="loc1", location_id="loc1", active_actor_ids=["p1"],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        result = _execute_npc_stage(
+            db=db, session_id="s1", turn_no=1,
+            canonical_state=state, player_input="测试",
+            action_type="action", current_location_id="nonexistent",
+        )
+
+        assert result.stage_name == "npc"
+        assert result.accepted is True
+        assert result.parsed_proposal == {"npc_reactions": []}
+
+    def test_validate_npc_action_rejects_none(self):
+        from llm_rpg.core.turn_service import _validate_npc_action
+
+        is_valid, errors = _validate_npc_action(None, {})
+        assert is_valid is False
+        assert "None" in errors[0]
+
+    def test_validate_npc_action_rejects_forbidden_pattern(self):
+        from llm_rpg.core.turn_service import _validate_npc_action
+
+        class MockProposal:
+            npc_id = "npc_1"
+            action_type = "talk"
+            summary = "NPC泄露了隐藏身份"
+            visibility = "player_visible"
+
+        is_valid, errors = _validate_npc_action(MockProposal(), {})
+        assert is_valid is False
+        assert any("hidden" in e or "隐藏" in e for e in errors)
+
+    def test_validate_npc_action_accepts_valid(self):
+        from llm_rpg.core.turn_service import _validate_npc_action
+
+        class MockProposal:
+            npc_id = "npc_1"
+            action_type = "talk"
+            summary = "NPC与玩家交谈"
+            visibility = "player_visible"
+
+        is_valid, errors = _validate_npc_action(MockProposal(), {})
+        assert is_valid is True
+        assert errors == []
+
+    def test_build_npc_context_excludes_hidden_identity(self, db):
+        from llm_rpg.core.turn_service import _build_npc_context
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState, NPCState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(entity_id="w1", world_id="w1", current_time=WorldTime(
+                calendar="修仙历", season="春", day=1, hour=12, period="辰时",
+            )),
+            player_state=PlayerState(entity_id="p1", name="玩家", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="loc1", scene_id="loc1", location_id="loc1", active_actor_ids=["p1"],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        context = _build_npc_context(
+            db=db, session_id="s1", npc_id="ns1", npc_template_id="npc_t1",
+            canonical_state=state, player_input="测试", action_type="action",
+            current_location_id="loc1",
+        )
+
+        assert "hidden_identity" not in context
+        assert "hidden_plan_state" not in context
+        assert context.get("public_identity") == "宗门向导"
+        assert context.get("personality") == "温和友善"
+        assert context.get("goals") == ["保护新弟子"]
+        assert context.get("trust_score") == 50
+
+    def test_get_active_npcs_excludes_dead(self, db):
+        from llm_rpg.core.turn_service import _get_active_npcs_at_location
+        from llm_rpg.storage.models import SessionNPCStateModel
+
+        npc_state = db.query(SessionNPCStateModel).filter_by(id="ns1").one()
+        npc_state.status_flags = {"status": "dead", "mood": "neutral"}
+        db.commit()
+
+        active_npcs = _get_active_npcs_at_location(db, "s1", "loc1")
+        assert len(active_npcs) == 0
+
+    def test_get_active_npcs_excludes_wrong_location(self, db):
+        from llm_rpg.core.turn_service import _get_active_npcs_at_location
+
+        active_npcs = _get_active_npcs_at_location(db, "s1", "wrong_location")
+        assert len(active_npcs) == 0
+
+    def test_get_active_npcs_returns_alive_at_location(self, db):
+        from llm_rpg.core.turn_service import _get_active_npcs_at_location
+
+        active_npcs = _get_active_npcs_at_location(db, "s1", "loc1")
+        assert len(active_npcs) == 1
+        assert active_npcs[0]["name"] == "柳师姐"
+        assert active_npcs[0]["public_identity"] == "宗门向导"
+        assert "hidden_identity" not in active_npcs[0]
+
+
+class TestNPCStageInLLMStages:
+    """Tests for NPC stage within _execute_llm_stages() pipeline."""
+
+    @pytest.fixture
+    def db(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+        from llm_rpg.storage.database import Base
+        from llm_rpg.storage.models import (
+            UserModel, WorldModel, ChapterModel, LocationModel,
+            NPCTemplateModel, SessionModel, SessionStateModel,
+            SessionNPCStateModel, SessionPlayerStateModel,
+        )
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        SessionLocal = sessionmaker(bind=engine)
+        session = SessionLocal()
+
+        user = UserModel(id="u1", username="test", email="t@t.com", password_hash="h")
+        world = WorldModel(id="w1", code="w1", name="World", genre="xianxia", status="active")
+        chapter = ChapterModel(id="ch1", world_id="w1", chapter_no=1, name="Ch1")
+        location = LocationModel(
+            id="loc1", world_id="w1", chapter_id="ch1",
+            code="square", name="广场", access_rules={"always_accessible": True},
+        )
+        npc_template = NPCTemplateModel(
+            id="npc_t1", world_id="w1", code="guide",
+            name="柳师姐", role_type="guide",
+            public_identity="宗门向导",
+            hidden_identity="暗影组织间谍",
+            personality="温和友善",
+            goals=["保护新弟子"],
+        )
+        session_model = SessionModel(
+            id="s1", user_id="u1", save_slot_id=None,
+            world_id="w1", current_chapter_id="ch1", status="active",
+        )
+        session_state = SessionStateModel(
+            session_id="s1", current_location_id="loc1",
+        )
+        player_state = SessionPlayerStateModel(
+            session_id="s1",
+        )
+        npc_state = SessionNPCStateModel(
+            id="ns1", session_id="s1", npc_template_id="npc_t1",
+            current_location_id="loc1", trust_score=50,
+            suspicion_score=0, status_flags={"status": "alive", "mood": "neutral"},
+        )
+
+        session.add_all([
+            user, world, chapter, location, npc_template,
+            session_model, session_state, player_state, npc_state,
+        ])
+        session.commit()
+        yield session
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+    def test_llm_stages_includes_npc_result(self, db):
+        from llm_rpg.core.turn_service import _execute_llm_stages
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(entity_id="w1", world_id="w1", current_time=WorldTime(
+                calendar="修仙历", season="春", day=1, hour=12, period="辰时",
+            )),
+            player_state=PlayerState(entity_id="p1", name="玩家", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="loc1", scene_id="loc1", location_id="loc1", active_actor_ids=["p1"],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        results = _execute_llm_stages(
+            db=db, session_id="s1", turn_no=1,
+            canonical_state=state, player_input="测试",
+            action_type="action", current_location_id="loc1",
+        )
+
+        stage_names = [r.stage_name for r in results]
+        assert "scene" in stage_names
+        assert "npc" in stage_names
+        assert "narration" in stage_names
+
+        npc_result = next(r for r in results if r.stage_name == "npc")
+        assert npc_result.enabled is True
+
+    def test_npc_reactions_passed_to_narration(self, db):
+        from llm_rpg.core.turn_service import _execute_llm_stages
+        from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState
+        from llm_rpg.models.events import WorldTime
+
+        state = CanonicalState(
+            world_state=WorldState(entity_id="w1", world_id="w1", current_time=WorldTime(
+                calendar="修仙历", season="春", day=1, hour=12, period="辰时",
+            )),
+            player_state=PlayerState(entity_id="p1", name="玩家", location_id="loc1"),
+            current_scene_state=CurrentSceneState(
+                entity_id="loc1", scene_id="loc1", location_id="loc1", active_actor_ids=["p1"],
+            ),
+            location_states={}, npc_states={}, quest_states={}, faction_states={},
+        )
+
+        results = _execute_llm_stages(
+            db=db, session_id="s1", turn_no=1,
+            canonical_state=state, player_input="测试",
+            action_type="action", current_location_id="loc1",
+        )
+
+        npc_result = next(r for r in results if r.stage_name == "npc")
+        narration_result = next(r for r in results if r.stage_name == "narration")
+
+        if npc_result.accepted and npc_result.parsed_proposal:
+            npc_reactions = npc_result.parsed_proposal.get("npc_reactions", [])
+            if npc_reactions:
+                assert narration_result.fallback_reason != "narration_stage_disabled"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

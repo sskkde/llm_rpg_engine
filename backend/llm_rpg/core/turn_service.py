@@ -219,6 +219,26 @@ def _is_scene_stage_enabled(db: Session) -> bool:
         return False
 
 
+def _is_npc_stage_enabled(db: Session) -> bool:
+    """
+    Check if LLM NPC decision stage is enabled via SystemSettingsService.
+    
+    NPC stage is enabled when:
+    1. provider_mode is not "mock" (real LLM provider configured)
+    2. NPC stage is explicitly enabled in settings (future: feature flag)
+    
+    Currently uses the same condition as narration stage.
+    """
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        provider_mode = provider_config.get("provider_mode", "mock")
+        return provider_mode != "mock"
+    except Exception:
+        return False
+
+
 def _build_narration_context(
     db: Session,
     session_id: str,
@@ -228,6 +248,7 @@ def _build_narration_context(
     movement_result: Optional[MovementResult] = None,
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
+    npc_reactions: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Build narration context from committed state only.
@@ -319,6 +340,20 @@ def _build_narration_context(
     
     recent_events = _get_recent_events(db, session_id, limit=5)
     context["recent_events"] = recent_events
+    
+    if npc_reactions:
+        player_visible_reactions = [
+            {
+                "npc_name": r.get("npc_name"),
+                "action_type": r.get("action_type"),
+                "summary": r.get("summary"),
+                "visible_motivation": r.get("visible_motivation"),
+            }
+            for r in npc_reactions
+            if r.get("accepted") and r.get("visible_to_player", True)
+        ]
+        if player_visible_reactions:
+            context["npc_reactions"] = player_visible_reactions
     
     return context
 
@@ -481,6 +516,392 @@ def _build_scene_context(
     return context
 
 
+def _get_active_npcs_at_location(
+    db: Session,
+    session_id: str,
+    location_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Get active NPCs at a location for NPC decision stage.
+    
+    Returns NPCs that are:
+    - At the current location
+    - Alive (status == "alive")
+    
+    CRITICAL: Only includes public_identity, NEVER hidden_identity.
+    """
+    if not location_id:
+        return []
+    
+    npc_state_repo = SessionNPCStateRepository(db)
+    npc_states = npc_state_repo.get_by_session(session_id)
+    
+    active_npcs = []
+    npc_template_repo = NPCTemplateRepository(db)
+    
+    for npc_state in npc_states:
+        if npc_state.current_location_id != location_id:
+            continue
+        
+        status_flags = npc_state.status_flags or {}
+        if status_flags.get("status", "alive") != "alive":
+            continue
+        
+        npc_template = npc_template_repo.get_by_id(npc_state.npc_template_id)
+        if not npc_template:
+            continue
+        
+        active_npcs.append({
+            "npc_id": npc_state.id,
+            "npc_template_id": npc_state.npc_template_id,
+            "name": npc_template.name,
+            "public_identity": npc_template.public_identity,
+            "role_type": npc_template.role_type,
+            "personality": npc_template.personality,
+            "goals": npc_template.goals or [],
+            "trust_score": npc_state.trust_score,
+            "suspicion_score": npc_state.suspicion_score,
+            "mood": status_flags.get("mood", "neutral"),
+            "current_location_id": npc_state.current_location_id,
+        })
+    
+    return active_npcs
+
+
+def _build_npc_context(
+    db: Session,
+    session_id: str,
+    npc_id: str,
+    npc_template_id: str,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+    recent_npc_actions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Build NPC context for LLM NPC decision generation.
+    
+    CRITICAL: Only includes player-visible facts. No hidden NPC info.
+    
+    Context includes:
+    - NPC public identity, personality, goals
+    - Relationship scores (trust, suspicion)
+    - Current location
+    - Recent visible events
+    - Player action context
+    - Other NPCs' visible reactions (from sequential processing)
+    
+    NEVER includes:
+    - hidden_identity from NPCTemplateModel
+    - hidden_plan_state from SessionNPCStateModel
+    """
+    npc_template_repo = NPCTemplateRepository(db)
+    npc_template = npc_template_repo.get_by_id(npc_template_id)
+    
+    if not npc_template:
+        return {}
+    
+    npc_state_repo = SessionNPCStateRepository(db)
+    npc_states = npc_state_repo.get_by_session(session_id)
+    npc_state = None
+    for ns in npc_states:
+        if ns.id == npc_id:
+            npc_state = ns
+            break
+    
+    context: Dict[str, Any] = {
+        "npc_id": npc_id,
+        "npc_name": npc_template.name,
+        "public_identity": npc_template.public_identity,
+        "role_type": npc_template.role_type,
+        "personality": npc_template.personality,
+        "goals": npc_template.goals or [],
+        "constraints": [
+            "只能基于已知事实和可见信息做出决策",
+            "不能泄露隐藏身份或秘密计划",
+            "行动必须符合角色性格和目标",
+        ],
+    }
+    
+    if npc_state:
+        context["trust_score"] = npc_state.trust_score
+        context["suspicion_score"] = npc_state.suspicion_score
+        status_flags = npc_state.status_flags or {}
+        context["mood"] = status_flags.get("mood", "neutral")
+        context["current_location_id"] = npc_state.current_location_id
+    
+    context["player_action"] = {
+        "input": player_input,
+        "action_type": action_type,
+    }
+    
+    if movement_result:
+        context["player_action"]["movement"] = {
+            "success": movement_result.success,
+            "new_location_name": movement_result.new_location_name,
+        }
+    
+    if state_deltas:
+        context["state_deltas"] = state_deltas
+    
+    recent_events = _get_recent_events(db, session_id, limit=3)
+    context["recent_events"] = recent_events
+    
+    if recent_npc_actions:
+        context["recent_npc_reactions"] = [
+            {
+                "npc_name": action.get("npc_name"),
+                "summary": action.get("summary"),
+            }
+            for action in recent_npc_actions
+        ]
+    
+    return context
+
+
+def _validate_npc_action(
+    proposal: Any,
+    npc_context: Dict[str, Any],
+) -> Tuple[bool, List[str]]:
+    """
+    Validate an NPC action proposal.
+    
+    Checks:
+    - proposal is not None
+    - proposal has required fields (npc_id, action_type, summary)
+    - No forbidden info leaks in summary/motivation
+    - visibility is valid
+    
+    Returns (is_valid, validation_errors).
+    """
+    errors = []
+    
+    if proposal is None:
+        return (False, ["proposal is None"])
+    
+    if not hasattr(proposal, "npc_id"):
+        errors.append("proposal missing npc_id")
+    
+    if not hasattr(proposal, "action_type"):
+        errors.append("proposal missing action_type")
+    
+    if not hasattr(proposal, "summary"):
+        errors.append("proposal missing summary")
+    
+    if hasattr(proposal, "summary") and proposal.summary:
+        forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+        for pattern in forbidden_patterns:
+            if pattern in proposal.summary:
+                errors.append(f"forbidden pattern in summary: {pattern}")
+    
+    if hasattr(proposal, "visible_motivation") and proposal.visible_motivation:
+        forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+        for pattern in forbidden_patterns:
+            if pattern in proposal.visible_motivation:
+                errors.append(f"forbidden pattern in visible_motivation: {pattern}")
+    
+    if hasattr(proposal, "visibility"):
+        valid_visibility = ["player_visible", "hidden", "gm_only"]
+        if proposal.visibility not in valid_visibility:
+            errors.append(f"invalid visibility: {proposal.visibility}")
+    
+    return (len(errors) == 0, errors)
+
+
+def _execute_npc_stage(
+    db: Session,
+    session_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    player_input: str,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    state_deltas: Optional[Dict[str, Any]] = None,
+    current_location_id: Optional[str] = None,
+    recent_npc_actions: Optional[List[Dict[str, Any]]] = None,
+) -> LLMStageResult:
+    """
+    Execute the NPC LLM stage.
+    
+    1. Check if enabled via feature flag
+    2. Get active NPCs at current location
+    3. For each active NPC, build context and call ProposalPipeline.generate_npc_action()
+    4. Validate each NPC action
+    5. Return LLMStageResult with accepted/rejected status and NPC reactions
+    
+    NPCs are processed sequentially, with each NPC seeing the reactions of previous NPCs.
+    """
+    from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+    
+    stage_name: LLMStageName = "npc"
+    timeout = 30.0
+    
+    enabled = _is_npc_stage_enabled(db)
+    if not enabled:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=False,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason="npc_stage_disabled",
+        )
+    
+    active_npcs = _get_active_npcs_at_location(db, session_id, current_location_id)
+    
+    if not active_npcs:
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=True,
+            parsed_proposal={"npc_reactions": []},
+        )
+    
+    try:
+        from ..services.settings import SystemSettingsService
+        settings_service = SystemSettingsService(db)
+        provider_config = settings_service.get_provider_config()
+        
+        llm_service = _create_llm_service_from_config(db, provider_config)
+        
+        pipeline_config = ProposalConfig(
+            timeout_seconds=timeout,
+            max_tokens=provider_config.get("max_tokens", 500),
+            temperature=provider_config.get("temperature", 0.8),
+        )
+        pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
+        
+    except Exception as e:
+        logger.warning("Failed to configure LLM service for NPC stage: %s", e)
+        return LLMStageResult(
+            stage_name=stage_name,
+            enabled=True,
+            timeout=timeout,
+            accepted=False,
+            fallback_reason=f"llm_config_error: {str(e)[:200]}",
+        )
+    
+    npc_reactions: List[Dict[str, Any]] = []
+    working_recent_actions = list(recent_npc_actions) if recent_npc_actions else []
+    
+    for npc in active_npcs:
+        npc_id = npc["npc_id"]
+        npc_template_id = npc["npc_template_id"]
+        npc_name = npc["name"]
+        
+        npc_context = _build_npc_context(
+            db=db,
+            session_id=session_id,
+            npc_id=npc_id,
+            npc_template_id=npc_template_id,
+            canonical_state=canonical_state,
+            player_input=player_input,
+            action_type=action_type,
+            movement_result=movement_result,
+            state_deltas=state_deltas,
+            current_location_id=current_location_id,
+            recent_npc_actions=working_recent_actions,
+        )
+        
+        if not npc_context:
+            continue
+        
+        try:
+            proposal = _run_async_safe(
+                pipeline.generate_npc_action(
+                    npc_id=npc_id,
+                    npc_context=npc_context,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                )
+            )
+            
+            is_valid, validation_errors = _validate_npc_action(proposal, npc_context)
+            
+            if not is_valid:
+                npc_reactions.append({
+                    "npc_id": npc_id,
+                    "npc_name": npc_name,
+                    "accepted": False,
+                    "fallback_reason": f"validation_failed: {', '.join(validation_errors[:3])}",
+                    "action_type": "idle",
+                    "summary": f"{npc_name}等待着",
+                })
+                continue
+            
+            is_fallback = getattr(proposal, "is_fallback", False)
+            if is_fallback:
+                fallback_reason = "llm_proposal_fallback"
+                audit = getattr(proposal, "audit", None)
+                if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
+                    fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
+                
+                npc_reactions.append({
+                    "npc_id": npc_id,
+                    "npc_name": npc_name,
+                    "accepted": False,
+                    "fallback_reason": fallback_reason,
+                    "action_type": getattr(proposal, "action_type", "idle"),
+                    "summary": getattr(proposal, "summary", f"{npc_name}等待着"),
+                })
+                continue
+            
+            visibility = getattr(proposal, "visibility", "player_visible")
+            visible_to_player = visibility == "player_visible"
+            
+            reaction = {
+                "npc_id": npc_id,
+                "npc_name": npc_name,
+                "accepted": True,
+                "action_type": proposal.action_type,
+                "summary": proposal.summary,
+                "visible_to_player": visible_to_player,
+                "visible_motivation": getattr(proposal, "visible_motivation", ""),
+            }
+            
+            if visible_to_player:
+                working_recent_actions.append({
+                    "npc_name": npc_name,
+                    "summary": proposal.summary,
+                })
+            
+            npc_reactions.append(reaction)
+            
+        except asyncio.TimeoutError:
+            npc_reactions.append({
+                "npc_id": npc_id,
+                "npc_name": npc_name,
+                "accepted": False,
+                "fallback_reason": "timeout",
+                "action_type": "idle",
+                "summary": f"{npc_name}等待着",
+            })
+        except Exception as e:
+            logger.warning("NPC action generation failed for %s: %s", npc_id, e)
+            npc_reactions.append({
+                "npc_id": npc_id,
+                "npc_name": npc_name,
+                "accepted": False,
+                "fallback_reason": f"error: {str(e)[:200]}",
+                "action_type": "idle",
+                "summary": f"{npc_name}等待着",
+            })
+    
+    accepted_count = sum(1 for r in npc_reactions if r.get("accepted", False))
+    
+    return LLMStageResult(
+        stage_name=stage_name,
+        enabled=True,
+        timeout=timeout,
+        raw_outcome=str(npc_reactions)[:500],
+        parsed_proposal={"npc_reactions": npc_reactions},
+        accepted=accepted_count > 0,
+    )
+
+
 def _execute_llm_stages(
     db: Session,
     session_id: str,
@@ -495,9 +916,10 @@ def _execute_llm_stages(
     """
     Execute LLM-enabled stages for a turn.
     
-    Stage order (scene runs before narration):
+    Stage order:
     1. Scene stage - generate scene event candidates and recommended actions
-    2. Narration stage - generate narrative text
+    2. NPC stage - generate NPC reactions (after scene, before narration)
+    3. Narration stage - generate narrative text
     
     Each stage is feature-flagged via SystemSettingsService.
     Proposals are validated before acceptance.
@@ -532,6 +954,23 @@ def _execute_llm_stages(
     )
     results.append(scene_result)
     
+    npc_result = _execute_npc_stage(
+        db=db,
+        session_id=session_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        player_input=player_input,
+        action_type=action_type,
+        movement_result=movement_result,
+        state_deltas=state_deltas,
+        current_location_id=current_location_id,
+    )
+    results.append(npc_result)
+    
+    npc_reactions_for_narration: List[Dict[str, Any]] = []
+    if npc_result.accepted and npc_result.parsed_proposal:
+        npc_reactions_for_narration = npc_result.parsed_proposal.get("npc_reactions", [])
+    
     narration_result = _execute_narration_stage(
         db=db,
         session_id=session_id,
@@ -542,6 +981,7 @@ def _execute_llm_stages(
         movement_result=movement_result,
         state_deltas=state_deltas,
         current_location_id=current_location_id,
+        npc_reactions=npc_reactions_for_narration,
     )
     results.append(narration_result)
     
@@ -558,6 +998,7 @@ def _execute_narration_stage(
     movement_result: Optional[MovementResult] = None,
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
+    npc_reactions: Optional[List[Dict[str, Any]]] = None,
 ) -> LLMStageResult:
     """
     Execute the narration LLM stage.
@@ -593,6 +1034,21 @@ def _execute_narration_stage(
         state_deltas=state_deltas,
         current_location_id=current_location_id,
     )
+    
+    # Expose player-visible NPC reactions to narration context
+    if npc_reactions:
+        visible_reactions = [
+            {
+                "npc_name": r.get("npc_name"),
+                "action_type": r.get("action_type"),
+                "summary": r.get("summary"),
+                "visible_to_player": r.get("visible_to_player", True),
+            }
+            for r in npc_reactions
+            if r.get("visible_to_player", True) and r.get("accepted", False)
+        ]
+        if visible_reactions:
+            narration_context["npc_reactions"] = visible_reactions
     
     try:
         from ..services.settings import SystemSettingsService
@@ -1189,10 +1645,12 @@ def execute_turn_service(
         current_location_id=current_location_id,
     )
     
-    # Step 14: Determine final recommended actions and scene event summary
+    # Step 14: Determine final recommended actions, scene summary, and NPC reactions
     final_recommended_actions = deterministic_recommended_actions
     scene_event_summary: Optional[Dict[str, Any]] = None
     scene_fallback_reason: Optional[str] = None
+    npc_reactions_for_json: List[Dict[str, Any]] = []
+    npc_fallback_reason: Optional[str] = None
     
     for stage_result in llm_stage_results:
         if stage_result.stage_name == "scene":
@@ -1207,6 +1665,11 @@ def execute_turn_service(
                 }
             else:
                 scene_fallback_reason = stage_result.fallback_reason
+        elif stage_result.stage_name == "npc":
+            if stage_result.accepted and stage_result.parsed_proposal:
+                npc_reactions_for_json = stage_result.parsed_proposal.get("npc_reactions", [])
+            else:
+                npc_fallback_reason = stage_result.fallback_reason
     
     # Step 15: If LLM narration accepted, update EventLogModel.narrative_text
     final_narration = narration
@@ -1217,7 +1680,7 @@ def execute_turn_service(
                 event_log_repo = EventLogRepository(db)
                 event_log_repo.update(event.id, {"narrative_text": final_narration})
     
-    # Step 16: Update result_json with LLM stage results and scene summary
+    # Step 16: Update result_json with LLM stage results, scene summary, and NPC reactions
     llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
     updated_result_json = {
         "transaction_id": transaction_id,
@@ -1229,6 +1692,8 @@ def execute_turn_service(
         "llm_stages": llm_stages_json,
         "scene_event_summary": scene_event_summary,
         "scene_fallback_reason": scene_fallback_reason,
+        "npc_reactions": npc_reactions_for_json,
+        "npc_fallback_reason": npc_fallback_reason,
     }
     event_log_repo = EventLogRepository(db)
     event_log_repo.update(event.id, {"result_json": updated_result_json})

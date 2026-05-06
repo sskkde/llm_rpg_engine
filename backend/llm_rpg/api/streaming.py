@@ -547,8 +547,9 @@ async def stream_turn(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index
-    orchestrator = get_or_create_orchestrator(game_id)
+    # Get current turn index - use a minimal orchestrator just to read event log
+    # The actual turn execution will create its own orchestrator with llm_service
+    orchestrator = get_or_create_orchestrator(game_id, llm_service=None)
     recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
     if recent_events:
         current_turn = recent_events[0].turn_index
@@ -604,8 +605,9 @@ async def stream_turn_mock(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index
-    orchestrator = get_or_create_orchestrator(game_id)
+    # Get current turn index - use a minimal orchestrator just to read event log
+    # The actual turn execution will create its own orchestrator with llm_service
+    orchestrator = get_or_create_orchestrator(game_id, llm_service=None)
     recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
     if recent_events:
         current_turn = recent_events[0].turn_index

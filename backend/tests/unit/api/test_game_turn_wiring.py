@@ -639,10 +639,10 @@ class TestTurnEndpointUsesProposalPipeline:
         )
         orchestrator._world_engine.advance_time = MagicMock(return_value=mock_world_tick)
 
-        # Make generate_world_candidates raise an exception
-        orchestrator._world_engine.generate_world_candidates = MagicMock(
-            side_effect=RuntimeError("World LLM unavailable")
-        )
+        # Mock the pipeline's generate_world_tick to raise an exception
+        # The WorldEngine.generate_world_candidates catches this and returns fallback
+        async def failing_generate_world_tick(*args, **kwargs):
+            raise RuntimeError("World LLM unavailable")
 
         orchestrator._action_scheduler.collect_actors = MagicMock(return_value=["player"])
         orchestrator._action_scheduler.resolve_conflicts = MagicMock(
@@ -690,15 +690,21 @@ class TestTurnEndpointUsesProposalPipeline:
         orchestrator._scene_engine.generate_scene_candidates = MagicMock(return_value=mock_scene_proposal)
         orchestrator._narration_engine.generate_narration = MagicMock(return_value="古老的山门广场铺满了青石板。")
 
-        # Execute turn - should raise because world tick exception is NOT caught by orchestrator
-        # (only input intent and narration have try/except in orchestrator)
-        with pytest.raises(RuntimeError, match="World LLM unavailable"):
-            orchestrator.execute_turn(
+        # Patch the pipeline's generate_world_tick to raise an exception
+        # WorldEngine catches this internally and returns a fallback proposal
+        pipeline = orchestrator._proposal_pipeline
+        with patch.object(pipeline, 'generate_world_tick', side_effect=failing_generate_world_tick):
+
+            result = orchestrator.execute_turn(
                 session_id="session_001",
                 game_id="game_001",
                 turn_index=1,
                 player_input="观察四周",
             )
+
+        # Verify turn completed successfully via world fallback
+        assert result["turn_index"] == 1
+        assert result["validation_passed"] is True
 
     def test_no_npc_in_scene_skips_generate_npc_action(self):
         """
@@ -767,6 +773,9 @@ class TestTurnEndpointUsesProposalPipeline:
         orchestrator._scene_engine.generate_scene_candidates = MagicMock(return_value=mock_scene_proposal)
         orchestrator._narration_engine.generate_narration = MagicMock(return_value="古老的山门广场铺满了青石板。")
 
+        mock_npc_action = MagicMock(return_value=None)
+        orchestrator._npc_engine.generate_npc_action = mock_npc_action
+
         result = orchestrator.execute_turn(
             session_id="session_001",
             game_id="game_001",
@@ -774,8 +783,7 @@ class TestTurnEndpointUsesProposalPipeline:
             player_input="观察四周",
         )
 
-        # Verify generate_npc_action was NOT called (no NPCs in scene)
-        orchestrator._npc_engine.generate_npc_action.assert_not_called()
+        mock_npc_action.assert_not_called()
         assert result["turn_index"] == 1
         assert result["validation_passed"] is True
 

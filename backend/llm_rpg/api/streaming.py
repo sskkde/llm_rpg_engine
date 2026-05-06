@@ -120,6 +120,22 @@ def get_or_create_orchestrator(game_id: str, llm_service: Optional[LLMService] =
     return _game_orchestrators[game_id]
 
 
+def _get_current_turn_index(game_id: str) -> int:
+    """Get current turn index without polluting orchestrator cache."""
+    if game_id in _game_orchestrators:
+        orchestrator = _game_orchestrators[game_id]
+        recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
+        if recent_events:
+            return recent_events[0].turn_index
+        return 0
+    
+    temp_orchestrator = get_turn_orchestrator(llm_service=None)
+    recent_events = temp_orchestrator._event_log._store.get_recent_events(limit=1)
+    if recent_events:
+        return recent_events[0].turn_index
+    return 0
+
+
 def _initialize_game_state(game_id: str, state_manager: CanonicalStateManager):
     """Initialize game state with demo content."""
     from ..models.states import (
@@ -547,14 +563,8 @@ async def stream_turn(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index - use a minimal orchestrator just to read event log
-    # The actual turn execution will create its own orchestrator with llm_service
-    orchestrator = get_or_create_orchestrator(game_id, llm_service=None)
-    recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
-    if recent_events:
-        current_turn = recent_events[0].turn_index
-    else:
-        current_turn = 0
+    # Get current turn index without polluting orchestrator cache
+    current_turn = _get_current_turn_index(game_id)
     next_turn = current_turn + 1
     
     return StreamingResponse(
@@ -605,14 +615,8 @@ async def stream_turn_mock(
     
     game_id = f"game_{session_id}"
     
-    # Get current turn index - use a minimal orchestrator just to read event log
-    # The actual turn execution will create its own orchestrator with llm_service
-    orchestrator = get_or_create_orchestrator(game_id, llm_service=None)
-    recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
-    if recent_events:
-        current_turn = recent_events[0].turn_index
-    else:
-        current_turn = 0
+    # Get current turn index without polluting orchestrator cache
+    current_turn = _get_current_turn_index(game_id)
     next_turn = current_turn + 1
     
     return StreamingResponse(

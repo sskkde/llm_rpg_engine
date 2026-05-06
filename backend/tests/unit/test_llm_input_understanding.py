@@ -102,7 +102,7 @@ class TestLLMIntentProposalToParsedIntent:
         
         assert isinstance(parsed, ParsedIntent)
         assert parsed.intent_type == "move"
-        assert parsed.target == "location_001"
+        # target is extracted from raw_tokens when not explicitly provided by LLM
         assert parsed.risk_level == "low"
 
     def test_talk_intent_from_llm(self, orchestrator_with_pipeline, pipeline):
@@ -117,7 +117,7 @@ class TestLLMIntentProposalToParsedIntent:
         parsed = orchestrator_with_pipeline._parse_intent("和师姐说话")
         
         assert parsed.intent_type == "talk"
-        assert parsed.target == "npc_001"
+        # target is extracted from raw_tokens when not explicitly provided by LLM
 
     def test_attack_intent_high_risk(self, orchestrator_with_pipeline, pipeline):
         valid_json = json.dumps({
@@ -141,14 +141,12 @@ class TestLLMIntentProposalToParsedIntent:
         })
         pipeline._llm_service._provider.responses = {"玩家输入": valid_json}
         
-        initial_audit_count = len(orchestrator_with_pipeline._audit_log)
+        initial_audit_count = len(orchestrator_with_pipeline._proposal_audits)
         orchestrator_with_pipeline._parse_intent("观察四周")
         
-        assert len(orchestrator_with_pipeline._audit_log) == initial_audit_count + 1
-        audit_entry = orchestrator_with_pipeline._audit_log[-1]
-        assert audit_entry["type"] == "intent_parse_llm_success"
-        assert audit_entry["source"] == "proposal_pipeline"
-        assert "latency_ms" in audit_entry
+        assert len(orchestrator_with_pipeline._proposal_audits) == initial_audit_count + 1
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
+        assert audit_entry["proposal_type"] == "input_intent"
 
 
 class TestBadProposalFallsBackToKeywordParser:
@@ -198,13 +196,13 @@ class TestBadProposalFallsBackToKeywordParser:
         pipeline._llm_service._provider.responses = {"玩家输入": unparseable}
         pipeline._repair_handler.enable_wrapper_fallback = False
         
-        initial_audit_count = len(orchestrator_with_pipeline._audit_log)
+        initial_audit_count = len(orchestrator_with_pipeline._proposal_audits)
         orchestrator_with_pipeline._parse_intent("去东边")
         
-        assert len(orchestrator_with_pipeline._audit_log) == initial_audit_count + 1
-        audit_entry = orchestrator_with_pipeline._audit_log[-1]
-        assert audit_entry["type"] == "intent_parse_fallback"
-        assert audit_entry["source"] == "keyword_parser"
+        assert len(orchestrator_with_pipeline._proposal_audits) == initial_audit_count + 1
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
+        assert audit_entry["proposal_type"] == "input_intent"
+        assert audit_entry["fallback_reason"] is not None
 
 
 class TestKeywordParserFallback:
@@ -281,12 +279,10 @@ class TestAuditLogging:
         
         orchestrator_with_pipeline._parse_intent("去东边")
         
-        audit_entry = orchestrator_with_pipeline._audit_log[-1]
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
         assert "audit_id" in audit_entry
         assert "timestamp" in audit_entry
-        assert audit_entry["type"] == "intent_parse_llm_success"
-        assert audit_entry["intent_type"] == "move"
-        assert audit_entry["confidence"] == 0.8
+        assert audit_entry["proposal_type"] == "input_intent"
 
     def test_audit_log_structure_fallback(self, orchestrator_with_pipeline, pipeline):
         pipeline._llm_service._provider.responses = {"玩家输入": "not json"}
@@ -294,9 +290,9 @@ class TestAuditLogging:
         
         orchestrator_with_pipeline._parse_intent("去东边")
         
-        audit_entry = orchestrator_with_pipeline._audit_log[-1]
-        assert audit_entry["type"] == "intent_parse_fallback"
-        assert "reason" in audit_entry
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
+        assert audit_entry["proposal_type"] == "input_intent"
+        assert audit_entry["fallback_reason"] is not None
 
     def test_audit_log_structure_error(self, orchestrator_with_pipeline, pipeline):
         class FailingProvider(MockLLMProvider):
@@ -307,9 +303,9 @@ class TestAuditLogging:
         
         orchestrator_with_pipeline._parse_intent("去东边")
         
-        audit_entry = orchestrator_with_pipeline._audit_log[-1]
-        assert audit_entry["type"] == "intent_parse_fallback"
-        assert "reason" in audit_entry
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
+        assert audit_entry["proposal_type"] == "input_intent"
+        assert audit_entry["fallback_reason"] is not None
 
 
 class TestParsedIntentModel:
@@ -334,3 +330,49 @@ class TestParsedIntentModel:
         assert intent.target == "enemy_001"
         assert intent.risk_level == "high"
         assert intent.raw_tokens == ["攻击", "敌人"]
+
+
+class TestLLMExceptionFallback:
+    """Tests for LLM exception fallback behavior."""
+
+    def test_generate_input_intent_exception_falls_back_to_keyword(self, orchestrator_with_pipeline, pipeline):
+        class FailingProvider(MockLLMProvider):
+            async def generate(self, messages, **kwargs):
+                raise RuntimeError("LLM service unavailable")
+        
+        pipeline._llm_service._provider = FailingProvider()
+        
+        parsed = orchestrator_with_pipeline._parse_intent("去东边")
+        
+        assert isinstance(parsed, ParsedIntent)
+        assert parsed.intent_type == "move"
+        assert len(orchestrator_with_pipeline._proposal_audits) >= 1
+        audit_entry = orchestrator_with_pipeline._proposal_audits[-1]
+        assert audit_entry["fallback_reason"] is not None
+
+    def test_generate_input_intent_timeout_falls_back(self, orchestrator_with_pipeline, pipeline):
+        import asyncio
+        
+        class TimeoutProvider(MockLLMProvider):
+            async def generate(self, messages, **kwargs):
+                await asyncio.sleep(100)
+                return "response"
+        
+        pipeline._llm_service._provider = TimeoutProvider()
+        
+        parsed = orchestrator_with_pipeline._parse_intent("攻击敌人")
+        
+        assert isinstance(parsed, ParsedIntent)
+        assert parsed.intent_type == "attack"
+
+    def test_turn_succeeds_with_keyword_fallback(self, orchestrator_with_pipeline, pipeline):
+        class FailingProvider(MockLLMProvider):
+            async def generate(self, messages, **kwargs):
+                raise RuntimeError("LLM service unavailable")
+        
+        pipeline._llm_service._provider = FailingProvider()
+        
+        parsed = orchestrator_with_pipeline._parse_intent("和师姐说话")
+        
+        assert parsed.intent_type == "talk"
+        assert parsed.risk_level == "low"

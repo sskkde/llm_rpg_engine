@@ -586,5 +586,116 @@ class TestPerspectiveSafety:
         assert "secret_conspiracy" in constraints_str or "hidden_truth" in constraints_str
 
 
+class TestNoNPCInScene:
+    """Tests for behavior when no NPC is present in scene."""
+
+    @pytest.fixture
+    def state_no_npc(self):
+        return CanonicalState(
+            world_state=WorldState(
+                entity_id="world_1",
+                world_id="test_world",
+                current_time=WorldTime(
+                    calendar="standard",
+                    season="spring",
+                    day=1,
+                    hour=12,
+                    period="morning",
+                ),
+            ),
+            player_state=PlayerState(
+                entity_id="player_1",
+                name="Test Player",
+                location_id="square",
+            ),
+            current_scene_state=CurrentSceneState(
+                entity_id="square",
+                scene_id="square",
+                location_id="square",
+                active_actor_ids=["player_1"],
+            ),
+            location_states={},
+            npc_states={},
+            quest_states={},
+            faction_states={},
+        )
+
+    @pytest.fixture
+    def state_manager_no_npc(self, state_no_npc):
+        return MockCanonicalStateManager(state_no_npc)
+
+    @pytest.fixture
+    def memory_manager(self):
+        scope = NPCMemoryScope(
+            npc_id="npc_1",
+            profile=NPCProfile(npc_id="npc_1", name="Test NPC"),
+            belief_state=NPCBeliefState(npc_id="npc_1"),
+            recent_context=NPCRecentContext(npc_id="npc_1"),
+            secrets=NPCSecrets(npc_id="npc_1"),
+            knowledge_state=NPCKnowledgeState(npc_id="npc_1"),
+            goals=NPCGoals(npc_id="npc_1"),
+        )
+        return MockNPCMemoryManager(scope)
+
+    @pytest.fixture
+    def perspective_service(self):
+        return MagicMock(spec=PerspectiveService)
+
+    @pytest.fixture
+    def context_builder(self):
+        return MagicMock(spec=ContextBuilder)
+
+    def test_no_npc_in_scene_generate_npc_action_returns_none(
+        self,
+        state_no_npc,
+        state_manager_no_npc,
+        memory_manager,
+        perspective_service,
+        context_builder,
+    ):
+        mock_pipeline = MagicMock()
+        mock_pipeline.generate_npc_action = AsyncMock()
+        
+        engine = NPCEngine(
+            state_manager=state_manager_no_npc,
+            memory_manager=memory_manager,
+            perspective_service=perspective_service,
+            context_builder=context_builder,
+            proposal_pipeline=mock_pipeline,
+        )
+        
+        action = engine.generate_npc_action(
+            npc_id="npc_nonexistent",
+            game_id="game_1",
+            turn_index=1,
+        )
+        
+        assert action is None
+
+    def test_empty_npc_states_generate_npc_action_returns_none(
+        self,
+        state_no_npc,
+        state_manager_no_npc,
+        memory_manager,
+        perspective_service,
+        context_builder,
+    ):
+        engine = NPCEngine(
+            state_manager=state_manager_no_npc,
+            memory_manager=memory_manager,
+            perspective_service=perspective_service,
+            context_builder=context_builder,
+            proposal_pipeline=None,
+        )
+        
+        action = engine.generate_npc_action(
+            npc_id="any_npc",
+            game_id="game_1",
+            turn_index=1,
+        )
+        
+        assert action is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

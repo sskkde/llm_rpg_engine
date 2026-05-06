@@ -577,5 +577,67 @@ class TestNoStateMutation:
         assert state.world_state.global_flags == original_flags
 
 
+class TestWorldTickExceptionFallback:
+    """Tests for world tick LLM exception fallback."""
+
+    @pytest.fixture
+    def state(self):
+        return create_mock_state()
+
+    @pytest.fixture
+    def state_manager(self, state):
+        return MockCanonicalStateManager(state)
+
+    @pytest.fixture
+    def event_log(self):
+        return MockEventLog()
+
+    def test_generate_world_tick_exception_falls_back(self, state, state_manager, event_log):
+        mock_pipeline = MagicMock()
+        
+        async def mock_generate_error(*args, **kwargs):
+            raise RuntimeError("LLM service unavailable")
+        
+        mock_pipeline.generate_world_tick = mock_generate_error
+        
+        engine = WorldEngine(
+            state_manager=state_manager,
+            event_log=event_log,
+            proposal_pipeline=mock_pipeline,
+        )
+        
+        proposal = engine.generate_world_candidates(
+            game_id="test_game",
+            current_turn=1,
+        )
+        
+        assert proposal is not None
+        assert proposal.is_fallback is True
+        assert len(engine._audit_log) >= 1
+
+    def test_turn_succeeds_with_world_fallback(self, state, state_manager, event_log):
+        mock_pipeline = MagicMock()
+        
+        async def mock_generate_error(*args, **kwargs):
+            raise RuntimeError("LLM timeout")
+        
+        mock_pipeline.generate_world_tick = mock_generate_error
+        
+        engine = WorldEngine(
+            state_manager=state_manager,
+            event_log=event_log,
+            proposal_pipeline=mock_pipeline,
+        )
+        
+        proposal = engine.generate_world_candidates(
+            game_id="test_game",
+            current_turn=1,
+        )
+        
+        assert proposal.time_delta_turns == 1
+        assert proposal.candidate_events == []
+        assert proposal.confidence == 0.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

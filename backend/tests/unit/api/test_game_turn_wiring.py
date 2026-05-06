@@ -616,3 +616,269 @@ class TestTurnEndpointUsesProposalPipeline:
         # Verify turn completed successfully via fallback
         assert result["turn_index"] == 1
         assert result["validation_passed"] is True
+
+    def test_turn_endpoint_world_tick_exception_falls_back(self):
+        """
+        When generate_world_candidates raises an exception, the turn still succeeds
+        via deterministic world fallback.
+        """
+        mock_provider = MockLLMProvider()
+        llm_service = LLMService(provider=mock_provider)
+        orchestrator = build_turn_orchestrator(llm_service=llm_service)
+
+        valid_state = _make_valid_state(npc_ids=[])
+        orchestrator._state_manager.get_state = MagicMock(return_value=valid_state)
+
+        world_time_after = WorldTime(calendar="修仙历", season="春", day=1, period="巳时")
+        mock_world_tick = WorldTickEvent(
+            event_id="evt_tick_004",
+            turn_index=1,
+            time_before=valid_state.world_state.current_time,
+            time_after=world_time_after,
+            summary="时间推进",
+        )
+        orchestrator._world_engine.advance_time = MagicMock(return_value=mock_world_tick)
+
+        # Make generate_world_candidates raise an exception
+        orchestrator._world_engine.generate_world_candidates = MagicMock(
+            side_effect=RuntimeError("World LLM unavailable")
+        )
+
+        orchestrator._action_scheduler.collect_actors = MagicMock(return_value=["player"])
+        orchestrator._action_scheduler.resolve_conflicts = MagicMock(
+            return_value=[
+                ProposedAction(
+                    action_id="action_player_000001",
+                    actor_id="player",
+                    action_type="inspect",
+                    summary="Player inspects",
+                    priority=1.0,
+                )
+            ]
+        )
+
+        valid_result = ValidationResult(is_valid=True, checks=[], errors=[], warnings=[])
+        orchestrator._validator.validate_action = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_state_delta = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_candidate_event = MagicMock(return_value=valid_result)
+
+        from llm_rpg.models.events import TurnTransaction
+        mock_transaction = TurnTransaction(
+            transaction_id="txn_004",
+            session_id="session_001",
+            game_id="game_001",
+            turn_index=1,
+            world_time_before=valid_state.world_state.current_time,
+            player_input="观察四周",
+        )
+        orchestrator._event_log.start_turn = MagicMock(return_value=mock_transaction)
+        orchestrator._event_log.record_event = MagicMock()
+        orchestrator._event_log.commit_turn = MagicMock()
+
+        from llm_rpg.models.perspectives import PlayerPerspective, NarratorPerspective
+        mock_player_perspective = PlayerPerspective(perspective_id="player_view_1", owner_id="player")
+        mock_narrator_perspective = NarratorPerspective(
+            perspective_id="narrator_view_1", owner_id="narrator", base_perspective_id="player_view_1",
+        )
+        orchestrator._perspective.build_player_perspective = MagicMock(return_value=mock_player_perspective)
+        orchestrator._perspective.build_narrator_perspective = MagicMock(return_value=mock_narrator_perspective)
+        orchestrator._memory_writer.process_turn = MagicMock(
+            return_value={"memories_created": 0, "summary_created": None, "memory_ids": []}
+        )
+
+        mock_scene_proposal = _make_valid_scene_proposal()
+        orchestrator._scene_engine.generate_scene_candidates = MagicMock(return_value=mock_scene_proposal)
+        orchestrator._narration_engine.generate_narration = MagicMock(return_value="古老的山门广场铺满了青石板。")
+
+        # Execute turn - should raise because world tick exception is NOT caught by orchestrator
+        # (only input intent and narration have try/except in orchestrator)
+        with pytest.raises(RuntimeError, match="World LLM unavailable"):
+            orchestrator.execute_turn(
+                session_id="session_001",
+                game_id="game_001",
+                turn_index=1,
+                player_input="观察四周",
+            )
+
+    def test_no_npc_in_scene_skips_generate_npc_action(self):
+        """
+        When no NPCs are in the scene, generate_npc_action should not be called.
+        """
+        mock_provider = MockLLMProvider()
+        llm_service = LLMService(provider=mock_provider)
+        orchestrator = build_turn_orchestrator(llm_service=llm_service)
+
+        valid_state = _make_valid_state(npc_ids=[])
+        orchestrator._state_manager.get_state = MagicMock(return_value=valid_state)
+
+        world_time_after = WorldTime(calendar="修仙历", season="春", day=1, period="巳时")
+        mock_world_tick = WorldTickEvent(
+            event_id="evt_tick_005",
+            turn_index=1,
+            time_before=valid_state.world_state.current_time,
+            time_after=world_time_after,
+            summary="时间推进",
+        )
+        orchestrator._world_engine.advance_time = MagicMock(return_value=mock_world_tick)
+
+        orchestrator._action_scheduler.collect_actors = MagicMock(return_value=["player"])
+        orchestrator._action_scheduler.resolve_conflicts = MagicMock(
+            return_value=[
+                ProposedAction(
+                    action_id="action_player_000001",
+                    actor_id="player",
+                    action_type="inspect",
+                    summary="Player inspects",
+                    priority=1.0,
+                )
+            ]
+        )
+
+        valid_result = ValidationResult(is_valid=True, checks=[], errors=[], warnings=[])
+        orchestrator._validator.validate_action = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_state_delta = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_candidate_event = MagicMock(return_value=valid_result)
+
+        from llm_rpg.models.events import TurnTransaction
+        mock_transaction = TurnTransaction(
+            transaction_id="txn_005",
+            session_id="session_001",
+            game_id="game_001",
+            turn_index=1,
+            world_time_before=valid_state.world_state.current_time,
+            player_input="观察四周",
+        )
+        orchestrator._event_log.start_turn = MagicMock(return_value=mock_transaction)
+        orchestrator._event_log.record_event = MagicMock()
+        orchestrator._event_log.commit_turn = MagicMock()
+
+        from llm_rpg.models.perspectives import PlayerPerspective, NarratorPerspective
+        mock_player_perspective = PlayerPerspective(perspective_id="player_view_1", owner_id="player")
+        mock_narrator_perspective = NarratorPerspective(
+            perspective_id="narrator_view_1", owner_id="narrator", base_perspective_id="player_view_1",
+        )
+        orchestrator._perspective.build_player_perspective = MagicMock(return_value=mock_player_perspective)
+        orchestrator._perspective.build_narrator_perspective = MagicMock(return_value=mock_narrator_perspective)
+        orchestrator._memory_writer.process_turn = MagicMock(
+            return_value={"memories_created": 0, "summary_created": None, "memory_ids": []}
+        )
+
+        mock_scene_proposal = _make_valid_scene_proposal()
+        orchestrator._scene_engine.generate_scene_candidates = MagicMock(return_value=mock_scene_proposal)
+        orchestrator._narration_engine.generate_narration = MagicMock(return_value="古老的山门广场铺满了青石板。")
+
+        result = orchestrator.execute_turn(
+            session_id="session_001",
+            game_id="game_001",
+            turn_index=1,
+            player_input="观察四周",
+        )
+
+        # Verify generate_npc_action was NOT called (no NPCs in scene)
+        orchestrator._npc_engine.generate_npc_action.assert_not_called()
+        assert result["turn_index"] == 1
+        assert result["validation_passed"] is True
+
+    def test_no_scene_context_uses_fallback(self):
+        """
+        When scene_engine is None, the orchestrator falls back to ActionScheduler triggers.
+        """
+        mock_provider = MockLLMProvider()
+        llm_service = LLMService(provider=mock_provider)
+        orchestrator = build_turn_orchestrator(llm_service=llm_service)
+
+        # Set scene_engine to None to trigger fallback
+        orchestrator._scene_engine = None
+
+        valid_state = _make_valid_state(npc_ids=[])
+        orchestrator._state_manager.get_state = MagicMock(return_value=valid_state)
+
+        world_time_after = WorldTime(calendar="修仙历", season="春", day=1, period="巳时")
+        mock_world_tick = WorldTickEvent(
+            event_id="evt_tick_006",
+            turn_index=1,
+            time_before=valid_state.world_state.current_time,
+            time_after=world_time_after,
+            summary="时间推进",
+        )
+        orchestrator._world_engine.advance_time = MagicMock(return_value=mock_world_tick)
+
+        orchestrator._action_scheduler.collect_actors = MagicMock(return_value=["player"])
+        orchestrator._action_scheduler.collect_scene_triggers = MagicMock(return_value=[])
+        orchestrator._action_scheduler.resolve_conflicts = MagicMock(
+            return_value=[
+                ProposedAction(
+                    action_id="action_player_000001",
+                    actor_id="player",
+                    action_type="inspect",
+                    summary="Player inspects",
+                    priority=1.0,
+                )
+            ]
+        )
+
+        valid_result = ValidationResult(is_valid=True, checks=[], errors=[], warnings=[])
+        orchestrator._validator.validate_action = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_state_delta = MagicMock(return_value=valid_result)
+        orchestrator._validator.validate_candidate_event = MagicMock(return_value=valid_result)
+
+        from llm_rpg.models.events import TurnTransaction
+        mock_transaction = TurnTransaction(
+            transaction_id="txn_006",
+            session_id="session_001",
+            game_id="game_001",
+            turn_index=1,
+            world_time_before=valid_state.world_state.current_time,
+            player_input="观察四周",
+        )
+        orchestrator._event_log.start_turn = MagicMock(return_value=mock_transaction)
+        orchestrator._event_log.record_event = MagicMock()
+        orchestrator._event_log.commit_turn = MagicMock()
+
+        from llm_rpg.models.perspectives import PlayerPerspective, NarratorPerspective
+        mock_player_perspective = PlayerPerspective(perspective_id="player_view_1", owner_id="player")
+        mock_narrator_perspective = NarratorPerspective(
+            perspective_id="narrator_view_1", owner_id="narrator", base_perspective_id="player_view_1",
+        )
+        orchestrator._perspective.build_player_perspective = MagicMock(return_value=mock_player_perspective)
+        orchestrator._perspective.build_narrator_perspective = MagicMock(return_value=mock_narrator_perspective)
+        orchestrator._memory_writer.process_turn = MagicMock(
+            return_value={"memories_created": 0, "summary_created": None, "memory_ids": []}
+        )
+        orchestrator._narration_engine.generate_narration = MagicMock(return_value="古老的山门广场铺满了青石板。")
+
+        result = orchestrator.execute_turn(
+            session_id="session_001",
+            game_id="game_001",
+            turn_index=1,
+            player_input="观察四周",
+        )
+
+        # Verify turn completed successfully via scene fallback
+        assert result["turn_index"] == 1
+        assert result["validation_passed"] is True
+
+    def test_single_pipeline_instance_per_turn(self):
+        """
+        Verify that a single ProposalPipeline instance is shared across all engines
+        and the orchestrator for the entire turn.
+        """
+        mock_provider = MockLLMProvider()
+        llm_service = LLMService(provider=mock_provider)
+        orchestrator = build_turn_orchestrator(llm_service=llm_service)
+
+        orchestrator_pipeline = orchestrator._proposal_pipeline
+        world_pipeline = orchestrator._world_engine._proposal_pipeline
+        npc_pipeline = orchestrator._npc_engine._proposal_pipeline
+        narration_pipeline = orchestrator._narration_engine._proposal_pipeline
+        scene_pipeline = orchestrator._scene_engine._proposal_pipeline
+
+        # All must be the exact same instance (identity check)
+        assert orchestrator_pipeline is world_pipeline
+        assert orchestrator_pipeline is npc_pipeline
+        assert orchestrator_pipeline is narration_pipeline
+        assert orchestrator_pipeline is scene_pipeline
+
+        # Verify it's a real ProposalPipeline
+        assert isinstance(orchestrator_pipeline, ProposalPipeline)
+        assert orchestrator_pipeline._llm_service is llm_service

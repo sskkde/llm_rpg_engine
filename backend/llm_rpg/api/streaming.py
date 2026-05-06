@@ -54,6 +54,7 @@ from ..llm.service import (
 )
 from ..llm.parsers import OutputParser, ParsedNarration
 from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
+from .turn_factory import build_turn_orchestrator
 
 
 router = APIRouter(prefix="/streaming", tags=["streaming"])
@@ -107,41 +108,15 @@ def format_sse(event: str, data: Dict[str, Any], event_id: Optional[str] = None)
     return "\n".join(lines)
 
 
-def get_turn_orchestrator() -> TurnOrchestrator:
-    """Factory function to create turn orchestrator."""
-    event_log = EventLog()
-    state_manager = CanonicalStateManager()
-    action_scheduler = ActionScheduler()
-    validator = Validator()
-    perspective_service = PerspectiveService()
-    retrieval_system = RetrievalSystem()
-    context_builder = ContextBuilder(retrieval_system, perspective_service)
-    npc_memory = NPCMemoryManager()
-    lore_store = LoreStore()
-    summary_manager = SummaryManager()
-    memory_writer = MemoryWriter(event_log, npc_memory, summary_manager)
-    
-    world_engine = WorldEngine(state_manager, event_log)
-    npc_engine = NPCEngine(state_manager, npc_memory, perspective_service, context_builder)
-    narration_engine = NarrationEngine(state_manager, perspective_service, context_builder, validator)
-    
-    return TurnOrchestrator(
-        state_manager=state_manager,
-        event_log=event_log,
-        action_scheduler=action_scheduler,
-        validator=validator,
-        perspective_service=perspective_service,
-        context_builder=context_builder,
-        world_engine=world_engine,
-        npc_engine=npc_engine,
-        narration_engine=narration_engine,
-    )
+def get_turn_orchestrator(llm_service: Optional[LLMService] = None) -> TurnOrchestrator:
+    """Factory function to create turn orchestrator using shared factory."""
+    return build_turn_orchestrator(llm_service=llm_service)
 
 
-def get_or_create_orchestrator(game_id: str) -> TurnOrchestrator:
-    """Get existing orchestrator or create new one."""
+def get_or_create_orchestrator(game_id: str, llm_service: Optional[LLMService] = None) -> TurnOrchestrator:
+    """Get existing orchestrator or create new one with optional LLM service."""
     if game_id not in _game_orchestrators:
-        _game_orchestrators[game_id] = get_turn_orchestrator()
+        _game_orchestrators[game_id] = get_turn_orchestrator(llm_service=llm_service)
     return _game_orchestrators[game_id]
 
 
@@ -398,8 +373,8 @@ async def execute_turn_stream(
             event_id=f"{event_id}_start"
         )
         
-        # Get orchestrator
-        orchestrator = get_or_create_orchestrator(game_id)
+        # Get orchestrator with LLM service for proposal pipeline
+        orchestrator = get_or_create_orchestrator(game_id, llm_service=llm_service)
         
         # Initialize game state if needed
         existing_state = orchestrator._state_manager.get_state(game_id)

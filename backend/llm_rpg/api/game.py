@@ -23,24 +23,13 @@ from ..storage.repositories import (
 
 from .auth import get_current_active_user
 from .turn_output import finalize_turn_output
+from .turn_factory import build_turn_orchestrator
 from ..storage.models import UserModel
 
 from ..core.turn_orchestrator import TurnOrchestrator, TurnValidationError
-from ..core.event_log import EventLog
 from ..core.canonical_state import CanonicalStateManager
-from ..core.action_scheduler import ActionScheduler
-from ..core.validator import Validator
-from ..core.perspective import PerspectiveService
-from ..core.context_builder import ContextBuilder
-from ..core.retrieval import RetrievalSystem
-from ..core.npc_memory import NPCMemoryManager
-from ..core.lore_store import LoreStore
-from ..core.summary import SummaryManager
-from ..core.memory_writer import MemoryWriter
-
-from ..engines.world_engine import WorldEngine
-from ..engines.npc_engine import NPCEngine
-from ..engines.narration_engine import NarrationEngine
+from ..llm.service import LLMService, MockLLMProvider, OpenAIProvider, get_llm_service
+from ..services.settings import SystemSettingsService
 
 from ..models.states import (
     CanonicalState,
@@ -56,7 +45,9 @@ from ..models.events import WorldTime
 router = APIRouter(prefix="/game", tags=["game"])
 
 # Cache for game orchestrators to persist state across requests
+# Cache key includes provider signature to rebuild when provider config changes
 _game_orchestrators: dict[str, TurnOrchestrator] = {}
+_orchestrator_provider_signatures: dict[str, str] = {}
 
 
 def _resolve_location_id(
@@ -81,11 +72,25 @@ def _resolve_location_id(
     return None
 
 
-def get_or_create_orchestrator(game_id: str) -> TurnOrchestrator:
-    """Get existing orchestrator or create new one for the game."""
-    if game_id not in _game_orchestrators:
-        _game_orchestrators[game_id] = get_turn_orchestrator()
-    return _game_orchestrators[game_id]
+def get_or_create_orchestrator(game_id: str, db: Session) -> TurnOrchestrator:
+    """
+    Get existing orchestrator or create new one for the game.
+    
+    Rebuilds orchestrator when provider configuration changes by comparing
+    provider signatures. This ensures LLM provider changes are reflected
+    without requiring server restart.
+    """
+    current_signature = _get_provider_signature(db)
+    
+    if game_id in _game_orchestrators:
+        cached_signature = _orchestrator_provider_signatures.get(game_id, "")
+        if cached_signature == current_signature:
+            return _game_orchestrators[game_id]
+    
+    orchestrator = get_turn_orchestrator(db)
+    _game_orchestrators[game_id] = orchestrator
+    _orchestrator_provider_signatures[game_id] = current_signature
+    return orchestrator
 
 
 class TurnRequest(BaseModel):
@@ -125,35 +130,61 @@ class AuditLogEntry(BaseModel):
     errors: Optional[List[str]] = None
 
 
-def get_turn_orchestrator():
-    """Factory function to create turn orchestrator with all dependencies."""
-    event_log = EventLog()
-    state_manager = CanonicalStateManager()
-    action_scheduler = ActionScheduler()
-    validator = Validator()
-    perspective_service = PerspectiveService()
-    retrieval_system = RetrievalSystem()
-    context_builder = ContextBuilder(retrieval_system, perspective_service)
-    npc_memory = NPCMemoryManager()
-    lore_store = LoreStore()
-    summary_manager = SummaryManager()
-    memory_writer = MemoryWriter(event_log, npc_memory, summary_manager)
+def _resolve_llm_service(db: Session) -> LLMService:
+    """
+    Resolve LLMService based on system settings.
     
-    world_engine = WorldEngine(state_manager, event_log)
-    npc_engine = NPCEngine(state_manager, npc_memory, perspective_service, context_builder)
-    narration_engine = NarrationEngine(state_manager, perspective_service, context_builder, validator)
+    Uses the same provider resolution logic as streaming.py:
+    - Check provider_mode from SystemSettingsService
+    - Use MockLLMProvider for 'mock' mode or when no API key available
+    - Use OpenAIProvider with custom settings for 'custom' mode
+    - Use OpenAIProvider with effective OpenAI key for 'openai' mode
+    - Fall back to MockLLMProvider if no valid configuration
+    """
+    settings_service = SystemSettingsService(db)
+    provider_config = settings_service.get_provider_config()
     
-    return TurnOrchestrator(
-        state_manager=state_manager,
-        event_log=event_log,
-        action_scheduler=action_scheduler,
-        validator=validator,
-        perspective_service=perspective_service,
-        context_builder=context_builder,
-        world_engine=world_engine,
-        npc_engine=npc_engine,
-        narration_engine=narration_engine,
-    )
+    if provider_config["provider_mode"] == "mock":
+        provider = MockLLMProvider()
+    elif provider_config["provider_mode"] == "custom":
+        custom_key = settings_service.get_effective_custom_api_key()
+        custom_url = settings_service.get_effective_custom_base_url()
+        if custom_url and custom_key:
+            provider = OpenAIProvider(
+                api_key=custom_key,
+                base_url=custom_url,
+                model=provider_config.get("default_model"),
+                temperature=provider_config.get("temperature"),
+                max_tokens=provider_config.get("max_tokens"),
+            )
+        else:
+            provider = MockLLMProvider()
+    else:
+        effective_key = settings_service.get_effective_openai_key()
+        if effective_key:
+            provider = OpenAIProvider(
+                api_key=effective_key,
+                model=provider_config.get("default_model"),
+                temperature=provider_config.get("temperature"),
+                max_tokens=provider_config.get("max_tokens"),
+            )
+        else:
+            provider = MockLLMProvider()
+    
+    return get_llm_service(provider=provider, db_session=db)
+
+
+def _get_provider_signature(db: Session) -> str:
+    """Generate a signature for the current provider configuration."""
+    settings_service = SystemSettingsService(db)
+    provider_config = settings_service.get_provider_config()
+    return f"{provider_config['provider_mode']}:{provider_config.get('default_model', '')}"
+
+
+def get_turn_orchestrator(db: Session) -> TurnOrchestrator:
+    """Factory function to create turn orchestrator with LLM service."""
+    llm_service = _resolve_llm_service(db)
+    return build_turn_orchestrator(llm_service=llm_service)
 
 
 def _initialize_game_state(game_id: str, state_manager: CanonicalStateManager) -> CanonicalState:
@@ -255,8 +286,7 @@ def execute_turn(
 
     game_id = f"game_{session_id}"
 
-    # Get or initialize turn index from orchestrator
-    orchestrator = get_or_create_orchestrator(game_id)
+    orchestrator = get_or_create_orchestrator(game_id, db)
     existing_state = orchestrator._state_manager.get_state(game_id)
     if existing_state is None:
         _initialize_game_state(game_id, orchestrator._state_manager)
@@ -373,9 +403,8 @@ def replay_turns(
         )
     
     game_id = f"game_{session_id}"
-    orchestrator = get_or_create_orchestrator(game_id)
+    orchestrator = get_or_create_orchestrator(game_id, db)
 
-    # Initialize game state if not exists
     existing_state = orchestrator._state_manager.get_state(game_id)
     if existing_state is None:
         _initialize_game_state(game_id, orchestrator._state_manager)
@@ -449,7 +478,7 @@ def get_audit_log(
         )
     
     game_id = f"game_{session_id}"
-    orchestrator = get_or_create_orchestrator(game_id)
+    orchestrator = get_or_create_orchestrator(game_id, db)
 
     audit_entries = orchestrator.get_audit_log(transaction_id)
     

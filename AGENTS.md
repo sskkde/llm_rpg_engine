@@ -14,6 +14,7 @@
 - Backend dev server: `cd backend && uvicorn llm_rpg.main:app --reload --port 8000`; do not use legacy `backend/app_legacy.py` or `uvicorn app:app`.
 - Frontend setup: `cd frontend && npm install`; use `frontend/package-lock.json`, not a root lockfile.
 - Frontend dev server: `cd frontend && npm run dev` (port 3005). Playwright starts its own frontend server on port 3000.
+- Service restarts: when restarting the backend service, restart the frontend service in the same round so both processes load the same code version.
 - Frontend checks: `cd frontend && npm run build`, `npm run lint`, `npx tsc --noEmit`, `npm test`.
 
 ## Tests and focused verification

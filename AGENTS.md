@@ -12,9 +12,11 @@
 ## Commands agents usually guess wrong
 - Backend setup: `cd backend && pip install -r requirements.txt`.
 - Backend dev server: `cd backend && uvicorn llm_rpg.main:app --reload --port 8000`; do not use legacy `backend/app_legacy.py` or `uvicorn app:app`.
+- Backend public-runtime server: `cd backend && APP_ENV=production uvicorn llm_rpg.main:app --host 127.0.0.1 --port 8000`; public traffic should reach it through the production Next server rewrites, not by exposing port 8000.
 - Frontend setup: `cd frontend && npm install`; use `frontend/package-lock.json`, not a root lockfile.
 - Frontend dev server: `cd frontend && npm run dev` (port 3005). Playwright starts its own frontend server on port 3000.
-- Service restarts: when restarting the backend service, restart the frontend service in the same round so both processes load the same code version.
+- Frontend public-runtime server: `cd frontend && npm run build && BACKEND_API_URL=http://127.0.0.1:8000 npm run start -- -H 127.0.0.1 -p 3005`; nginx forwards public `llm.nas-1.club` traffic to `127.0.0.1:3005`.
+- Service restarts: when restarting public services, restart backend and frontend in the same round using the public-runtime commands above so both processes load the same code version.
 - Frontend checks: `cd frontend && npm run build`, `npm run lint`, `npx tsc --noEmit`, `npm test`.
 
 ## Tests and focused verification
@@ -33,12 +35,12 @@
 - Browser API calls should stay same-origin: `frontend/lib/api.ts` defaults to `process.env.NEXT_PUBLIC_API_URL ?? ''`; do not hardcode browser calls to `http://localhost:8000`.
 - Keep backend API prefixes synchronized between `frontend/next.config.ts` rewrites and `frontend/proxy.ts` matcher exclusions, or `next-intl` will intercept API requests.
 - `BACKEND_API_URL` is server-side rewrite config and must be reachable by the Next server (`127.0.0.1:8000` same-host, service DNS/container name in networks).
-- Public frontend deploys must use `cd frontend && npm run build && npm run start`; never expose `next dev` publicly.
+- Public frontend deploys must use `cd frontend && npm run build && npm run start`; never expose `next dev` publicly. Bind public-runtime app servers to `127.0.0.1` and expose them through nginx/reverse proxy only.
+- Development/debug ports are internal-only: bind dev servers to `127.0.0.1` (for example `npm run dev -- --hostname 127.0.0.1`) and do not route public domains to them.
 - Auth forms must keep `method="post"` and controls disabled before hydration so slow/unhydrated pages cannot native-GET credentials into the URL.
 - If adding a public frontend origin, add it to backend CORS (`backend/llm_rpg/main.py` / `CORS_ORIGINS`) separately.
 
 ## Tooling caveats
-- After each completed modification round, verify and create an atomic git commit for that round.
 - There is no `.github/` CI directory and no pre-commit config; do not assume hidden checks.
 - No backend formatter/linter/typechecker config was found; do not invent `ruff`, `black`, or `mypy` commands.
 - Tailwind is v4 via `@tailwindcss/postcss`; there is no `tailwind.config.ts` to edit.

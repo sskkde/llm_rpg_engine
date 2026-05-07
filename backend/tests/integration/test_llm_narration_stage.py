@@ -360,6 +360,173 @@ class TestLLMNarrationReplacement:
         assert data["narration"] is not None
         assert len(data["narration"]) > 0
 
+
+class TestExplicitProviderConfigErrors:
+    """Tests for explicit provider mode configuration errors."""
+
+    def test_openai_mode_missing_key_returns_503(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="openai")
+        db.add(settings)
+        db.commit()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_openai_key",
+            return_value=None,
+        ):
+            response = client.post(
+                f"/game/sessions/{seeded_session.id}/turn",
+                json={"action": "观察四周"},
+            )
+
+        assert response.status_code == 503
+        data = response.json()
+        assert "detail" in data
+        assert data["detail"]["provider_mode"] == "openai"
+        assert data["detail"]["missing_config"] == "openai_api_key"
+
+    def test_custom_mode_missing_base_url_returns_503(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="custom")
+        db.add(settings)
+        db.commit()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_custom_base_url",
+            return_value=None,
+        ):
+            response = client.post(
+                f"/game/sessions/{seeded_session.id}/turn",
+                json={"action": "观察四周"},
+            )
+
+        assert response.status_code == 503
+        data = response.json()
+        assert "detail" in data
+        assert data["detail"]["provider_mode"] == "custom"
+        assert data["detail"]["missing_config"] == "custom_base_url"
+
+    def test_custom_mode_missing_api_key_returns_503(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="custom")
+        db.add(settings)
+        db.commit()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_custom_base_url",
+            return_value="https://api.custom.com",
+        ):
+            with patch(
+                "llm_rpg.services.settings.SystemSettingsService.get_effective_custom_api_key",
+                return_value=None,
+            ):
+                response = client.post(
+                    f"/game/sessions/{seeded_session.id}/turn",
+                    json={"action": "观察四周"},
+                )
+
+        assert response.status_code == 503
+        data = response.json()
+        assert "detail" in data
+        assert data["detail"]["provider_mode"] == "custom"
+        assert data["detail"]["missing_config"] == "custom_api_key"
+
+    def test_openai_mode_missing_key_no_event_log_created(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="openai")
+        db.add(settings)
+        db.commit()
+
+        initial_count = db.query(EventLogModel).filter_by(
+            session_id=seeded_session.id,
+        ).count()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_openai_key",
+            return_value=None,
+        ):
+            response = client.post(
+                f"/game/sessions/{seeded_session.id}/turn",
+                json={"action": "观察四周"},
+            )
+
+        assert response.status_code == 503
+
+        final_count = db.query(EventLogModel).filter_by(
+            session_id=seeded_session.id,
+        ).count()
+
+        assert final_count == initial_count
+
+    def test_custom_mode_missing_config_no_event_log_created(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="custom")
+        db.add(settings)
+        db.commit()
+
+        initial_count = db.query(EventLogModel).filter_by(
+            session_id=seeded_session.id,
+        ).count()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_custom_base_url",
+            return_value=None,
+        ):
+            response = client.post(
+                f"/game/sessions/{seeded_session.id}/turn",
+                json={"action": "观察四周"},
+            )
+
+        assert response.status_code == 503
+
+        final_count = db.query(EventLogModel).filter_by(
+            session_id=seeded_session.id,
+        ).count()
+
+        assert final_count == initial_count
+
+    def test_auto_mode_missing_key_returns_200_with_mock(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="auto")
+        db.add(settings)
+        db.commit()
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_openai_key",
+            return_value=None,
+        ):
+            response = client.post(
+                f"/game/sessions/{seeded_session.id}/turn",
+                json={"action": "观察四周"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["narration"] is not None
+
+    def test_mock_mode_always_returns_200(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        settings = SystemSettingsModel(provider_mode="mock")
+        db.add(settings)
+        db.commit()
+
+        response = client.post(
+            f"/game/sessions/{seeded_session.id}/turn",
+            json={"action": "观察四周"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["narration"] is not None
+        assert len(data["narration"]) > 0
+
     def test_fallback_on_empty_llm_output(
         self, client: TestClient, db: Session, seeded_session: SessionModel,
     ):

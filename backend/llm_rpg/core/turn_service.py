@@ -145,6 +145,27 @@ class TurnValidationError(TurnServiceError):
         super().__init__(message, session_id, turn_no)
 
 
+class LLMConfigurationError(TurnServiceError):
+    """Raised when explicit LLM provider configuration is missing or invalid.
+
+    This error is raised when provider_mode is 'openai' or 'custom' but the
+    required API key or configuration is unavailable. Unlike 'auto' mode which
+    falls back to MockLLMProvider, explicit modes fail loudly to alert operators.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider_mode: str,
+        missing_config: str,
+        session_id: Optional[str] = None,
+        turn_no: Optional[int] = None,
+    ):
+        self.provider_mode = provider_mode
+        self.missing_config = missing_config
+        super().__init__(message, session_id, turn_no)
+
+
 @dataclass
 class TurnResult:
     """Result of a turn execution."""
@@ -515,6 +536,7 @@ def _execute_input_intent_stage(
     canonical_state: CanonicalState,
     raw_input: str,
     current_location_id: Optional[str] = None,
+    use_mock: bool = False,
 ) -> LLMStageResult:
     """
     Execute the input intent LLM stage.
@@ -553,7 +575,11 @@ def _execute_input_intent_stage(
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
-        llm_service = _create_llm_service_from_config(db, provider_config)
+        llm_service = _create_llm_service_from_config(
+            db,
+            provider_config,
+            force_mock=use_mock,
+        )
         
         pipeline_config = ProposalConfig(
             timeout_seconds=timeout,
@@ -562,6 +588,8 @@ def _execute_input_intent_stage(
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
+    except LLMConfigurationError:
+        raise
     except Exception as e:
         logger.warning("Failed to configure LLM service for input intent stage: %s", e)
         return LLMStageResult(
@@ -655,6 +683,7 @@ def _execute_world_stage(
     turn_no: int,
     canonical_state: CanonicalState,
     current_location_id: Optional[str] = None,
+    use_mock: bool = False,
 ) -> LLMStageResult:
     """
     Execute the world progression LLM stage.
@@ -692,7 +721,11 @@ def _execute_world_stage(
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
 
-        llm_service = _create_llm_service_from_config(db, provider_config)
+        llm_service = _create_llm_service_from_config(
+            db,
+            provider_config,
+            force_mock=use_mock,
+        )
 
         pipeline_config = ProposalConfig(
             timeout_seconds=timeout,
@@ -701,6 +734,8 @@ def _execute_world_stage(
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
 
+    except LLMConfigurationError:
+        raise
     except Exception as e:
         logger.warning("Failed to configure LLM service for world stage: %s", e)
         return LLMStageResult(
@@ -1307,6 +1342,7 @@ def _execute_npc_stage(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     recent_npc_actions: Optional[List[Dict[str, Any]]] = None,
+    use_mock: bool = False,
 ) -> LLMStageResult:
     """
     Execute the NPC LLM stage.
@@ -1350,7 +1386,11 @@ def _execute_npc_stage(
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
-        llm_service = _create_llm_service_from_config(db, provider_config)
+        llm_service = _create_llm_service_from_config(
+            db,
+            provider_config,
+            force_mock=use_mock,
+        )
         
         pipeline_config = ProposalConfig(
             timeout_seconds=timeout,
@@ -1359,6 +1399,8 @@ def _execute_npc_stage(
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
+    except LLMConfigurationError:
+        raise
     except Exception as e:
         logger.warning("Failed to configure LLM service for NPC stage: %s", e)
         return LLMStageResult(
@@ -1498,6 +1540,7 @@ def _execute_llm_stages(
     movement_result: Optional[MovementResult] = None,
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
+    use_mock: bool = False,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1536,6 +1579,7 @@ def _execute_llm_stages(
         turn_no=turn_no,
         canonical_state=canonical_state,
         current_location_id=current_location_id,
+        use_mock=use_mock,
     )
     results.append(world_result)
     
@@ -1549,6 +1593,7 @@ def _execute_llm_stages(
         movement_result=movement_result,
         state_deltas=state_deltas,
         current_location_id=current_location_id,
+        use_mock=use_mock,
     )
     results.append(scene_result)
     
@@ -1562,6 +1607,7 @@ def _execute_llm_stages(
         movement_result=movement_result,
         state_deltas=state_deltas,
         current_location_id=current_location_id,
+        use_mock=use_mock,
     )
     results.append(npc_result)
     
@@ -1580,6 +1626,7 @@ def _execute_llm_stages(
         state_deltas=state_deltas,
         current_location_id=current_location_id,
         npc_reactions=npc_reactions_for_narration,
+        use_mock=use_mock,
     )
     results.append(narration_result)
     
@@ -1597,6 +1644,7 @@ def _execute_narration_stage(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     npc_reactions: Optional[List[Dict[str, Any]]] = None,
+    use_mock: bool = False,
 ) -> LLMStageResult:
     """
     Execute the narration LLM stage.
@@ -1653,7 +1701,11 @@ def _execute_narration_stage(
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
-        llm_service = _create_llm_service_from_config(db, provider_config)
+        llm_service = _create_llm_service_from_config(
+            db,
+            provider_config,
+            force_mock=use_mock,
+        )
         
         pipeline_config = ProposalConfig(
             timeout_seconds=timeout,
@@ -1662,6 +1714,8 @@ def _execute_narration_stage(
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
+    except LLMConfigurationError:
+        raise
     except Exception as e:
         logger.warning("Failed to configure LLM service for narration: %s", e)
         return LLMStageResult(
@@ -1752,39 +1806,105 @@ def _execute_narration_stage(
 def _create_llm_service_from_config(
     db: Session,
     provider_config: Dict[str, Any],
+    force_mock: bool = False,
 ) -> LLMService:
     """
     Create an LLMService configured from SystemSettingsService.
     
-    Uses the provider_mode and API keys from settings.
+    Provider mode semantics:
+    - 'mock': Always returns MockLLMProvider
+    - 'auto': Uses OpenAI if key available, otherwise MockLLMProvider (silent fallback)
+    - 'openai': Requires OpenAI API key; raises LLMConfigurationError if unavailable
+    - 'custom': Requires custom base URL AND custom API key; raises LLMConfigurationError if either unavailable
+
+    Raises:
+        LLMConfigurationError: When 'openai' or 'custom' mode is configured but required
+            credentials are unavailable.
     """
     from ..llm.service import OpenAIProvider
     
+    if force_mock:
+        return LLMService(provider=MockLLMProvider(), db_session=db)
+
     provider_mode = provider_config.get("provider_mode", "auto")
     default_model = provider_config.get("default_model", "gpt-4")
-    custom_base_url = provider_config.get("custom_base_url")
     
     from ..services.settings import SystemSettingsService
     settings_service = SystemSettingsService(db)
     
-    if provider_mode == "custom" and custom_base_url:
-        api_key = settings_service.get_effective_custom_api_key()
-        if api_key:
-            provider = OpenAIProvider(
-                api_key=api_key,
-                model=default_model,
-                base_url=custom_base_url,
+    if provider_mode == "mock":
+        return LLMService(provider=MockLLMProvider(), db_session=db)
+
+    if provider_mode == "custom":
+        try:
+            base_url = settings_service.get_effective_custom_base_url()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"Custom provider mode requires readable custom_base_url configuration: {str(e)[:200]}",
+                provider_mode="custom",
+                missing_config="custom_base_url",
+            ) from e
+
+        try:
+            api_key = settings_service.get_effective_custom_api_key()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"Custom provider mode requires readable custom_api_key configuration: {str(e)[:200]}",
+                provider_mode="custom",
+                missing_config="custom_api_key",
+            ) from e
+
+        if not base_url:
+            raise LLMConfigurationError(
+                message="Custom provider mode requires custom_base_url configuration",
+                provider_mode="custom",
+                missing_config="custom_base_url",
             )
-            return LLMService(provider=provider, db_session=db)
-    
-    if provider_mode in ("openai", "auto"):
-        api_key = settings_service.get_effective_openai_key()
-        if api_key:
-            provider = OpenAIProvider(
-                api_key=api_key,
-                model=default_model,
+        if not api_key:
+            raise LLMConfigurationError(
+                message="Custom provider mode requires custom_api_key configuration",
+                provider_mode="custom",
+                missing_config="custom_api_key",
             )
-            return LLMService(provider=provider, db_session=db)
+
+        provider = OpenAIProvider(
+            api_key=api_key,
+            model=default_model,
+            base_url=base_url,
+        )
+        return LLMService(provider=provider, db_session=db)
+
+    if provider_mode == "openai":
+        try:
+            api_key = settings_service.get_effective_openai_key()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"OpenAI provider mode requires readable OPENAI_API_KEY: {str(e)[:200]}",
+                provider_mode="openai",
+                missing_config="openai_api_key",
+            ) from e
+
+        if not api_key:
+            raise LLMConfigurationError(
+                message="OpenAI provider mode requires OPENAI_API_KEY",
+                provider_mode="openai",
+                missing_config="openai_api_key",
+            )
+
+        provider = OpenAIProvider(
+            api_key=api_key,
+            model=default_model,
+        )
+        return LLMService(provider=provider, db_session=db)
+
+    # provider_mode == "auto" (or any unrecognized mode)
+    api_key = settings_service.get_effective_openai_key()
+    if api_key:
+        provider = OpenAIProvider(
+            api_key=api_key,
+            model=default_model,
+        )
+        return LLMService(provider=provider, db_session=db)
     
     return LLMService(provider=MockLLMProvider(), db_session=db)
 
@@ -1893,6 +2013,7 @@ def _execute_scene_stage(
     movement_result: Optional[MovementResult] = None,
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
+    use_mock: bool = False,
 ) -> LLMStageResult:
     """
     Execute the scene LLM stage.
@@ -1937,7 +2058,11 @@ def _execute_scene_stage(
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
-        llm_service = _create_llm_service_from_config(db, provider_config)
+        llm_service = _create_llm_service_from_config(
+            db,
+            provider_config,
+            force_mock=use_mock,
+        )
         
         pipeline_config = ProposalConfig(
             timeout_seconds=timeout,
@@ -1946,6 +2071,8 @@ def _execute_scene_stage(
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
+    except LLMConfigurationError:
+        raise
     except Exception as e:
         logger.warning("Failed to configure LLM service for scene stage: %s", e)
         return LLMStageResult(
@@ -2041,11 +2168,81 @@ def _execute_scene_stage(
         )
 
 
+def _validate_explicit_llm_config(db: Session) -> None:
+    """
+    Validate that explicit LLM provider modes have required configuration.
+
+    This preflight check runs before turn allocation to ensure that 'openai' or
+    'custom' provider modes fail loudly before any DB writes occur.
+
+    Raises:
+        LLMConfigurationError: When explicit provider mode lacks required config.
+    """
+    from ..services.settings import SystemSettingsService
+
+    settings_service = SystemSettingsService(db)
+    provider_config = settings_service.get_provider_config()
+    provider_mode = provider_config.get("provider_mode", "auto")
+
+    if provider_mode in ("mock", "auto"):
+        return
+
+    if provider_mode == "openai":
+        try:
+            api_key = settings_service.get_effective_openai_key()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"OpenAI provider mode requires readable OPENAI_API_KEY: {str(e)[:200]}",
+                provider_mode="openai",
+                missing_config="openai_api_key",
+            ) from e
+
+        if not api_key:
+            raise LLMConfigurationError(
+                message="OpenAI provider mode requires OPENAI_API_KEY",
+                provider_mode="openai",
+                missing_config="openai_api_key",
+            )
+
+    if provider_mode == "custom":
+        try:
+            base_url = settings_service.get_effective_custom_base_url()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"Custom provider mode requires readable custom_base_url configuration: {str(e)[:200]}",
+                provider_mode="custom",
+                missing_config="custom_base_url",
+            ) from e
+
+        try:
+            api_key = settings_service.get_effective_custom_api_key()
+        except Exception as e:
+            raise LLMConfigurationError(
+                message=f"Custom provider mode requires readable custom_api_key configuration: {str(e)[:200]}",
+                provider_mode="custom",
+                missing_config="custom_api_key",
+            ) from e
+
+        if not base_url:
+            raise LLMConfigurationError(
+                message="Custom provider mode requires custom_base_url configuration",
+                provider_mode="custom",
+                missing_config="custom_base_url",
+            )
+        if not api_key:
+            raise LLMConfigurationError(
+                message="Custom provider mode requires custom_api_key configuration",
+                provider_mode="custom",
+                missing_config="custom_api_key",
+            )
+
+
 def execute_turn_service(
     db: Session,
     session_id: str,
     player_input: str,
     idempotency_key: Optional[str] = None,
+    use_mock: bool = False,
 ) -> TurnResult:
     """
     Execute a turn with full transaction support.
@@ -2088,6 +2285,11 @@ def execute_turn_service(
         )
     
     world_id = session.world_id
+
+    # Preflight: Validate explicit LLM provider config before any DB writes.
+    # Mock-only call paths intentionally bypass global provider settings.
+    if not use_mock:
+        _validate_explicit_llm_config(db)
     
     # Step 2: Initialize session story state if needed (idempotent)
     try:
@@ -2147,6 +2349,7 @@ def execute_turn_service(
         canonical_state=canonical_state,
         raw_input=player_input,
         current_location_id=current_location_id,
+        use_mock=use_mock,
     )
     
     # Step 6: Parse player input and determine action type
@@ -2225,8 +2428,9 @@ def execute_turn_service(
         canonical_state=canonical_state,
     )
     
-    # Step 11: Get world time from session state
-    world_time = _get_world_time(session_state)
+    # Step 11: Advance world time for the committed turn
+    world_time_before = _get_world_time(session_state)
+    world_time = _advance_world_time(world_time_before)
     
     # Step 12: Get player state
     player_state = _get_player_state(canonical_state, current_location_id)
@@ -2249,6 +2453,8 @@ def execute_turn_service(
                 "action_type": action_type,
                 "movement_success": movement_result.success if movement_result else None,
                 "new_location_id": movement_result.new_location_id if movement_result else None,
+                "world_time_before": world_time_before,
+                "world_time": world_time,
                 "input_intent": input_intent_metadata,
                 "input_intent_fallback_reason": input_intent_fallback_reason,
                 "llm_stages": [],
@@ -2273,6 +2479,7 @@ def execute_turn_service(
         movement_result=movement_result,
         state_deltas=state_deltas,
         current_location_id=current_location_id,
+        use_mock=use_mock,
     )
     
     # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
@@ -2327,6 +2534,8 @@ def execute_turn_service(
         "action_type": action_type,
         "movement_success": movement_result.success if movement_result else None,
         "new_location_id": movement_result.new_location_id if movement_result else None,
+        "world_time_before": world_time_before,
+        "world_time": world_time,
         "input_intent": input_intent_metadata,
         "input_intent_fallback_reason": input_intent_fallback_reason,
         "llm_stages": llm_stages_json,
@@ -2341,12 +2550,15 @@ def execute_turn_service(
     event_log_repo = EventLogRepository(db)
     event_log_repo.update(event.id, {"result_json": updated_result_json})
     
-    # Step 18: Update session state if movement succeeded
+    # Step 18: Update session state with durable time and location changes
+    session_state_update = {
+        "session_id": session_id,
+        "current_time": _format_world_time(world_time),
+        "time_phase": world_time["period"],
+    }
     if movement_result and movement_result.success and movement_result.new_location_id:
-        session_state_repo.create_or_update({
-            "session_id": session_id,
-            "current_location_id": movement_result.new_location_id,
-        })
+        session_state_update["current_location_id"] = movement_result.new_location_id
+    session_state_repo.create_or_update(session_state_update)
     
     # Step 19: Update last played
     session_repo.update_last_played(session_id)
@@ -2521,6 +2733,49 @@ def _get_world_time(session_state) -> Dict[str, Any]:
         "day": "第1日",
         "period": "辰时",
     }
+
+
+def _parse_world_day(day_value: Any) -> int:
+    if isinstance(day_value, int):
+        return day_value
+    if isinstance(day_value, str):
+        digits = "".join(ch for ch in day_value if ch.isdigit())
+        if digits:
+            return int(digits)
+    return 1
+
+
+def _advance_world_time(world_time: Dict[str, Any]) -> Dict[str, Any]:
+    periods = [
+        "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
+        "午时", "未时", "申时", "酉时", "戌时", "亥时",
+    ]
+    current_period = world_time.get("period", "辰时")
+    try:
+        current_index = periods.index(current_period)
+    except ValueError:
+        current_index = periods.index("辰时")
+
+    next_index = (current_index + 1) % len(periods)
+    day = _parse_world_day(world_time.get("day", "第1日"))
+    if next_index == 0:
+        day += 1
+
+    return {
+        "calendar": world_time.get("calendar", "修仙历"),
+        "season": world_time.get("season", "春"),
+        "day": f"第{day}日",
+        "period": periods[next_index],
+    }
+
+
+def _format_world_time(world_time: Dict[str, Any]) -> str:
+    return " ".join([
+        str(world_time.get("calendar", "修仙历")),
+        str(world_time.get("season", "春")),
+        str(world_time.get("day", "第1日")),
+        str(world_time.get("period", "辰时")),
+    ])
 
 
 def _get_player_state(

@@ -32,9 +32,12 @@ from ..core.turn_service import (
     SessionNotFoundError as TurnServiceSessionNotFoundError,
     TurnServiceError,
     TurnValidationError as TurnServiceValidationError,
+    LLMConfigurationError,
+    _create_llm_service_from_config,
 )
+from ..core.state_reconstruction import reconstruct_canonical_state, StateReconstructionError
 from ..core.canonical_state import CanonicalStateManager
-from ..llm.service import LLMService, MockLLMProvider, OpenAIProvider, get_llm_service
+from ..llm.service import LLMService
 from ..services.settings import SystemSettingsService
 
 from ..models.states import (
@@ -93,7 +96,10 @@ def get_or_create_orchestrator(game_id: str, db: Session) -> TurnOrchestrator:
         if cached_signature == current_signature:
             return _game_orchestrators[game_id]
     
-    orchestrator = get_turn_orchestrator(db)
+    try:
+        orchestrator = get_turn_orchestrator(db)
+    except LLMConfigurationError:
+        orchestrator = build_turn_orchestrator()
     _game_orchestrators[game_id] = orchestrator
     _orchestrator_provider_signatures[game_id] = current_signature
     return orchestrator
@@ -140,44 +146,18 @@ def _resolve_llm_service(db: Session) -> LLMService:
     """
     Resolve LLMService based on system settings.
     
-    Uses the same provider resolution logic as streaming.py:
-    - Check provider_mode from SystemSettingsService
-    - Use MockLLMProvider for 'mock' mode or when no API key available
-    - Use OpenAIProvider with custom settings for 'custom' mode
-    - Use OpenAIProvider with effective OpenAI key for 'openai' mode
-    - Fall back to MockLLMProvider if no valid configuration
+    Delegates to _create_llm_service_from_config which implements:
+    - 'mock': Always returns MockLLMProvider
+    - 'auto': Uses OpenAI if key available, otherwise MockLLMProvider (silent fallback)
+    - 'openai': Requires OpenAI API key; raises LLMConfigurationError if unavailable
+    - 'custom': Requires custom base URL AND custom API key; raises LLMConfigurationError if either unavailable
+
+    Raises:
+        LLMConfigurationError: When explicit provider mode lacks required config.
     """
     settings_service = SystemSettingsService(db)
     provider_config = settings_service.get_provider_config()
-    
-    if provider_config["provider_mode"] == "mock":
-        provider = MockLLMProvider()
-    elif provider_config["provider_mode"] == "custom":
-        custom_key = settings_service.get_effective_custom_api_key()
-        custom_url = settings_service.get_effective_custom_base_url()
-        if custom_url and custom_key:
-            provider = OpenAIProvider(
-                api_key=custom_key,
-                base_url=custom_url,
-                model=provider_config.get("default_model"),
-                temperature=provider_config.get("temperature"),
-                max_tokens=provider_config.get("max_tokens"),
-            )
-        else:
-            provider = MockLLMProvider()
-    else:
-        effective_key = settings_service.get_effective_openai_key()
-        if effective_key:
-            provider = OpenAIProvider(
-                api_key=effective_key,
-                model=provider_config.get("default_model"),
-                temperature=provider_config.get("temperature"),
-                max_tokens=provider_config.get("max_tokens"),
-            )
-        else:
-            provider = MockLLMProvider()
-    
-    return get_llm_service(provider=provider, db_session=db)
+    return _create_llm_service_from_config(db, provider_config)
 
 
 def _get_provider_signature(db: Session) -> str:
@@ -308,6 +288,15 @@ def execute_turn(
             validation_passed=result.validation_passed,
             transaction_id=result.transaction_id or "",
         )
+    except LLMConfigurationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": str(e),
+                "provider_mode": e.provider_mode,
+                "missing_config": e.missing_config,
+            },
+        )
     except TurnServiceValidationError as e:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -374,35 +363,24 @@ def replay_turns(
         )
     
     game_id = f"game_{session_id}"
-    orchestrator = get_or_create_orchestrator(game_id, db)
+    event_log_repo = EventLogRepository(db)
+    recent_events = event_log_repo.get_recent(session_id, limit=1)
+    current_turn = int(getattr(recent_events[0], "turn_no", 0)) if recent_events else 0
 
-    existing_state = orchestrator._state_manager.get_state(game_id)
-    if existing_state is None:
-        _initialize_game_state(game_id, orchestrator._state_manager)
-
-    # Get current turn from event log
-    recent_events = orchestrator._event_log._store.get_recent_events(limit=1)
-    if recent_events:
-        current_turn = recent_events[0].turn_index
-    else:
-        current_turn = 0
-
-    end_turn = request.end_turn or current_turn
+    end_turn = request.end_turn if request.end_turn is not None else current_turn
 
     if end_turn > current_turn:
         end_turn = current_turn
     
     try:
-        reconstructed_state = orchestrator.replay_turns(
-            game_id=game_id,
-            start_turn=request.start_turn,
-            end_turn=end_turn,
-        )
-        
-        # Count events replayed
-        events = orchestrator._event_log._store.get_events_in_range(
-            request.start_turn, end_turn
-        )
+        reconstructed_state = reconstruct_canonical_state(db, session_id)
+        if reconstructed_state is None:
+            raise ValueError(f"Session not found: {session_id}")
+
+        events = [
+            event for event in event_log_repo.get_by_session_ordered(session_id)
+            if request.start_turn <= int(getattr(event, "turn_no", 0)) <= end_turn
+        ]
         
         return ReplayResponse(
             game_id=game_id,
@@ -417,7 +395,11 @@ def replay_turns(
             },
             events_replayed=len(events),
         )
-        
+    except StateReconstructionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -449,9 +431,23 @@ def get_audit_log(
         )
     
     game_id = f"game_{session_id}"
-    orchestrator = get_or_create_orchestrator(game_id, db)
+    event_log_repo = EventLogRepository(db)
 
-    audit_entries = orchestrator.get_audit_log(transaction_id)
+    audit_entries = []
+    for event in event_log_repo.get_by_session_ordered(session_id):
+        result_json_raw = getattr(event, "result_json", None)
+        result_json = result_json_raw if isinstance(result_json_raw, dict) else {}
+        event_transaction_id = result_json.get("transaction_id")
+        if transaction_id and event_transaction_id != transaction_id:
+            continue
+        occurred_at = getattr(event, "occurred_at", None)
+        audit_entries.append({
+            "audit_id": str(getattr(event, "id", "")),
+            "timestamp": occurred_at.isoformat() if isinstance(occurred_at, datetime) else "",
+            "type": str(getattr(event, "event_type", "")),
+            "transaction_id": event_transaction_id,
+            "errors": result_json.get("validation_errors"),
+        })
     
     return {
         "session_id": session_id,

@@ -1,5 +1,7 @@
 import uuid
+import json
 import pytest
+from unittest.mock import patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -88,6 +90,40 @@ def create_session(client, auth_headers, db_engine, sample_world_data):
     response = client.post("/saves/manual-save", json={"world_id": world_id}, headers=auth_headers)
     assert response.status_code == 201
     return response.json()["session_id"], world_id
+
+
+def set_provider_settings(db_engine, settings_update):
+    from llm_rpg.storage.repositories import SystemSettingsRepository
+
+    SessionLocal = sessionmaker(bind=db_engine)
+    db = SessionLocal()
+    try:
+        settings_repo = SystemSettingsRepository(db)
+        settings_repo.update_singleton(settings_update)
+    finally:
+        db.close()
+
+
+def collect_stream_events(client, url, auth_headers):
+    with client.stream(
+        "POST",
+        url,
+        json={"action": "观察四周"},
+        headers=auth_headers,
+    ) as response:
+        assert response.status_code == 200
+
+        events = []
+        event_type = None
+        for line in response.iter_lines():
+            if line:
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8")
+                if line.startswith("event:"):
+                    event_type = line[7:]
+                elif line.startswith("data:"):
+                    events.append({"event": event_type, "data": json.loads(line[5:])})
+    return events
 
 
 class TestAdventureLogAPI:
@@ -266,21 +302,65 @@ class TestAdventureLogPersistence:
         assert len(player_turn["narration"]) > 0
         assert player_turn["recommended_actions"] == []
 
+    def test_streaming_mock_turn_ignores_bad_custom_provider_config(self, client, auth_headers, db_engine, sample_world_data):
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        set_provider_settings(db_engine, {"provider_mode": "custom", "custom_base_url": None})
+
+        events = collect_stream_events(
+            client,
+            f"/streaming/sessions/{session_id}/turn/mock",
+            auth_headers,
+        )
+
+        event_types = [e["event"] for e in events]
+        assert "turn_completed" in event_types
+        assert not any(
+            e["event"] == "turn_error"
+            and e["data"].get("error_type") == "llm_configuration_error"
+            for e in events
+        )
+
+        log_response = client.get(f"/sessions/{session_id}/adventure-log", headers=auth_headers)
+        assert log_response.status_code == 200
+        data = log_response.json()
+        assert len(data) == 2
+        assert data[1]["event_type"] == "player_turn"
+
+    def test_streaming_mock_turn_ignores_bad_openai_provider_config(self, client, auth_headers, db_engine, sample_world_data):
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        set_provider_settings(db_engine, {"provider_mode": "openai", "openai_api_key_encrypted": None})
+
+        with patch(
+            "llm_rpg.services.settings.SystemSettingsService.get_effective_openai_key",
+            return_value=None,
+        ):
+            events = collect_stream_events(
+                client,
+                f"/streaming/sessions/{session_id}/turn/mock",
+                auth_headers,
+            )
+
+        event_types = [e["event"] for e in events]
+        assert "turn_completed" in event_types
+        assert not any(
+            e["event"] == "turn_error"
+            and e["data"].get("error_type") == "llm_configuration_error"
+            for e in events
+        )
+
+        log_response = client.get(f"/sessions/{session_id}/adventure-log", headers=auth_headers)
+        assert log_response.status_code == 200
+        data = log_response.json()
+        assert len(data) == 2
+        assert data[1]["event_type"] == "player_turn"
+
     def test_streaming_error_does_not_create_player_log(self, client, auth_headers, db_engine, sample_world_data):
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
 
-        from sqlalchemy.orm import sessionmaker
-        from llm_rpg.storage.repositories import SystemSettingsRepository
-        SessionLocal = sessionmaker(bind=db_engine)
-        db = SessionLocal()
-        try:
-            settings_repo = SystemSettingsRepository(db)
-            settings_repo.update_singleton({
-                "provider_mode": "custom",
-                "custom_base_url": None,
-            })
-        finally:
-            db.close()
+        set_provider_settings(db_engine, {
+            "provider_mode": "custom",
+            "custom_base_url": None,
+        })
 
         log_before = client.get(f"/sessions/{session_id}/adventure-log", headers=auth_headers)
         assert log_before.status_code == 200
@@ -301,12 +381,15 @@ class TestAdventureLogPersistence:
                     if line.startswith("event:"):
                         event_type = line[7:]
                     elif line.startswith("data:"):
-                        import json
                         data = json.loads(line[5:])
                         events.append({"event": event_type, "data": data})
 
         event_types = [e["event"] for e in events]
         assert "turn_error" in event_types
+        error_event = next(e for e in events if e["event"] == "turn_error")
+        assert error_event["data"]["error_type"] == "llm_configuration_error"
+        assert error_event["data"]["provider_mode"] == "custom"
+        assert error_event["data"]["missing_config"] == "custom_base_url"
 
         log_after = client.get(f"/sessions/{session_id}/adventure-log", headers=auth_headers)
         assert log_after.status_code == 200

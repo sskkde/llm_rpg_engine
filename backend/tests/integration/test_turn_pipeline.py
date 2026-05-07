@@ -104,6 +104,18 @@ def create_session(client, auth_headers, db_engine, sample_world_data):
     return response.json()["session_id"], world_id
 
 
+def set_provider_settings(db_engine, settings_update):
+    from llm_rpg.storage.repositories import SystemSettingsRepository
+
+    SessionLocal = sessionmaker(bind=db_engine)
+    db = SessionLocal()
+    try:
+        settings_repo = SystemSettingsRepository(db)
+        settings_repo.update_singleton(settings_update)
+    finally:
+        db.close()
+
+
 class TestTurnExecution:
     """Tests for turn execution endpoint."""
     
@@ -360,7 +372,36 @@ class TestAuditLog:
         )
         
         assert response.status_code == 200
-    
+
+    def test_read_only_replay_and_audit_ignore_bad_provider_config(self, client, auth_headers, db_engine, sample_world_data):
+        """Replay and audit routes do not need LLM provider configuration."""
+        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+
+        turn_response = client.post(
+            f"/game/sessions/{session_id}/turn",
+            json={"action": "观察四周"},
+            headers=auth_headers,
+        )
+        assert turn_response.status_code == 200
+
+        set_provider_settings(db_engine, {
+            "provider_mode": "custom",
+            "custom_base_url": None,
+        })
+
+        replay_response = client.post(
+            f"/game/sessions/{session_id}/replay",
+            json={"start_turn": 1},
+            headers=auth_headers,
+        )
+        assert replay_response.status_code == 200
+
+        audit_response = client.get(
+            f"/game/sessions/{session_id}/audit-log",
+            headers=auth_headers,
+        )
+        assert audit_response.status_code == 200
+
     def test_audit_log_invalid_session(self, client, auth_headers):
         """Test audit log retrieval with invalid session."""
         response = client.get(

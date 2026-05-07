@@ -35,6 +35,7 @@ from ..core.turn_service import (
     SessionNotFoundError as TurnServiceSessionNotFoundError,
     TurnServiceError,
     TurnValidationError as TurnServiceValidationError,
+    LLMConfigurationError,
 )
 from ..core.event_log import EventLog
 from ..core.canonical_state import CanonicalStateManager
@@ -340,6 +341,7 @@ async def execute_turn_stream(
             db=db,
             session_id=session_id,
             player_input=player_input,
+            use_mock=use_mock,
         )
         
         # 2. Emit event_committed after atomic commit
@@ -407,6 +409,20 @@ async def execute_turn_stream(
                 "turn_index": e.turn_no,
                 "error_type": "session_not_found",
                 "message": str(e),
+                "timestamp": datetime.now().isoformat(),
+            },
+            event_id=f"{event_id}_error"
+        )
+    except LLMConfigurationError as e:
+        yield format_sse(
+            "turn_error",
+            {
+                "session_id": session_id,
+                "turn_index": e.turn_no,
+                "error_type": "llm_configuration_error",
+                "message": str(e),
+                "provider_mode": e.provider_mode,
+                "missing_config": e.missing_config,
                 "timestamp": datetime.now().isoformat(),
             },
             event_id=f"{event_id}_error"

@@ -47,6 +47,11 @@ if TYPE_CHECKING:
         SessionRepository,
         SessionStateRepository,
         EventLogRepository,
+        NPCMemoryScopeRepository,
+        NPCBeliefRepository,
+        NPCPrivateMemoryRepository,
+        NPCSecretRepository,
+        NPCRelationshipMemoryRepository,
     )
 
 
@@ -66,12 +71,21 @@ def build_db_turn_orchestrator(
         llm_service: LLMService instance for LLM calls
         repositories: Dictionary of repository instances for DB access
             Expected keys: 'world', 'chapter', 'location', 'npc_template',
-                          'session', 'session_state', 'event_log', etc.
+                          'session', 'session_state', 'event_log', 
+                          'npc_memory_scope', 'npc_belief', 'npc_private_memory',
+                          'npc_secret', 'npc_relationship_memory'
     
     Returns:
         TurnOrchestrator: Fully configured orchestrator with DB-backed dependencies.
     """
-    # Create shared in-memory dependencies (event log, state manager, etc.)
+    from llm_rpg.storage.repositories import (
+        NPCMemoryScopeRepository,
+        NPCBeliefRepository,
+        NPCPrivateMemoryRepository,
+        NPCSecretRepository,
+        NPCRelationshipMemoryRepository,
+    )
+    
     event_log = EventLog()
     state_manager = CanonicalStateManager()
     action_scheduler = ActionScheduler()
@@ -79,7 +93,22 @@ def build_db_turn_orchestrator(
     perspective_service = PerspectiveService()
     retrieval_system = RetrievalSystem()
     context_builder = ContextBuilder(retrieval_system, perspective_service)
-    npc_memory = NPCMemoryManager()
+    
+    session_id = repositories.get('session_id')
+    npc_memory_scope_repo = repositories.get('npc_memory_scope') or NPCMemoryScopeRepository(db)
+    npc_belief_repo = repositories.get('npc_belief') or NPCBeliefRepository(db)
+    npc_private_memory_repo = repositories.get('npc_private_memory') or NPCPrivateMemoryRepository(db)
+    npc_secret_repo = repositories.get('npc_secret') or NPCSecretRepository(db)
+    npc_relationship_repo = repositories.get('npc_relationship_memory') or NPCRelationshipMemoryRepository(db)
+    
+    npc_memory = NPCMemoryManager(
+        scope_repo=npc_memory_scope_repo,
+        belief_repo=npc_belief_repo,
+        memory_repo=npc_private_memory_repo,
+        secret_repo=npc_secret_repo,
+        relationship_repo=npc_relationship_repo,
+        session_id=session_id,
+    )
     lore_store = LoreStore()
     summary_manager = SummaryManager()
     memory_writer = MemoryWriter(event_log, npc_memory, summary_manager)

@@ -200,7 +200,7 @@ def _run_async_safe(coro):
     if loop is not None and loop.is_running():
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(asyncio.run, coro)
-            return future.result(timeout=60)
+            return future.result(timeout=180)
     else:
         return asyncio.run(coro)
 

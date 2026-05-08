@@ -157,8 +157,17 @@ class TurnResult(BaseModel):
     state: dict
 
 
-@app.post("/saves", response_model=str)
+@app.post("/dev/saves", response_model=str)
 def create_save() -> str:
+    """
+    DEPRECATED: Legacy in-memory endpoint for development/testing only.
+
+    This endpoint uses in-memory state and is NOT persisted to database.
+    For production use, use the database-backed API:
+    - POST /saves (api/saves.py) - Create persisted save slot
+
+    This endpoint is kept for backward compatibility with legacy tests.
+    """
     session_id = str(uuid.uuid4())
     game_id = f"game_{session_id[:8]}"
     
@@ -201,13 +210,27 @@ def create_save() -> str:
     return session_id
 
 
-@app.get("/saves", response_model=List[str])
+@app.get("/dev/saves", response_model=List[str])
 def list_saves() -> List[str]:
+    """
+    DEPRECATED: Legacy in-memory endpoint for development/testing only.
+
+    This endpoint returns in-memory session IDs, not database save slots.
+    For production use, use the database-backed API:
+    - GET /saves (api/saves.py) - List user's persisted save slots
+    """
     return list(sessions.keys())
 
 
-@app.get("/sessions/{session_id}/snapshot")
+@app.get("/dev/sessions/{session_id}/snapshot")
 def get_snapshot(session_id: str) -> dict:
+    """
+    DEPRECATED: Legacy in-memory endpoint for development/testing only.
+
+    This endpoint returns in-memory state, not database state.
+    For production use, use the database-backed API:
+    - GET /sessions/{session_id}/snapshot (api/sessions.py) - Get persisted session state
+    """
     session = sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -223,8 +246,18 @@ def get_snapshot(session_id: str) -> dict:
     }
 
 
-@app.post("/sessions/{session_id}/turn", response_model=TurnResult)
+@app.post("/dev/sessions/{session_id}/turn", response_model=TurnResult)
 def perform_turn(session_id: str, inp: InputModel) -> TurnResult:
+    """
+    DEPRECATED: Legacy in-memory endpoint for development/testing only.
+
+    This endpoint uses in-memory state and bypasses execute_turn_service().
+    For production use, use the database-backed API:
+    - POST /game/sessions/{session_id}/turn (api/game.py) - Execute turn with full service
+    - POST /streaming/sessions/{id}/turn (api/streaming.py) - Stream turn execution (SSE)
+
+    This endpoint is kept for backward compatibility with legacy tests.
+    """
     session = sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")

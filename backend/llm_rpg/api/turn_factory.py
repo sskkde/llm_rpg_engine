@@ -6,9 +6,13 @@ instances with all required engines and services. It ensures:
 - Single shared ProposalPipeline instance when LLMService is provided
 - SceneEngine is always constructed and passed to TurnOrchestrator
 - Consistent dependency injection across all engines
+
+Two factory functions are provided:
+- build_db_turn_orchestrator: Production use with DB session and repositories
+- build_memory_turn_orchestrator_for_tests: Testing use with in-memory dependencies
 """
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from llm_rpg.core.event_log import EventLog
 from llm_rpg.core.canonical_state import CanonicalStateManager
@@ -29,27 +33,123 @@ from llm_rpg.engines.scene_engine import SceneEngine
 from llm_rpg.llm.service import LLMService
 from llm_rpg.llm.proposal_pipeline import ProposalPipeline, create_proposal_pipeline
 
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+    from llm_rpg.storage.repositories import (
+        WorldRepository,
+        ChapterRepository,
+        LocationRepository,
+        NPCTemplateRepository,
+        ItemTemplateRepository,
+        QuestTemplateRepository,
+        EventTemplateRepository,
+        PromptTemplateRepository,
+        SessionRepository,
+        SessionStateRepository,
+        EventLogRepository,
+    )
 
-def build_turn_orchestrator(llm_service: Optional[LLMService] = None) -> TurnOrchestrator:
+
+def build_db_turn_orchestrator(
+    db: "Session",
+    llm_service: LLMService,
+    repositories: dict,
+) -> TurnOrchestrator:
     """
-    Construct a TurnOrchestrator with all dependencies.
+    Construct a TurnOrchestrator for production use with DB-backed dependencies.
     
-    When llm_service is provided:
-    - Creates a single ProposalPipeline instance
-    - Injects the pipeline into TurnOrchestrator and all engines (WorldEngine, NPCEngine, SceneEngine, NarrationEngine)
+    This function creates a TurnOrchestrator that uses database session and
+    repositories for persistent state management.
     
-    When llm_service is None:
-    - All engines are constructed with proposal_pipeline=None
-    - Engines will use deterministic fallback behavior
+    Args:
+        db: SQLAlchemy database session
+        llm_service: LLMService instance for LLM calls
+        repositories: Dictionary of repository instances for DB access
+            Expected keys: 'world', 'chapter', 'location', 'npc_template',
+                          'session', 'session_state', 'event_log', etc.
+    
+    Returns:
+        TurnOrchestrator: Fully configured orchestrator with DB-backed dependencies.
+    """
+    # Create shared in-memory dependencies (event log, state manager, etc.)
+    event_log = EventLog()
+    state_manager = CanonicalStateManager()
+    action_scheduler = ActionScheduler()
+    validator = Validator()
+    perspective_service = PerspectiveService()
+    retrieval_system = RetrievalSystem()
+    context_builder = ContextBuilder(retrieval_system, perspective_service)
+    npc_memory = NPCMemoryManager()
+    lore_store = LoreStore()
+    summary_manager = SummaryManager()
+    memory_writer = MemoryWriter(event_log, npc_memory, summary_manager)
+    
+    # Create ProposalPipeline for LLM calls
+    proposal_pipeline: Optional[ProposalPipeline] = None
+    if llm_service is not None:
+        proposal_pipeline = create_proposal_pipeline(llm_service=llm_service)
+    
+    # Create engines with pipeline injection
+    world_engine = WorldEngine(
+        state_manager=state_manager,
+        event_log=event_log,
+        proposal_pipeline=proposal_pipeline,
+    )
+    
+    npc_engine = NPCEngine(
+        state_manager=state_manager,
+        memory_manager=npc_memory,
+        perspective_service=perspective_service,
+        context_builder=context_builder,
+        proposal_pipeline=proposal_pipeline,
+    )
+    
+    narration_engine = NarrationEngine(
+        state_manager=state_manager,
+        perspective_service=perspective_service,
+        context_builder=context_builder,
+        validator=validator,
+        proposal_pipeline=proposal_pipeline,
+    )
+    
+    scene_engine = SceneEngine(proposal_pipeline=proposal_pipeline)
+    
+    # Create and return TurnOrchestrator
+    return TurnOrchestrator(
+        state_manager=state_manager,
+        event_log=event_log,
+        action_scheduler=action_scheduler,
+        validator=validator,
+        perspective_service=perspective_service,
+        context_builder=context_builder,
+        world_engine=world_engine,
+        npc_engine=npc_engine,
+        narration_engine=narration_engine,
+        scene_engine=scene_engine,
+        proposal_pipeline=proposal_pipeline,
+        memory_writer=memory_writer,
+    )
+
+
+def build_memory_turn_orchestrator_for_tests(
+    llm_service: Optional[LLMService] = None
+) -> TurnOrchestrator:
+    """
+    Construct a TurnOrchestrator for testing with in-memory dependencies.
+    
+    This function creates a TurnOrchestrator that uses in-memory state
+    management, suitable for unit tests and integration tests that don't
+    require database persistence.
     
     Args:
         llm_service: Optional LLMService instance. If provided, a ProposalPipeline
                     will be created and shared across all engines.
+                    If None, engines use deterministic fallback behavior.
     
     Returns:
-        TurnOrchestrator: Fully configured orchestrator with all dependencies.
+        TurnOrchestrator: Fully configured orchestrator with in-memory dependencies.
     """
-    # Create shared dependencies
+    # Create shared in-memory dependencies
     event_log = EventLog()
     state_manager = CanonicalStateManager()
     action_scheduler = ActionScheduler()
@@ -108,3 +208,7 @@ def build_turn_orchestrator(llm_service: Optional[LLMService] = None) -> TurnOrc
         proposal_pipeline=proposal_pipeline,
         memory_writer=memory_writer,
     )
+
+
+# Alias for backward compatibility - points to memory version for tests
+build_turn_orchestrator = build_memory_turn_orchestrator_for_tests

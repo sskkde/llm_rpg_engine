@@ -204,6 +204,15 @@ docker-compose down -v
 
 ## API Overview
 
+### Production vs Legacy Endpoints
+
+**IMPORTANT**: The API has two categories of endpoints:
+
+1. **Production Endpoints** (database-backed, persisted): Use these for all production workloads
+2. **Legacy Dev Endpoints** (in-memory, `/dev/*` prefix): Only for development/testing, NOT persisted
+
+The legacy `/dev/*` endpoints are marked as DEPRECATED and use in-memory state that is lost on server restart. They are kept for backward compatibility with legacy tests only.
+
 ### Authentication
 - `POST /auth/register` - Register new user
 - `POST /auth/login` - Login and receive JWT token

@@ -44,3 +44,7 @@ doc/
 backend/dev.db
 frontend/test-results/
 /package-lock.json
+
+# Agent instructions - not tracked
+AGENTS.md
+frontend/AGENTS.md

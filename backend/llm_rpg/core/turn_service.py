@@ -53,6 +53,7 @@ from ..storage.repositories import (
     QuestTemplateRepository,
     MemorySummaryRepository,
     MemoryFactRepository,
+    TurnTransactionRepository,
 )
 from ..models.states import CanonicalState
 
@@ -2336,276 +2337,305 @@ def execute_turn_service(
         if existing_result:
             return existing_result
     
-    # Get current location before input intent stage
-    session_state_repo = SessionStateRepository(db)
-    session_state = session_state_repo.get_by_session(session_id)
-    current_location_id = session_state.current_location_id if session_state else None
-    
-    # Step 5: Execute input intent LLM stage (before deterministic parsing)
-    input_intent_result = _execute_input_intent_stage(
-        db=db,
-        session_id=session_id,
-        turn_no=turn_no,
-        canonical_state=canonical_state,
-        raw_input=player_input,
-        current_location_id=current_location_id,
-        use_mock=use_mock,
-    )
-    
-    # Step 6: Parse player input and determine action type
-    # Use LLM intent if accepted, otherwise fall back to deterministic parser
-    action_type = "action"
-    target = None
-    input_intent_metadata: Optional[Dict[str, Any]] = None
-    input_intent_fallback_reason: Optional[str] = None
-    
-    if input_intent_result.accepted and input_intent_result.parsed_proposal:
-        parsed_intent = input_intent_result.parsed_proposal
-        action_type = parsed_intent.get("intent_type", "action")
-        target = parsed_intent.get("target")
-        input_intent_metadata = parsed_intent
-    else:
-        # Fallback to deterministic parser
-        action_type, target = _parse_player_input(player_input)
-        input_intent_fallback_reason = input_intent_result.fallback_reason
-    
-    # Step 7: Execute action
-    movement_result: Optional[MovementResult] = None
-    state_deltas: Dict[str, Any] = {}
-    
-    if action_type == "move" and target:
-        # Handle movement
-        movement_result = handle_movement(db, session_id, target)
-        
-        if movement_result.success:
-            state_deltas["location_id"] = movement_result.new_location_id
-        else:
-            # Blocked movement - no state mutation
-            state_deltas["blocked_reason"] = movement_result.blocked_reason
-    
-    # Step 8: Check quest progression
-    if movement_result and movement_result.success:
-        try:
-            quest_results = check_quest_progression(
-                db=db,
-                session_id=session_id,
-                action_context={
-                    "action_type": "movement",
-                    "target_location_code": movement_result.new_location_code,
-                },
-            )
-            # Quest progression results can be used for narration context
-            state_deltas["quest_progression"] = [
-                {"quest_name": r.quest_progress.quest_name, "message": r.message}
-                for r in quest_results
-                if r.triggered and r.quest_progress
-            ]
-        except QuestProgressionError:
-            # Quest progression failure should not block the turn
-            pass
-    
-    # Step 9: Generate recommended actions (deterministic fallback)
-    session_state = session_state_repo.get_by_session(session_id)
-    
-    current_location_id = None
-    if session_state:
-        current_location_id = session_state.current_location_id
-    
-    if movement_result and movement_result.success:
-        current_location_id = movement_result.new_location_id
-    
-    deterministic_recommended_actions = generate_recommended_actions(
-        db=db,
-        session_id=session_id,
-        location_id=current_location_id,
-    )
-    
-    # Step 10: Build template narration (fallback-safe placeholder)
-    narration = _build_narration(
-        player_input=player_input,
-        action_type=action_type,
-        movement_result=movement_result,
-        canonical_state=canonical_state,
-    )
-    
-    # Step 11: Advance world time for the committed turn
-    world_time_before = _get_world_time(session_state)
-    world_time = _advance_world_time(world_time_before)
-    
-    # Step 12: Get player state
-    player_state = _get_player_state(canonical_state, current_location_id)
-    
-    # Step 13: Commit turn to DB with template narration (durable commit first)
-    transaction_id = f"txn_{session_id}_{turn_no}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    # Step 4b: Create turn_transaction record (status=pending)
+    turn_transaction_repo = TurnTransactionRepository(db)
+    world_time_before_str = _format_world_time(_get_world_time(None))
+    turn_transaction = turn_transaction_repo.create({
+        "session_id": session_id,
+        "turn_no": turn_no,
+        "idempotency_key": idempotency_key or f"auto_{session_id}_{turn_no}",
+        "status": "pending",
+        "player_input": player_input,
+        "world_time_before": world_time_before_str,
+        "started_at": datetime.now(),
+    })
+    transaction_id = turn_transaction.id
     
     try:
-        event = commit_turn(
+        # Get current location before input intent stage
+        session_state_repo = SessionStateRepository(db)
+        session_state = session_state_repo.get_by_session(session_id)
+        current_location_id = session_state.current_location_id if session_state else None
+        
+        # Step 5: Execute input intent LLM stage (before deterministic parsing)
+        input_intent_result = _execute_input_intent_stage(
             db=db,
             session_id=session_id,
             turn_no=turn_no,
-            event_type="player_turn",
-            input_text=player_input,
-            narrative_text=narration,
-            result_json={
-                "transaction_id": transaction_id,
-                "recommended_actions": deterministic_recommended_actions,
-                "state_deltas": state_deltas,
-                "action_type": action_type,
-                "movement_success": movement_result.success if movement_result else None,
-                "new_location_id": movement_result.new_location_id if movement_result else None,
-                "world_time_before": world_time_before,
-                "world_time": world_time,
-                "input_intent": input_intent_metadata,
-                "input_intent_fallback_reason": input_intent_fallback_reason,
-                "llm_stages": [],
-            },
-            idempotency_key=idempotency_key,
+            canonical_state=canonical_state,
+            raw_input=player_input,
+            current_location_id=current_location_id,
+            use_mock=use_mock,
         )
-    except TurnAllocationError as e:
-        raise TurnServiceError(
-            f"Failed to commit turn: {str(e)}",
-            session_id=session_id,
-            turn_no=turn_no,
-        )
-    
-    # Step 14: Execute LLM stages (scene before narration)
-    llm_stage_results = _execute_llm_stages(
-        db=db,
-        session_id=session_id,
-        turn_no=turn_no,
-        canonical_state=canonical_state,
-        player_input=player_input,
-        action_type=action_type,
-        movement_result=movement_result,
-        state_deltas=state_deltas,
-        current_location_id=current_location_id,
-        use_mock=use_mock,
-    )
-    
-    # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
-    final_recommended_actions = deterministic_recommended_actions
-    scene_event_summary: Optional[Dict[str, Any]] = None
-    scene_fallback_reason: Optional[str] = None
-    npc_reactions_for_json: List[Dict[str, Any]] = []
-    npc_fallback_reason: Optional[str] = None
-    world_progression: Optional[Dict[str, Any]] = None
-    world_fallback_reason: Optional[str] = None
-    
-    for stage_result in llm_stage_results:
-        if stage_result.stage_name == "world":
-            if stage_result.accepted and stage_result.parsed_proposal:
-                world_progression = stage_result.parsed_proposal
+        
+        # Step 6: Parse player input and determine action type
+        # Use LLM intent if accepted, otherwise fall back to deterministic parser
+        action_type = "action"
+        target = None
+        input_intent_metadata: Optional[Dict[str, Any]] = None
+        input_intent_fallback_reason: Optional[str] = None
+        
+        if input_intent_result.accepted and input_intent_result.parsed_proposal:
+            parsed_intent = input_intent_result.parsed_proposal
+            action_type = parsed_intent.get("intent_type", "action")
+            target = parsed_intent.get("target")
+            input_intent_metadata = parsed_intent
+        else:
+            # Fallback to deterministic parser
+            action_type, target = _parse_player_input(player_input)
+            input_intent_fallback_reason = input_intent_result.fallback_reason
+        
+        # Step 7: Execute action
+        movement_result: Optional[MovementResult] = None
+        state_deltas: Dict[str, Any] = {}
+        
+        if action_type == "move" and target:
+            # Handle movement
+            movement_result = handle_movement(db, session_id, target)
+            
+            if movement_result.success:
+                state_deltas["location_id"] = movement_result.new_location_id
             else:
-                world_fallback_reason = stage_result.fallback_reason
-        elif stage_result.stage_name == "scene":
-            if stage_result.accepted and stage_result.parsed_proposal:
-                scene_recommended = stage_result.parsed_proposal.get("recommended_actions", [])
-                if scene_recommended and isinstance(scene_recommended, list):
-                    final_recommended_actions = scene_recommended[:4]
-                scene_event_summary = {
-                    "scene_id": stage_result.parsed_proposal.get("scene_id"),
-                    "scene_name": stage_result.parsed_proposal.get("scene_name"),
-                    "candidate_events": stage_result.parsed_proposal.get("candidate_events", []),
-                }
-            else:
-                scene_fallback_reason = stage_result.fallback_reason
-        elif stage_result.stage_name == "npc":
-            if stage_result.accepted and stage_result.parsed_proposal:
-                npc_reactions_for_json = stage_result.parsed_proposal.get("npc_reactions", [])
-            else:
-                npc_fallback_reason = stage_result.fallback_reason
-    
-    # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
-    final_narration = narration
-    for stage_result in llm_stage_results:
-        if stage_result.stage_name == "narration" and stage_result.accepted:
-            if stage_result.parsed_proposal and "text" in stage_result.parsed_proposal:
-                final_narration = stage_result.parsed_proposal["text"]
-                event_log_repo = EventLogRepository(db)
-                event_log_repo.update(event.id, {"narrative_text": final_narration})
-    
-    # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
-    llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
-    input_intent_stage_json = input_intent_result.to_result_json_dict()
-    updated_result_json = {
-        "transaction_id": transaction_id,
-        "recommended_actions": final_recommended_actions,
-        "state_deltas": state_deltas,
-        "action_type": action_type,
-        "movement_success": movement_result.success if movement_result else None,
-        "new_location_id": movement_result.new_location_id if movement_result else None,
-        "world_time_before": world_time_before,
-        "world_time": world_time,
-        "input_intent": input_intent_metadata,
-        "input_intent_fallback_reason": input_intent_fallback_reason,
-        "llm_stages": llm_stages_json,
-        "input_intent_stage": input_intent_stage_json,
-        "scene_event_summary": scene_event_summary,
-        "scene_fallback_reason": scene_fallback_reason,
-        "npc_reactions": npc_reactions_for_json,
-        "npc_fallback_reason": npc_fallback_reason,
-        "world_progression": world_progression,
-        "world_fallback_reason": world_fallback_reason,
-    }
-    event_log_repo = EventLogRepository(db)
-    event_log_repo.update(event.id, {"result_json": updated_result_json})
-    
-    # Step 18: Update session state with durable time and location changes
-    session_state_update = {
-        "session_id": session_id,
-        "current_time": _format_world_time(world_time),
-        "time_phase": world_time["period"],
-    }
-    if movement_result and movement_result.success and movement_result.new_location_id:
-        session_state_update["current_location_id"] = movement_result.new_location_id
-    session_state_repo.create_or_update(session_state_update)
-    
-    # Step 19: Update last played
-    session_repo.update_last_played(session_id)
-    
-    # Step 20: Persist perspective-aware memories (non-fatal)
-    memory_result = None
-    if _is_memory_stage_enabled(db):
-        memory_result = _persist_turn_memories(
+                # Blocked movement - no state mutation
+                state_deltas["blocked_reason"] = movement_result.blocked_reason
+        
+        # Step 8: Check quest progression
+        if movement_result and movement_result.success:
+            try:
+                quest_results = check_quest_progression(
+                    db=db,
+                    session_id=session_id,
+                    action_context={
+                        "action_type": "movement",
+                        "target_location_code": movement_result.new_location_code,
+                    },
+                )
+                # Quest progression results can be used for narration context
+                state_deltas["quest_progression"] = [
+                    {"quest_name": r.quest_progress.quest_name, "message": r.message}
+                    for r in quest_results
+                    if r.triggered and r.quest_progress
+                ]
+            except QuestProgressionError:
+                # Quest progression failure should not block the turn
+                pass
+        
+        # Step 9: Generate recommended actions (deterministic fallback)
+        session_state = session_state_repo.get_by_session(session_id)
+        
+        current_location_id = None
+        if session_state:
+            current_location_id = session_state.current_location_id
+        
+        if movement_result and movement_result.success:
+            current_location_id = movement_result.new_location_id
+        
+        deterministic_recommended_actions = generate_recommended_actions(
             db=db,
             session_id=session_id,
-            turn_no=turn_no,
-            event_id=event.id,
-            action_type=action_type,
+            location_id=current_location_id,
+        )
+        
+        # Step 10: Build template narration (fallback-safe placeholder)
+        narration = _build_narration(
             player_input=player_input,
+            action_type=action_type,
+            movement_result=movement_result,
+            canonical_state=canonical_state,
+        )
+        
+        # Step 11: Advance world time for the committed turn
+        world_time_before = _get_world_time(session_state)
+        world_time = _advance_world_time(world_time_before)
+        
+        # Step 12: Get player state
+        player_state = _get_player_state(canonical_state, current_location_id)
+        
+        # Step 13: Commit turn to DB with template narration (durable commit first)
+        try:
+            event = commit_turn(
+                db=db,
+                session_id=session_id,
+                turn_no=turn_no,
+                event_type="player_turn",
+                input_text=player_input,
+                narrative_text=narration,
+                result_json={
+                    "transaction_id": transaction_id,
+                    "recommended_actions": deterministic_recommended_actions,
+                    "state_deltas": state_deltas,
+                    "action_type": action_type,
+                    "movement_success": movement_result.success if movement_result else None,
+                    "new_location_id": movement_result.new_location_id if movement_result else None,
+                    "world_time_before": world_time_before,
+                    "world_time": world_time,
+                    "input_intent": input_intent_metadata,
+                    "input_intent_fallback_reason": input_intent_fallback_reason,
+                    "llm_stages": [],
+                },
+                idempotency_key=idempotency_key,
+            )
+        except TurnAllocationError as e:
+            raise TurnServiceError(
+                f"Failed to commit turn: {str(e)}",
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        
+        # Step 14: Execute LLM stages (scene before narration)
+        llm_stage_results = _execute_llm_stages(
+            db=db,
+            session_id=session_id,
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            player_input=player_input,
+            action_type=action_type,
             movement_result=movement_result,
             state_deltas=state_deltas,
             current_location_id=current_location_id,
-            npc_reactions=npc_reactions_for_json,
-            world_progression=world_progression,
-            scene_event_summary=scene_event_summary,
+            use_mock=use_mock,
         )
         
-        if memory_result:
-            updated_result_json["memory_persistence"] = {
-                "summaries_created": memory_result.get("summaries_created", 0),
-                "facts_created": memory_result.get("facts_created", 0),
-                "npc_memories_created": memory_result.get("npc_memories_created", 0),
-                "fallback_reason": memory_result.get("fallback_reason"),
-            }
-            event_log_repo.update(event.id, {"result_json": updated_result_json})
+        # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
+        final_recommended_actions = deterministic_recommended_actions
+        scene_event_summary: Optional[Dict[str, Any]] = None
+        scene_fallback_reason: Optional[str] = None
+        npc_reactions_for_json: List[Dict[str, Any]] = []
+        npc_fallback_reason: Optional[str] = None
+        world_progression: Optional[Dict[str, Any]] = None
+        world_fallback_reason: Optional[str] = None
+        
+        for stage_result in llm_stage_results:
+            if stage_result.stage_name == "world":
+                if stage_result.accepted and stage_result.parsed_proposal:
+                    world_progression = stage_result.parsed_proposal
+                else:
+                    world_fallback_reason = stage_result.fallback_reason
+            elif stage_result.stage_name == "scene":
+                if stage_result.accepted and stage_result.parsed_proposal:
+                    scene_recommended = stage_result.parsed_proposal.get("recommended_actions", [])
+                    if scene_recommended and isinstance(scene_recommended, list):
+                        final_recommended_actions = scene_recommended[:4]
+                    scene_event_summary = {
+                        "scene_id": stage_result.parsed_proposal.get("scene_id"),
+                        "scene_name": stage_result.parsed_proposal.get("scene_name"),
+                        "candidate_events": stage_result.parsed_proposal.get("candidate_events", []),
+                    }
+                else:
+                    scene_fallback_reason = stage_result.fallback_reason
+            elif stage_result.stage_name == "npc":
+                if stage_result.accepted and stage_result.parsed_proposal:
+                    npc_reactions_for_json = stage_result.parsed_proposal.get("npc_reactions", [])
+                else:
+                    npc_fallback_reason = stage_result.fallback_reason
+        
+        # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
+        final_narration = narration
+        for stage_result in llm_stage_results:
+            if stage_result.stage_name == "narration" and stage_result.accepted:
+                if stage_result.parsed_proposal and "text" in stage_result.parsed_proposal:
+                    final_narration = stage_result.parsed_proposal["text"]
+                    event_log_repo = EventLogRepository(db)
+                    event_log_repo.update(event.id, {"narrative_text": final_narration})
+        
+        # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
+        llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
+        input_intent_stage_json = input_intent_result.to_result_json_dict()
+        updated_result_json = {
+            "transaction_id": transaction_id,
+            "recommended_actions": final_recommended_actions,
+            "state_deltas": state_deltas,
+            "action_type": action_type,
+            "movement_success": movement_result.success if movement_result else None,
+            "new_location_id": movement_result.new_location_id if movement_result else None,
+            "world_time_before": world_time_before,
+            "world_time": world_time,
+            "input_intent": input_intent_metadata,
+            "input_intent_fallback_reason": input_intent_fallback_reason,
+            "llm_stages": llm_stages_json,
+            "input_intent_stage": input_intent_stage_json,
+            "scene_event_summary": scene_event_summary,
+            "scene_fallback_reason": scene_fallback_reason,
+            "npc_reactions": npc_reactions_for_json,
+            "npc_fallback_reason": npc_fallback_reason,
+            "world_progression": world_progression,
+            "world_fallback_reason": world_fallback_reason,
+        }
+        event_log_repo = EventLogRepository(db)
+        event_log_repo.update(event.id, {"result_json": updated_result_json})
+        
+        # Step 18: Update session state with durable time and location changes
+        session_state_update = {
+            "session_id": session_id,
+            "current_time": _format_world_time(world_time),
+            "time_phase": world_time["period"],
+        }
+        if movement_result and movement_result.success and movement_result.new_location_id:
+            session_state_update["current_location_id"] = movement_result.new_location_id
+        session_state_repo.create_or_update(session_state_update)
+        
+        # Step 19: Update last played
+        session_repo.update_last_played(session_id)
+        
+        # Step 20: Persist perspective-aware memories (non-fatal)
+        memory_result = None
+        if _is_memory_stage_enabled(db):
+            memory_result = _persist_turn_memories(
+                db=db,
+                session_id=session_id,
+                turn_no=turn_no,
+                event_id=event.id,
+                action_type=action_type,
+                player_input=player_input,
+                movement_result=movement_result,
+                state_deltas=state_deltas,
+                current_location_id=current_location_id,
+                npc_reactions=npc_reactions_for_json,
+                world_progression=world_progression,
+                scene_event_summary=scene_event_summary,
+            )
+            
+            if memory_result:
+                updated_result_json["memory_persistence"] = {
+                    "summaries_created": memory_result.get("summaries_created", 0),
+                    "facts_created": memory_result.get("facts_created", 0),
+                    "npc_memories_created": memory_result.get("npc_memories_created", 0),
+                    "fallback_reason": memory_result.get("fallback_reason"),
+                }
+                event_log_repo.update(event.id, {"result_json": updated_result_json})
+        
+        # Step 21: Mark transaction as committed
+        turn_transaction_repo.update_status(
+            transaction_id,
+            status="committed",
+            world_time_after=_format_world_time(world_time),
+        )
+        
+        # Step 22: Return result
+        return TurnResult(
+            turn_no=turn_no,
+            narration=final_narration,
+            recommended_actions=final_recommended_actions,
+            state_deltas=state_deltas,
+            world_time=world_time,
+            player_state=player_state,
+            transaction_id=transaction_id,
+            events_committed=1,
+            actions_committed=1 if movement_result and movement_result.success else 0,
+            validation_passed=True,
+            movement_result=movement_result,
+            is_new_turn=is_new,
+            llm_stage_results=[input_intent_result] + llm_stage_results,
+        )
     
-    # Step 21: Return result
-    return TurnResult(
-        turn_no=turn_no,
-        narration=final_narration,
-        recommended_actions=final_recommended_actions,
-        state_deltas=state_deltas,
-        world_time=world_time,
-        player_state=player_state,
-        transaction_id=transaction_id,
-        events_committed=1,
-        actions_committed=1 if movement_result and movement_result.success else 0,
-        validation_passed=True,
-        movement_result=movement_result,
-        is_new_turn=is_new,
-        llm_stage_results=[input_intent_result] + llm_stage_results,
-    )
+    except Exception as e:
+        # Mark transaction as aborted on any failure
+        turn_transaction_repo.update_status(
+            transaction_id,
+            status="aborted",
+            error_json={"error": str(e)[:500], "type": type(e).__name__},
+        )
+        raise
 
 
 def _get_existing_turn_result(

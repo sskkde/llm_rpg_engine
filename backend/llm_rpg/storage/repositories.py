@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, TypeVar
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
@@ -30,6 +31,7 @@ from .models import (
     CombatRoundModel,
     CombatActionModel,
     ScheduledEventModel,
+    TurnTransactionModel,
 )
 
 T = TypeVar("T")
@@ -646,3 +648,47 @@ class SystemSettingsRepository(BaseRepository):
         self.db.commit()
         self.db.refresh(settings)
         return settings
+
+
+class TurnTransactionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, TurnTransactionModel)
+
+    def get_by_session(self, session_id: str) -> List[TurnTransactionModel]:
+        return self.db.query(TurnTransactionModel).filter(
+            TurnTransactionModel.session_id == session_id
+        ).order_by(TurnTransactionModel.turn_no).all()
+
+    def get_by_session_and_turn(self, session_id: str, turn_no: int) -> Optional[TurnTransactionModel]:
+        return self.db.query(TurnTransactionModel).filter(
+            and_(
+                TurnTransactionModel.session_id == session_id,
+                TurnTransactionModel.turn_no == turn_no
+            )
+        ).first()
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> Optional[TurnTransactionModel]:
+        return self.db.query(TurnTransactionModel).filter(
+            TurnTransactionModel.idempotency_key == idempotency_key
+        ).first()
+
+    def update_status(
+        self, 
+        transaction_id: str, 
+        status: str,
+        error_json: Optional[Dict[str, Any]] = None,
+        world_time_after: Optional[str] = None,
+    ) -> Optional[TurnTransactionModel]:
+        from datetime import datetime
+        update_data: Dict[str, Any] = {"status": status}
+        
+        if status == "committed":
+            update_data["committed_at"] = datetime.now()
+            if world_time_after is not None:
+                update_data["world_time_after"] = world_time_after
+        elif status == "aborted":
+            update_data["aborted_at"] = datetime.now()
+            if error_json:
+                update_data["error_json"] = error_json
+        
+        return self.update(transaction_id, update_data)

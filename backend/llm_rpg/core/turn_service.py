@@ -54,6 +54,7 @@ from ..storage.repositories import (
     MemorySummaryRepository,
     MemoryFactRepository,
     TurnTransactionRepository,
+    GameEventRepository,
 )
 from ..models.states import CanonicalState
 
@@ -2482,6 +2483,28 @@ def execute_turn_service(
                 turn_no=turn_no,
             )
         
+        # Step 13b: Create game_event for player_input
+        _create_game_event(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            event_type="player_input",
+            actor_id="player",
+            target_ids=[current_location_id] if current_location_id else None,
+            visibility_scope="player_visible",
+            public_payload={
+                "input_text": player_input,
+                "action_type": action_type,
+                "target": target,
+                "input_intent": input_intent_metadata,
+            },
+            result_json={
+                "movement_success": movement_result.success if movement_result else None,
+                "new_location_id": movement_result.new_location_id if movement_result else None,
+            },
+        )
+        
         # Step 14: Execute LLM stages (scene before narration)
         llm_stage_results = _execute_llm_stages(
             db=db,
@@ -2537,6 +2560,97 @@ def execute_turn_service(
                     final_narration = stage_result.parsed_proposal["text"]
                     event_log_repo = EventLogRepository(db)
                     event_log_repo.update(event.id, {"narrative_text": final_narration})
+        
+        # Step 16b: Create game_events for world_tick, scene, NPC, and narration
+        if world_progression:
+            candidate_events = world_progression.get("candidate_events", [])
+            for i, world_event in enumerate(candidate_events[:3]):
+                _create_game_event(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type="world_tick",
+                    actor_id="world_engine",
+                    target_ids=None,
+                    visibility_scope=world_event.get("visibility", "player_visible"),
+                    public_payload={
+                        "event_type": world_event.get("event_type"),
+                        "description": world_event.get("description"),
+                        "importance": world_event.get("importance", 0.5),
+                    },
+                    result_json={"effects": world_event.get("effects", {})},
+                )
+        
+        if scene_event_summary:
+            _create_game_event(
+                db=db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                event_type="scene",
+                actor_id="scene_engine",
+                target_ids=[scene_event_summary.get("scene_id")] if scene_event_summary.get("scene_id") else None,
+                visibility_scope="player_visible",
+                public_payload={
+                    "scene_id": scene_event_summary.get("scene_id"),
+                    "scene_name": scene_event_summary.get("scene_name"),
+                    "candidate_events": scene_event_summary.get("candidate_events", []),
+                },
+                result_json={"fallback_reason": scene_fallback_reason},
+            )
+        
+        for npc_reaction in npc_reactions_for_json:
+            npc_id = npc_reaction.get("npc_id")
+            npc_name = npc_reaction.get("npc_name")
+            action_type_npc = npc_reaction.get("action_type")
+            summary = npc_reaction.get("summary")
+            visible_to_player = npc_reaction.get("visible_to_player", True)
+            
+            _create_game_event(
+                db=db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                event_type="npc_decision",
+                actor_id=npc_id,
+                target_ids=["player"] if visible_to_player else None,
+                visibility_scope="player_visible" if visible_to_player else "hidden",
+                public_payload={
+                    "npc_name": npc_name,
+                    "action_type": action_type_npc,
+                    "summary": summary,
+                } if visible_to_player else None,
+                private_payload={
+                    "npc_name": npc_name,
+                    "action_type": action_type_npc,
+                    "summary": summary,
+                    "visible_motivation": npc_reaction.get("visible_motivation"),
+                } if not visible_to_player else None,
+                result_json={
+                    "accepted": npc_reaction.get("accepted"),
+                    "fallback_reason": npc_reaction.get("fallback_reason"),
+                },
+            )
+        
+        _create_game_event(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            event_type="narration",
+            actor_id="narrator",
+            target_ids=["player"],
+            visibility_scope="player_visible",
+            public_payload={
+                "text": final_narration,
+                "action_type": action_type,
+            },
+            result_json={
+                "world_time": world_time,
+                "location_id": current_location_id,
+            },
+        )
         
         # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
         llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
@@ -3109,3 +3223,46 @@ def _retrieve_facts_for_context(
         }
         for f in sorted_facts
     ]
+
+
+def _create_game_event(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    event_type: str,
+    actor_id: Optional[str] = None,
+    target_ids: Optional[List[str]] = None,
+    visibility_scope: Optional[str] = "player_visible",
+    public_payload: Optional[Dict[str, Any]] = None,
+    private_payload: Optional[Dict[str, Any]] = None,
+    result_json: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Create a game_event record for event sourcing.
+    
+    Returns the created event ID, or None on failure.
+    """
+    from ..storage.models import generate_uuid
+    
+    game_event_repo = GameEventRepository(db)
+    
+    try:
+        event = game_event_repo.create({
+            "id": generate_uuid(),
+            "transaction_id": transaction_id,
+            "session_id": session_id,
+            "turn_no": turn_no,
+            "event_type": event_type,
+            "actor_id": actor_id,
+            "target_ids_json": target_ids,
+            "visibility_scope": visibility_scope,
+            "public_payload_json": public_payload,
+            "private_payload_json": private_payload,
+            "result_json": result_json,
+            "occurred_at": datetime.now(),
+        })
+        return event.id
+    except Exception as e:
+        logger.warning("Failed to create game_event: %s", e)
+        return None

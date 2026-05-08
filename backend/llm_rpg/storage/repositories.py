@@ -32,6 +32,7 @@ from .models import (
     CombatActionModel,
     ScheduledEventModel,
     TurnTransactionModel,
+    GameEventModel,
 )
 
 T = TypeVar("T")
@@ -692,3 +693,63 @@ class TurnTransactionRepository(BaseRepository):
                 update_data["error_json"] = error_json
         
         return self.update(transaction_id, update_data)
+
+
+class GameEventRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, GameEventModel)
+
+    def get_by_transaction(self, transaction_id: str) -> List[GameEventModel]:
+        """Get all game events for a specific transaction."""
+        return self.db.query(GameEventModel).filter(
+            GameEventModel.transaction_id == transaction_id
+        ).order_by(GameEventModel.occurred_at).all()
+
+    def get_by_session(self, session_id: str, skip: int = 0, limit: int = 100) -> List[GameEventModel]:
+        """Get all game events for a session, ordered by turn and time."""
+        return self.db.query(GameEventModel).filter(
+            GameEventModel.session_id == session_id
+        ).order_by(GameEventModel.turn_no, GameEventModel.occurred_at).offset(skip).limit(limit).all()
+
+    def get_by_type(
+        self, 
+        session_id: str, 
+        event_type: str,
+        skip: int = 0, 
+        limit: int = 100
+    ) -> List[GameEventModel]:
+        """Get game events by type for a session."""
+        return self.db.query(GameEventModel).filter(
+            and_(
+                GameEventModel.session_id == session_id,
+                GameEventModel.event_type == event_type
+            )
+        ).order_by(GameEventModel.turn_no, GameEventModel.occurred_at).offset(skip).limit(limit).all()
+
+    def get_by_session_and_turn(
+        self, 
+        session_id: str, 
+        turn_no: int
+    ) -> List[GameEventModel]:
+        """Get all game events for a specific turn in a session."""
+        return self.db.query(GameEventModel).filter(
+            and_(
+                GameEventModel.session_id == session_id,
+                GameEventModel.turn_no == turn_no
+            )
+        ).order_by(GameEventModel.occurred_at).all()
+
+    def get_by_visibility(
+        self,
+        session_id: str,
+        visibility_scope: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[GameEventModel]:
+        """Get game events by visibility scope for a session."""
+        return self.db.query(GameEventModel).filter(
+            and_(
+                GameEventModel.session_id == session_id,
+                GameEventModel.visibility_scope == visibility_scope
+            )
+        ).order_by(GameEventModel.turn_no, GameEventModel.occurred_at).offset(skip).limit(limit).all()

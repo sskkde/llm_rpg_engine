@@ -163,6 +163,7 @@ class PromptTemplateModel(Base):
     created_at = Column(DateTime, default=datetime.now)
 
     world = relationship("WorldModel", back_populates="prompt_templates")
+    llm_stage_results = relationship("LLMStageResultModel", back_populates="prompt_template")
 
 
 class UserModel(Base):
@@ -244,6 +245,7 @@ class SessionModel(Base):
     model_call_logs = relationship("ModelCallLogModel", back_populates="session")
     combat_sessions = relationship("CombatSessionModel", back_populates="session")
     scheduled_events = relationship("ScheduledEventModel", back_populates="session")
+    turn_transactions = relationship("TurnTransactionModel", back_populates="session")
 
 
 class SessionStateModel(Base):
@@ -484,3 +486,136 @@ class ScheduledEventModel(Base):
     event_template = relationship("EventTemplateModel", back_populates="scheduled_events")
 
     __table_args__ = (Index("idx_scheduled_events_lookup", "session_id", "trigger_time", "status"),)
+
+
+class TurnTransactionModel(Base):
+    __tablename__ = "turn_transactions"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    turn_no = Column(Integer, nullable=False)
+    idempotency_key = Column(String, nullable=False, unique=True)
+    status = Column(String, nullable=False)
+    player_input = Column(Text, nullable=True)
+    world_time_before = Column(String, nullable=True)
+    world_time_after = Column(String, nullable=True)
+    started_at = Column(DateTime, nullable=False)
+    committed_at = Column(DateTime, nullable=True)
+    aborted_at = Column(DateTime, nullable=True)
+    error_json = Column(JSON, nullable=True)
+
+    session = relationship("SessionModel", back_populates="turn_transactions")
+    game_events = relationship("GameEventModel", back_populates="transaction")
+    state_deltas = relationship("StateDeltaModel", back_populates="transaction")
+    llm_stage_results = relationship("LLMStageResultModel", back_populates="transaction")
+    validation_reports = relationship("ValidationReportModel", back_populates="transaction")
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "turn_no"),
+        Index("idx_turn_transactions_session", "session_id", "turn_no"),
+        Index("idx_turn_transactions_status", "session_id", "status"),
+    )
+
+
+class GameEventModel(Base):
+    __tablename__ = "game_events"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    transaction_id = Column(String, ForeignKey("turn_transactions.id"), nullable=False)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    turn_no = Column(Integer, nullable=False)
+    event_type = Column(String, nullable=False)
+    actor_id = Column(String, nullable=True)
+    target_ids_json = Column(JSON, nullable=True)
+    visibility_scope = Column(String, nullable=True)
+    public_payload_json = Column(JSON, nullable=True)
+    private_payload_json = Column(JSON, nullable=True)
+    result_json = Column(JSON, nullable=True)
+    occurred_at = Column(DateTime, nullable=False)
+
+    transaction = relationship("TurnTransactionModel", back_populates="game_events")
+    state_deltas = relationship("StateDeltaModel", back_populates="source_event")
+
+    __table_args__ = (
+        Index("idx_game_events_transaction", "transaction_id"),
+        Index("idx_game_events_session_turn", "session_id", "turn_no"),
+        Index("idx_game_events_type", "session_id", "event_type"),
+    )
+
+
+class StateDeltaModel(Base):
+    __tablename__ = "state_deltas"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    transaction_id = Column(String, ForeignKey("turn_transactions.id"), nullable=False)
+    source_event_id = Column(String, ForeignKey("game_events.id"), nullable=True)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    turn_no = Column(Integer, nullable=False)
+    path = Column(String, nullable=False)
+    operation = Column(String, nullable=False)
+    old_value_json = Column(JSON, nullable=True)
+    new_value_json = Column(JSON, nullable=True)
+    visibility_scope = Column(String, nullable=True)
+    validation_status = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+
+    transaction = relationship("TurnTransactionModel", back_populates="state_deltas")
+    source_event = relationship("GameEventModel", back_populates="state_deltas")
+
+    __table_args__ = (
+        Index("idx_state_deltas_transaction", "transaction_id"),
+        Index("idx_state_deltas_session_turn", "session_id", "turn_no"),
+        Index("idx_state_deltas_path", "session_id", "path"),
+    )
+
+
+class LLMStageResultModel(Base):
+    __tablename__ = "llm_stage_results"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    transaction_id = Column(String, ForeignKey("turn_transactions.id"), nullable=False)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    turn_no = Column(Integer, nullable=False)
+    stage_name = Column(String, nullable=False)
+    provider = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+    prompt_template_id = Column(String, ForeignKey("prompt_templates.id"), nullable=True)
+    request_payload_ref = Column(String, nullable=True)
+    raw_output_ref = Column(String, nullable=True)
+    parsed_proposal_json = Column(JSON, nullable=True)
+    accepted = Column(Boolean, nullable=True)
+    fallback_reason = Column(String, nullable=True)
+    validation_errors_json = Column(JSON, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+
+    transaction = relationship("TurnTransactionModel", back_populates="llm_stage_results")
+    prompt_template = relationship("PromptTemplateModel", back_populates="llm_stage_results")
+
+    __table_args__ = (
+        Index("idx_llm_stage_results_transaction", "transaction_id"),
+        Index("idx_llm_stage_results_session_turn", "session_id", "turn_no"),
+        Index("idx_llm_stage_results_stage", "session_id", "stage_name"),
+    )
+
+
+class ValidationReportModel(Base):
+    __tablename__ = "validation_reports"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    transaction_id = Column(String, ForeignKey("turn_transactions.id"), nullable=False)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    turn_no = Column(Integer, nullable=False)
+    scope = Column(String, nullable=False)
+    target_ref_id = Column(String, nullable=True)
+    is_valid = Column(Boolean, nullable=False)
+    errors_json = Column(JSON, nullable=True)
+    warnings_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+
+    transaction = relationship("TurnTransactionModel", back_populates="validation_reports")
+
+    __table_args__ = (
+        Index("idx_validation_reports_transaction", "transaction_id"),
+        Index("idx_validation_reports_session_turn", "session_id", "turn_no"),
+    )

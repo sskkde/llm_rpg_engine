@@ -40,6 +40,7 @@ from .turn_allocation import (
 from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
 from .quest_progression import check_quest_progression, QuestProgressionError
+from .validator import Validator, ValidationContext
 
 from ..storage.models import SessionModel, EventLogModel, MemorySummaryModel, MemoryFactModel
 from ..storage.repositories import (
@@ -2361,6 +2362,14 @@ def execute_turn_service(
         session_state = session_state_repo.get_by_session(session_id)
         current_location_id = session_state.current_location_id if session_state else None
         
+        # Create ValidationContext for this turn
+        validation_context = ValidationContext.create(
+            db=db,
+            session_id=session_id,
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+        )
+        
         # Step 5: Execute input intent LLM stage (before deterministic parsing)
         input_intent_result = _execute_input_intent_stage(
             db=db,
@@ -2371,6 +2380,41 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
         )
+        
+        # Validate InputIntentProposal before using it
+        if input_intent_result.accepted and input_intent_result.parsed_proposal:
+            from ..models.proposals import InputIntentProposal
+            try:
+                intent_proposal = InputIntentProposal(
+                    intent_type=input_intent_result.parsed_proposal.get("intent_type", "unknown"),
+                    target=input_intent_result.parsed_proposal.get("target"),
+                    target_type=input_intent_result.parsed_proposal.get("target_type"),
+                    risk_level=input_intent_result.parsed_proposal.get("risk_level", "low"),
+                    confidence=input_intent_result.parsed_proposal.get("confidence", 0.5),
+                    audit=type('obj', (object,), {
+                        'proposal_type': 'input_intent',
+                        'source_engine': 'input_engine',
+                    })(),
+                )
+                is_valid_intent, intent_errors, intent_warnings = _validate_proposal(
+                    db=db,
+                    proposal=intent_proposal,
+                    proposal_type="input_intent",
+                    validation_context=validation_context,
+                    transaction_id=transaction_id,
+                )
+                if not is_valid_intent:
+                    logger.warning("InputIntentProposal validation failed: %s", intent_errors)
+                    input_intent_result = LLMStageResult(
+                        stage_name="input_intent",
+                        enabled=input_intent_result.enabled,
+                        timeout=input_intent_result.timeout,
+                        accepted=False,
+                        fallback_reason=f"validation_failed: {', '.join(intent_errors[:3])}",
+                        validation_errors=intent_errors,
+                    )
+            except Exception as e:
+                logger.warning("Failed to validate InputIntentProposal: %s", e)
         
         # Step 6: Parse player input and determine action type
         # Use LLM intent if accepted, otherwise fall back to deterministic parser
@@ -2521,6 +2565,150 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
         )
+        
+        # Step 14b: Validate all proposals before committing
+        from ..models.proposals import (
+            WorldTickProposal, SceneEventProposal, NPCActionProposal, NarrationProposal,
+            CandidateEvent, StateDeltaCandidate, ProposalAuditMetadata, ProposalType, ProposalSource,
+        )
+        
+        for stage_result in llm_stage_results:
+            if not stage_result.accepted or not stage_result.parsed_proposal:
+                continue
+            
+            if stage_result.stage_name == "world":
+                try:
+                    candidate_events = [
+                        CandidateEvent(
+                            event_type=e.get("event_type", "unknown"),
+                            description=e.get("description", ""),
+                            effects=e.get("effects", {}),
+                            importance=e.get("importance", 0.5),
+                        )
+                        for e in stage_result.parsed_proposal.get("candidate_events", [])
+                    ]
+                    state_deltas_list = [
+                        StateDeltaCandidate(
+                            path=d.get("path", ""),
+                            operation=d.get("operation", "set"),
+                            value=d.get("value"),
+                        )
+                        for d in stage_result.parsed_proposal.get("state_deltas", [])
+                    ]
+                    world_proposal = WorldTickProposal(
+                        time_description=stage_result.parsed_proposal.get("time_description", ""),
+                        candidate_events=candidate_events,
+                        state_deltas=state_deltas_list,
+                        audit=ProposalAuditMetadata(
+                            proposal_type=ProposalType.WORLD_TICK,
+                            source_engine=ProposalSource.WORLD_ENGINE,
+                        ),
+                    )
+                    is_valid, errors, warnings = _validate_proposal(
+                        db=db,
+                        proposal=world_proposal,
+                        proposal_type="world_tick",
+                        validation_context=validation_context,
+                        transaction_id=transaction_id,
+                    )
+                    if not is_valid:
+                        logger.warning("WorldTickProposal validation failed: %s", errors)
+                        stage_result.accepted = False
+                        stage_result.validation_errors = errors
+                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
+                except Exception as e:
+                    logger.warning("Failed to validate WorldTickProposal: %s", e)
+                    
+            elif stage_result.stage_name == "scene":
+                try:
+                    scene_id = stage_result.parsed_proposal.get("scene_id", "unknown")
+                    candidate_events = [
+                        CandidateEvent(
+                            event_type=e.get("event_type", "unknown"),
+                            description=e.get("description", ""),
+                        )
+                        for e in stage_result.parsed_proposal.get("candidate_events", [])
+                    ]
+                    scene_proposal = SceneEventProposal(
+                        scene_id=scene_id,
+                        scene_name=stage_result.parsed_proposal.get("scene_name"),
+                        candidate_events=candidate_events,
+                        recommended_actions=stage_result.parsed_proposal.get("recommended_actions", []),
+                        audit=ProposalAuditMetadata(
+                            proposal_type=ProposalType.SCENE_EVENT,
+                            source_engine=ProposalSource.SCENE_ENGINE,
+                        ),
+                    )
+                    is_valid, errors, warnings = _validate_proposal(
+                        db=db,
+                        proposal=scene_proposal,
+                        proposal_type="scene_event",
+                        validation_context=validation_context,
+                        transaction_id=transaction_id,
+                    )
+                    if not is_valid:
+                        logger.warning("SceneEventProposal validation failed: %s", errors)
+                        stage_result.accepted = False
+                        stage_result.validation_errors = errors
+                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
+                except Exception as e:
+                    logger.warning("Failed to validate SceneEventProposal: %s", e)
+                    
+            elif stage_result.stage_name == "npc":
+                npc_reactions = stage_result.parsed_proposal.get("npc_reactions", [])
+                for reaction in npc_reactions:
+                    if not reaction.get("accepted"):
+                        continue
+                    try:
+                        npc_proposal = NPCActionProposal(
+                            npc_id=reaction.get("npc_id", "unknown"),
+                            npc_name=reaction.get("npc_name"),
+                            action_type=reaction.get("action_type", "idle"),
+                            summary=reaction.get("summary", ""),
+                            visible_motivation=reaction.get("visible_motivation", ""),
+                            audit=ProposalAuditMetadata(
+                                proposal_type=ProposalType.NPC_ACTION,
+                                source_engine=ProposalSource.NPC_ENGINE,
+                            ),
+                        )
+                        is_valid, errors, warnings = _validate_proposal(
+                            db=db,
+                            proposal=npc_proposal,
+                            proposal_type="npc_action",
+                            validation_context=validation_context,
+                            transaction_id=transaction_id,
+                        )
+                        if not is_valid:
+                            logger.warning("NPCActionProposal validation failed for %s: %s", reaction.get("npc_id"), errors)
+                            reaction["accepted"] = False
+                            reaction["fallback_reason"] = f"validation_failed: {', '.join(errors[:3])}"
+                    except Exception as e:
+                        logger.warning("Failed to validate NPCActionProposal: %s", e)
+                        
+            elif stage_result.stage_name == "narration":
+                try:
+                    narration_text = stage_result.parsed_proposal.get("text", "")
+                    narration_proposal = NarrationProposal(
+                        text=narration_text,
+                        audit=ProposalAuditMetadata(
+                            proposal_type=ProposalType.NARRATION,
+                            source_engine=ProposalSource.NARRATION_ENGINE,
+                        ),
+                    )
+                    is_valid, errors, warnings = _validate_proposal(
+                        db=db,
+                        proposal=narration_proposal,
+                        proposal_type="narration",
+                        validation_context=validation_context,
+                        transaction_id=transaction_id,
+                    )
+                    if not is_valid:
+                        logger.warning("NarrationProposal validation failed: %s", errors)
+                        stage_result.accepted = False
+                        stage_result.validation_errors = errors
+                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
+                except Exception as e:
+                    logger.warning("Failed to validate NarrationProposal: %s", e)
         
         # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
         final_recommended_actions = deterministic_recommended_actions
@@ -3536,6 +3724,116 @@ def _create_validation_report(
     except Exception as e:
         logger.warning("Failed to create validation_report: %s", e)
         return None
+
+
+def _validate_proposal(
+    db: Session,
+    proposal: Any,
+    proposal_type: str,
+    validation_context: ValidationContext,
+    transaction_id: str,
+) -> Tuple[bool, List[str], List[str]]:
+    """
+    Validate a proposal using ValidationContext and Validator.
+    
+    This function provides unified validation for all proposal types:
+    - InputIntentProposal
+    - WorldTickProposal
+    - SceneEventProposal
+    - NPCActionProposal
+    - NarrationProposal
+    
+    Validation results are recorded in validation_reports table.
+    
+    Args:
+        db: Database session
+        proposal: The proposal object to validate
+        proposal_type: Type of proposal (input_intent, world_tick, scene_event, npc_action, narration)
+        validation_context: ValidationContext with state and metadata
+        transaction_id: Transaction ID for tracking
+        
+    Returns:
+        Tuple of (is_valid, errors, warnings)
+    """
+    validator = Validator()
+    errors: List[str] = []
+    warnings: List[str] = []
+    
+    # Null check
+    if proposal is None:
+        errors.append(f"{proposal_type} proposal is None")
+        _create_validation_report(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=validation_context.session_id,
+            turn_no=validation_context.turn_no,
+            scope=f"proposal_{proposal_type}",
+            is_valid=False,
+            errors_json=errors,
+            warnings_json=warnings,
+        )
+        return (False, errors, warnings)
+    
+    # Type-specific validation
+    if proposal_type == "input_intent":
+        is_valid, type_errors = _validate_input_intent_proposal(proposal, {})
+        errors.extend(type_errors)
+        
+    elif proposal_type == "world_tick":
+        is_valid, type_errors = _validate_world_proposal(proposal)
+        errors.extend(type_errors)
+        
+    elif proposal_type == "scene_event":
+        is_valid, type_errors = _validate_scene_proposal(proposal, {})
+        errors.extend(type_errors)
+        
+    elif proposal_type == "npc_action":
+        is_valid, type_errors = _validate_npc_action(proposal, {})
+        errors.extend(type_errors)
+        
+    elif proposal_type == "narration":
+        # Narration validation: check text is non-empty and no forbidden info
+        narration_text = getattr(proposal, "text", "") if hasattr(proposal, "text") else ""
+        if not narration_text or not narration_text.strip():
+            errors.append("narration text is empty")
+        # Check for forbidden info leaks
+        forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+        for pattern in forbidden_patterns:
+            if pattern in narration_text:
+                errors.append(f"forbidden pattern in narration: {pattern}")
+    
+    else:
+        errors.append(f"unknown proposal type: {proposal_type}")
+    
+    # Validate state deltas if present
+    if hasattr(proposal, "state_deltas") and proposal.state_deltas:
+        for delta in proposal.state_deltas:
+            if hasattr(delta, "path") and hasattr(delta, "value"):
+                delta_result = validator.validate_state_delta(
+                    delta_path=delta.path,
+                    old_value=None,
+                    new_value=delta.value,
+                    state=validation_context.canonical_state,
+                    context=validation_context,
+                )
+                if not delta_result.is_valid:
+                    errors.extend(delta_result.errors)
+                warnings.extend(delta_result.warnings)
+    
+    # Record validation result
+    is_valid_final = len(errors) == 0
+    _create_validation_report(
+        db=db,
+        transaction_id=transaction_id,
+        session_id=validation_context.session_id,
+        turn_no=validation_context.turn_no,
+        scope=f"proposal_{proposal_type}",
+        is_valid=is_valid_final,
+        errors_json=errors if errors else None,
+        warnings_json=warnings if warnings else None,
+    )
+    
+    return (is_valid_final, errors, warnings)
 
 
 def _create_llm_stage_results_for_turn(

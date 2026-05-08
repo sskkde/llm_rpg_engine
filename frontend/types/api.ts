@@ -139,6 +139,7 @@ export interface AdventureLogEntry {
 
 export interface TurnRequest {
   action: string;
+  idempotency_key?: string;
 }
 
 export interface TurnResponse {

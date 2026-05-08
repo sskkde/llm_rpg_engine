@@ -228,6 +228,7 @@ export function createTurnStream(
   sessionId: string,
   action: string,
   useMock: boolean = false,
+  idempotencyKey?: string,
 ): TurnStreamHandle {
   const controller = new AbortController();
   const endpoint = useMock
@@ -242,10 +243,15 @@ export function createTurnStream(
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  const body: Record<string, string> = { action };
+  if (idempotencyKey) {
+    body.idempotency_key = idempotencyKey;
+  }
+
   const responsePromise = fetch(`${API_BASE_URL}${endpoint}`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ action }),
+    body: JSON.stringify(body),
     signal: controller.signal,
   });
 

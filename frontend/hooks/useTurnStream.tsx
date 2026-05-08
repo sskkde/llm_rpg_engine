@@ -12,6 +12,10 @@ interface TurnState {
   usedFallback: boolean;
 }
 
+function generateIdempotencyKey(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
 export function useTurnStream(sessionId: string | null) {
   const [state, setState] = useState<TurnState>({
     isStreaming: false,
@@ -21,6 +25,7 @@ export function useTurnStream(sessionId: string | null) {
     usedFallback: false,
   });
   const streamRef = useRef<{ abort(): void } | null>(null);
+  const pendingKeyRef = useRef<string | null>(null);
 
   const cleanup = useCallback(() => {
     if (streamRef.current) {
@@ -29,7 +34,7 @@ export function useTurnStream(sessionId: string | null) {
     }
   }, []);
 
-  const fallbackTurn = useCallback(async (action: string): Promise<TurnResponse | null> => {
+  const fallbackTurn = useCallback(async (action: string, idempotencyKey: string): Promise<TurnResponse | null> => {
     if (!sessionId) return null;
 
     setState((prev) => ({
@@ -39,7 +44,8 @@ export function useTurnStream(sessionId: string | null) {
     }));
 
     try {
-      const response = await executeTurn(sessionId, { action });
+      const response = await executeTurn(sessionId, { action, idempotency_key: idempotencyKey });
+      if (pendingKeyRef.current !== idempotencyKey) return null;
       setState({
         isStreaming: false,
         isPending: false,
@@ -49,6 +55,7 @@ export function useTurnStream(sessionId: string | null) {
       });
       return response;
     } catch (err: unknown) {
+      if (pendingKeyRef.current !== idempotencyKey) return null;
       const detail = (err as { detail?: string })?.detail;
       const errorMessage = detail || 'Failed to execute turn';
       setState({
@@ -66,6 +73,8 @@ export function useTurnStream(sessionId: string | null) {
     if (!sessionId) return null;
 
     cleanup();
+    const idempotencyKey = generateIdempotencyKey();
+    pendingKeyRef.current = idempotencyKey;
     setState({
       isStreaming: true,
       isPending: true,
@@ -75,13 +84,14 @@ export function useTurnStream(sessionId: string | null) {
     });
 
     try {
-      const handle = createTurnStream(sessionId, action);
+      const handle = createTurnStream(sessionId, action, false, idempotencyKey);
       streamRef.current = handle;
 
       let accumulatedNarration = '';
 
       try {
         for await (const event of handle.events) {
+          if (pendingKeyRef.current !== idempotencyKey) return null;
           switch (event.event) {
             case 'narration_delta':
               accumulatedNarration += event.delta;
@@ -103,6 +113,7 @@ export function useTurnStream(sessionId: string | null) {
                 validation_passed: true,
                 transaction_id: '',
               };
+              if (pendingKeyRef.current !== idempotencyKey) return null;
               cleanup();
               setState({
                 isStreaming: false,
@@ -115,6 +126,7 @@ export function useTurnStream(sessionId: string | null) {
             }
 
             case 'turn_error':
+              if (pendingKeyRef.current !== idempotencyKey) return null;
               cleanup();
               setState((prev) => ({
                 ...prev,
@@ -129,16 +141,18 @@ export function useTurnStream(sessionId: string | null) {
         console.warn('Turn stream failed, falling back to non-streaming turn', err);
       }
 
+      if (pendingKeyRef.current !== idempotencyKey) return null;
       cleanup();
       setState((prev) => ({
         ...prev,
         isStreaming: false,
         usedFallback: true,
       }));
-      return fallbackTurn(action);
+      return fallbackTurn(action, idempotencyKey);
     } catch {
+      if (pendingKeyRef.current !== idempotencyKey) return null;
       cleanup();
-      return fallbackTurn(action);
+      return fallbackTurn(action, idempotencyKey);
     }
   }, [sessionId, cleanup, fallbackTurn]);
 

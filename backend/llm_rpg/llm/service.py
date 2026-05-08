@@ -446,6 +446,8 @@ class LLMService:
                     output_tokens=log.output_tokens,
                     cost_estimate=log.cost_estimate,
                     latency_ms=log.latency_ms,
+                    request_payload={"prompt": log.prompt_content} if log.prompt_content else None,
+                    response_payload={"content": log.response_content} if log.response_content else None,
                 )
                 self._db_session.add(db_log)
                 self._db_session.commit()

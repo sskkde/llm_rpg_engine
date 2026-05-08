@@ -55,6 +55,7 @@ from ..storage.repositories import (
     MemoryFactRepository,
     TurnTransactionRepository,
     GameEventRepository,
+    StateDeltaRepository,
 )
 from ..models.states import CanonicalState
 
@@ -2652,6 +2653,23 @@ def execute_turn_service(
             },
         )
         
+        # Step 16c: Create state_delta records for state changes
+        state_deltas_created = _create_state_deltas_for_turn(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            action_type=action_type,
+            movement_result=movement_result,
+            world_time_before=world_time_before,
+            world_time_after=world_time,
+            player_state_before=None,
+            player_state_after=player_state,
+            npc_states_before=None,
+            npc_states_after=None,
+            source_event_id=event.id,
+        )
+        
         # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
         llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
         input_intent_stage_json = input_intent_result.to_result_json_dict()
@@ -3266,3 +3284,153 @@ def _create_game_event(
     except Exception as e:
         logger.warning("Failed to create game_event: %s", e)
         return None
+
+
+def _create_state_delta(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    path: str,
+    operation: str,
+    old_value: Optional[Any] = None,
+    new_value: Optional[Any] = None,
+    source_event_id: Optional[str] = None,
+    visibility_scope: Optional[str] = "player_visible",
+    validation_status: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Create a state_delta record for event sourcing.
+    
+    Returns the created delta ID, or None on failure.
+    """
+    from ..storage.models import generate_uuid
+    
+    state_delta_repo = StateDeltaRepository(db)
+    
+    try:
+        delta = state_delta_repo.create({
+            "id": generate_uuid(),
+            "transaction_id": transaction_id,
+            "source_event_id": source_event_id,
+            "session_id": session_id,
+            "turn_no": turn_no,
+            "path": path,
+            "operation": operation,
+            "old_value_json": old_value,
+            "new_value_json": new_value,
+            "visibility_scope": visibility_scope,
+            "validation_status": validation_status,
+            "created_at": datetime.now(),
+        })
+        return delta.id
+    except Exception as e:
+        logger.warning("Failed to create state_delta: %s", e)
+        return None
+
+
+def _create_state_deltas_for_turn(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    action_type: str,
+    movement_result: Optional[MovementResult] = None,
+    world_time_before: Optional[Dict[str, Any]] = None,
+    world_time_after: Optional[Dict[str, Any]] = None,
+    player_state_before: Optional[Dict[str, Any]] = None,
+    player_state_after: Optional[Dict[str, Any]] = None,
+    npc_states_before: Optional[Dict[str, Any]] = None,
+    npc_states_after: Optional[Dict[str, Any]] = None,
+    source_event_id: Optional[str] = None,
+) -> int:
+    """
+    Create state_delta records for all state changes in a turn.
+    
+    Creates deltas for:
+    - Location changes (if movement occurred)
+    - World time changes
+    - Player state changes
+    - NPC state changes
+    
+    Returns the number of deltas created.
+    """
+    deltas_created = 0
+    
+    # 1. Location change delta
+    if movement_result and movement_result.success:
+        old_location = movement_result.old_location_id if hasattr(movement_result, 'old_location_id') else None
+        _create_state_delta(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            path="session_state.current_location_id",
+            operation="set",
+            old_value=old_location,
+            new_value=movement_result.new_location_id,
+            source_event_id=source_event_id,
+            visibility_scope="player_visible",
+        )
+        deltas_created += 1
+    
+    # 2. World time change delta
+    if world_time_before and world_time_after:
+        if world_time_before != world_time_after:
+            _create_state_delta(
+                db=db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                path="session_state.world_time",
+                operation="set",
+                old_value=world_time_before,
+                new_value=world_time_after,
+                source_event_id=source_event_id,
+                visibility_scope="player_visible",
+            )
+            deltas_created += 1
+    
+    # 3. Player state changes
+    if player_state_before and player_state_after:
+        for key in ["realm", "hp", "stamina", "spirit_power"]:
+            old_val = player_state_before.get(key)
+            new_val = player_state_after.get(key)
+            if old_val != new_val:
+                _create_state_delta(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    path=f"player_state.{key}",
+                    operation="set",
+                    old_value=old_val,
+                    new_value=new_val,
+                    source_event_id=source_event_id,
+                    visibility_scope="player_visible",
+                )
+                deltas_created += 1
+    
+    # 4. NPC state changes
+    if npc_states_before and npc_states_after:
+        for npc_id, npc_after in npc_states_after.items():
+            npc_before = npc_states_before.get(npc_id, {})
+            for key in ["trust_score", "suspicion_score", "current_location_id"]:
+                old_val = npc_before.get(key)
+                new_val = npc_after.get(key)
+                if old_val != new_val:
+                    _create_state_delta(
+                        db=db,
+                        transaction_id=transaction_id,
+                        session_id=session_id,
+                        turn_no=turn_no,
+                        path=f"npc_state.{npc_id}.{key}",
+                        operation="set",
+                        old_value=old_val,
+                        new_value=new_val,
+                        source_event_id=source_event_id,
+                        visibility_scope="hidden",
+                    )
+                    deltas_created += 1
+    
+    return deltas_created

@@ -33,6 +33,7 @@ from .models import (
     ScheduledEventModel,
     TurnTransactionModel,
     GameEventModel,
+    StateDeltaModel,
 )
 
 T = TypeVar("T")
@@ -753,3 +754,54 @@ class GameEventRepository(BaseRepository):
                 GameEventModel.visibility_scope == visibility_scope
             )
         ).order_by(GameEventModel.turn_no, GameEventModel.occurred_at).offset(skip).limit(limit).all()
+
+
+class StateDeltaRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, StateDeltaModel)
+
+    def get_by_transaction(self, transaction_id: str) -> List[StateDeltaModel]:
+        """Get all state deltas for a specific transaction."""
+        return self.db.query(StateDeltaModel).filter(
+            StateDeltaModel.transaction_id == transaction_id
+        ).order_by(StateDeltaModel.created_at).all()
+
+    def get_by_session(self, session_id: str, skip: int = 0, limit: int = 100) -> List[StateDeltaModel]:
+        """Get all state deltas for a session, ordered by turn and time."""
+        return self.db.query(StateDeltaModel).filter(
+            StateDeltaModel.session_id == session_id
+        ).order_by(StateDeltaModel.turn_no, StateDeltaModel.created_at).offset(skip).limit(limit).all()
+
+    def get_by_path(
+        self,
+        session_id: str,
+        path: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[StateDeltaModel]:
+        """Get state deltas by path for a session."""
+        return self.db.query(StateDeltaModel).filter(
+            and_(
+                StateDeltaModel.session_id == session_id,
+                StateDeltaModel.path == path
+            )
+        ).order_by(StateDeltaModel.turn_no, StateDeltaModel.created_at).offset(skip).limit(limit).all()
+
+    def get_by_session_and_turn(
+        self,
+        session_id: str,
+        turn_no: int
+    ) -> List[StateDeltaModel]:
+        """Get all state deltas for a specific turn in a session."""
+        return self.db.query(StateDeltaModel).filter(
+            and_(
+                StateDeltaModel.session_id == session_id,
+                StateDeltaModel.turn_no == turn_no
+            )
+        ).order_by(StateDeltaModel.created_at).all()
+
+    def get_by_source_event(self, source_event_id: str) -> List[StateDeltaModel]:
+        """Get all state deltas for a specific source event."""
+        return self.db.query(StateDeltaModel).filter(
+            StateDeltaModel.source_event_id == source_event_id
+        ).order_by(StateDeltaModel.created_at).all()

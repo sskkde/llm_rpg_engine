@@ -414,6 +414,8 @@ class ModelCallLogModel(Base):
     output_tokens = Column(Integer, nullable=True)
     cost_estimate = Column(Float, nullable=True)
     latency_ms = Column(Integer, nullable=True)
+    request_payload = Column(JSON, nullable=True)
+    response_payload = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
     session = relationship("SessionModel", back_populates="model_call_logs")

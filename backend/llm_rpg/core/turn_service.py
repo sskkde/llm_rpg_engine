@@ -56,6 +56,8 @@ from ..storage.repositories import (
     TurnTransactionRepository,
     GameEventRepository,
     StateDeltaRepository,
+    LLMStageResultRepository,
+    ValidationReportRepository,
 )
 from ..models.states import CanonicalState
 
@@ -2670,6 +2672,16 @@ def execute_turn_service(
             source_event_id=event.id,
         )
         
+        # Step 16d: Create llm_stage_result and validation_report records
+        all_llm_stage_results = [input_intent_result] + llm_stage_results
+        llm_stage_results_created = _create_llm_stage_results_for_turn(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            llm_stage_results=all_llm_stage_results,
+        )
+        
         # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
         llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
         input_intent_stage_json = input_intent_result.to_result_json_dict()
@@ -3434,3 +3446,150 @@ def _create_state_deltas_for_turn(
                     deltas_created += 1
     
     return deltas_created
+
+
+def _create_llm_stage_result(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    stage_name: str,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    prompt_template_id: Optional[str] = None,
+    request_payload_ref: Optional[str] = None,
+    raw_output_ref: Optional[str] = None,
+    parsed_proposal_json: Optional[Dict[str, Any]] = None,
+    accepted: Optional[bool] = None,
+    fallback_reason: Optional[str] = None,
+    validation_errors_json: Optional[List[str]] = None,
+    latency_ms: Optional[int] = None,
+) -> Optional[str]:
+    """
+    Create an llm_stage_result record for LLM stage tracking.
+    
+    Returns the created record ID, or None on failure.
+    """
+    from ..storage.models import generate_uuid
+    
+    llm_stage_result_repo = LLMStageResultRepository(db)
+    
+    try:
+        record = llm_stage_result_repo.create({
+            "id": generate_uuid(),
+            "transaction_id": transaction_id,
+            "session_id": session_id,
+            "turn_no": turn_no,
+            "stage_name": stage_name,
+            "provider": provider,
+            "model": model,
+            "prompt_template_id": prompt_template_id,
+            "request_payload_ref": request_payload_ref,
+            "raw_output_ref": raw_output_ref,
+            "parsed_proposal_json": parsed_proposal_json,
+            "accepted": accepted,
+            "fallback_reason": fallback_reason,
+            "validation_errors_json": validation_errors_json,
+            "latency_ms": latency_ms,
+            "created_at": datetime.now(),
+        })
+        return record.id
+    except Exception as e:
+        logger.warning("Failed to create llm_stage_result: %s", e)
+        return None
+
+
+def _create_validation_report(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    scope: str,
+    target_ref_id: Optional[str] = None,
+    is_valid: bool = True,
+    errors_json: Optional[List[str]] = None,
+    warnings_json: Optional[List[str]] = None,
+) -> Optional[str]:
+    """
+    Create a validation_report record for validation tracking.
+    
+    Returns the created record ID, or None on failure.
+    """
+    from ..storage.models import generate_uuid
+    
+    validation_report_repo = ValidationReportRepository(db)
+    
+    try:
+        record = validation_report_repo.create({
+            "id": generate_uuid(),
+            "transaction_id": transaction_id,
+            "session_id": session_id,
+            "turn_no": turn_no,
+            "scope": scope,
+            "target_ref_id": target_ref_id,
+            "is_valid": is_valid,
+            "errors_json": errors_json,
+            "warnings_json": warnings_json,
+            "created_at": datetime.now(),
+        })
+        return record.id
+    except Exception as e:
+        logger.warning("Failed to create validation_report: %s", e)
+        return None
+
+
+def _create_llm_stage_results_for_turn(
+    db: Session,
+    transaction_id: str,
+    session_id: str,
+    turn_no: int,
+    llm_stage_results: List[LLMStageResult],
+) -> int:
+    """
+    Create llm_stage_result records for all LLM stages in a turn.
+    
+    Creates records for:
+    - input_intent stage
+    - world stage
+    - scene stage
+    - npc stage
+    - narration stage
+    
+    Returns the number of records created.
+    """
+    records_created = 0
+    
+    for stage_result in llm_stage_results:
+        record_id = _create_llm_stage_result(
+            db=db,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            stage_name=stage_result.stage_name,
+            provider=None,
+            model=None,
+            prompt_template_id=None,
+            request_payload_ref=None,
+            raw_output_ref=stage_result.raw_outcome[:500] if stage_result.raw_outcome else None,
+            parsed_proposal_json=stage_result.parsed_proposal,
+            accepted=stage_result.accepted,
+            fallback_reason=stage_result.fallback_reason,
+            validation_errors_json=stage_result.validation_errors if stage_result.validation_errors else None,
+            latency_ms=int(stage_result.timeout * 1000) if stage_result.timeout else None,
+        )
+        if record_id:
+            records_created += 1
+            
+            if stage_result.validation_errors:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope=f"llm_stage_{stage_result.stage_name}",
+                    target_ref_id=record_id,
+                    is_valid=stage_result.accepted,
+                    errors_json=stage_result.validation_errors,
+                )
+    
+    return records_created

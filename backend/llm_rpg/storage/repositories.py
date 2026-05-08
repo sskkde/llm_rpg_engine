@@ -34,6 +34,8 @@ from .models import (
     TurnTransactionModel,
     GameEventModel,
     StateDeltaModel,
+    LLMStageResultModel,
+    ValidationReportModel,
 )
 
 T = TypeVar("T")
@@ -805,3 +807,111 @@ class StateDeltaRepository(BaseRepository):
         return self.db.query(StateDeltaModel).filter(
             StateDeltaModel.source_event_id == source_event_id
         ).order_by(StateDeltaModel.created_at).all()
+
+
+class LLMStageResultRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, LLMStageResultModel)
+
+    def get_by_transaction(self, transaction_id: str) -> List[LLMStageResultModel]:
+        """Get all LLM stage results for a specific transaction."""
+        return self.db.query(LLMStageResultModel).filter(
+            LLMStageResultModel.transaction_id == transaction_id
+        ).order_by(LLMStageResultModel.created_at).all()
+
+    def get_by_session(self, session_id: str, skip: int = 0, limit: int = 100) -> List[LLMStageResultModel]:
+        """Get all LLM stage results for a session, ordered by turn and time."""
+        return self.db.query(LLMStageResultModel).filter(
+            LLMStageResultModel.session_id == session_id
+        ).order_by(LLMStageResultModel.turn_no, LLMStageResultModel.created_at).offset(skip).limit(limit).all()
+
+    def get_by_session_and_turn(
+        self,
+        session_id: str,
+        turn_no: int
+    ) -> List[LLMStageResultModel]:
+        """Get all LLM stage results for a specific turn in a session."""
+        return self.db.query(LLMStageResultModel).filter(
+            and_(
+                LLMStageResultModel.session_id == session_id,
+                LLMStageResultModel.turn_no == turn_no
+            )
+        ).order_by(LLMStageResultModel.created_at).all()
+
+    def get_by_stage(
+        self,
+        session_id: str,
+        stage_name: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[LLMStageResultModel]:
+        """Get LLM stage results by stage name for a session."""
+        return self.db.query(LLMStageResultModel).filter(
+            and_(
+                LLMStageResultModel.session_id == session_id,
+                LLMStageResultModel.stage_name == stage_name
+            )
+        ).order_by(LLMStageResultModel.turn_no, LLMStageResultModel.created_at).offset(skip).limit(limit).all()
+
+    def get_accepted_by_transaction(self, transaction_id: str) -> List[LLMStageResultModel]:
+        """Get all accepted LLM stage results for a specific transaction."""
+        return self.db.query(LLMStageResultModel).filter(
+            and_(
+                LLMStageResultModel.transaction_id == transaction_id,
+                LLMStageResultModel.accepted == True
+            )
+        ).order_by(LLMStageResultModel.created_at).all()
+
+
+class ValidationReportRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ValidationReportModel)
+
+    def get_by_transaction(self, transaction_id: str) -> List[ValidationReportModel]:
+        """Get all validation reports for a specific transaction."""
+        return self.db.query(ValidationReportModel).filter(
+            ValidationReportModel.transaction_id == transaction_id
+        ).order_by(ValidationReportModel.created_at).all()
+
+    def get_by_session(self, session_id: str, skip: int = 0, limit: int = 100) -> List[ValidationReportModel]:
+        """Get all validation reports for a session, ordered by turn and time."""
+        return self.db.query(ValidationReportModel).filter(
+            ValidationReportModel.session_id == session_id
+        ).order_by(ValidationReportModel.turn_no, ValidationReportModel.created_at).offset(skip).limit(limit).all()
+
+    def get_by_session_and_turn(
+        self,
+        session_id: str,
+        turn_no: int
+    ) -> List[ValidationReportModel]:
+        """Get all validation reports for a specific turn in a session."""
+        return self.db.query(ValidationReportModel).filter(
+            and_(
+                ValidationReportModel.session_id == session_id,
+                ValidationReportModel.turn_no == turn_no
+            )
+        ).order_by(ValidationReportModel.created_at).all()
+
+    def get_by_scope(
+        self,
+        session_id: str,
+        scope: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[ValidationReportModel]:
+        """Get validation reports by scope for a session."""
+        return self.db.query(ValidationReportModel).filter(
+            and_(
+                ValidationReportModel.session_id == session_id,
+                ValidationReportModel.scope == scope
+            )
+        ).order_by(ValidationReportModel.turn_no, ValidationReportModel.created_at).offset(skip).limit(limit).all()
+
+    def get_failed_by_session(self, session_id: str) -> List[ValidationReportModel]:
+        """Get all failed validation reports for a session."""
+        return self.db.query(ValidationReportModel).filter(
+            and_(
+                ValidationReportModel.session_id == session_id,
+                ValidationReportModel.is_valid == False
+            )
+        ).order_by(ValidationReportModel.turn_no, ValidationReportModel.created_at).all()

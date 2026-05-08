@@ -111,7 +111,24 @@ def build_db_turn_orchestrator(
     )
     lore_store = LoreStore()
     summary_manager = SummaryManager()
-    memory_writer = MemoryWriter(event_log, npc_memory, summary_manager)
+    
+    from llm_rpg.storage.repositories import (
+        MemorySummaryRepository,
+        MemoryFactRepository,
+    )
+    memory_summary_repo = MemorySummaryRepository(db)
+    memory_fact_repo = MemoryFactRepository(db)
+    
+    memory_writer = MemoryWriter(
+        event_log=event_log,
+        npc_memory_manager=npc_memory,
+        summary_manager=summary_manager,
+        memory_summary_repo=memory_summary_repo,
+        memory_fact_repo=memory_fact_repo,
+        npc_belief_repo=npc_belief_repo,
+        npc_relationship_repo=npc_relationship_repo,
+        session_id=session_id,
+    )
     
     # Create ProposalPipeline for LLM calls
     proposal_pipeline: Optional[ProposalPipeline] = None

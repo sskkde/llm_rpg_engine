@@ -59,6 +59,8 @@ from ..storage.repositories import (
     StateDeltaRepository,
     LLMStageResultRepository,
     ValidationReportRepository,
+    NPCBeliefRepository,
+    NPCRelationshipMemoryRepository,
 )
 from ..models.states import CanonicalState
 
@@ -2909,7 +2911,6 @@ def execute_turn_service(
         # Step 19: Update last played
         session_repo.update_last_played(session_id)
         
-        # Step 20: Persist perspective-aware memories (non-fatal)
         memory_result = None
         if _is_memory_stage_enabled(db):
             memory_result = _persist_turn_memories(
@@ -2925,6 +2926,7 @@ def execute_turn_service(
                 npc_reactions=npc_reactions_for_json,
                 world_progression=world_progression,
                 scene_event_summary=scene_event_summary,
+                canonical_state=canonical_state,
             )
             
             if memory_result:
@@ -2932,6 +2934,8 @@ def execute_turn_service(
                     "summaries_created": memory_result.get("summaries_created", 0),
                     "facts_created": memory_result.get("facts_created", 0),
                     "npc_memories_created": memory_result.get("npc_memories_created", 0),
+                    "npc_beliefs_created": memory_result.get("npc_beliefs_created", 0),
+                    "relationship_memories_created": memory_result.get("relationship_memories_created", 0),
                     "fallback_reason": memory_result.get("fallback_reason"),
                 }
                 event_log_repo.update(event.id, {"result_json": updated_result_json})
@@ -3188,39 +3192,63 @@ def _persist_turn_memories(
     npc_reactions: Optional[List[Dict[str, Any]]] = None,
     world_progression: Optional[Dict[str, Any]] = None,
     scene_event_summary: Optional[Dict[str, Any]] = None,
+    canonical_state: Optional[CanonicalState] = None,
 ) -> Dict[str, Any]:
     """
     Persist perspective-aware memory summaries and facts after a successful turn.
     
-    Memory is derived from:
-    - Accepted events (player action, movement)
-    - Visible NPC reactions (player-visible only)
-    - State deltas (location changes, quest progression)
-    - World progression metadata
-    - Scene event summary
-    
-    Memory scopes:
-    - world: World-level chronicle summary
-    - session: Session-level summary
-    - scene: Scene-level summary for current location
-    - npc: NPC subjective memory (scoped by NPC ID, not player-visible)
+    Uses MemoryWriter to write to DB tables:
+    - memory_summaries: World Chronicle, Scene Summary, NPC Subjective Summary
+    - memory_facts: Location changes, quest progression, NPC beliefs
+    - npc_beliefs: NPC belief updates after observed events
+    - npc_relationship_memories: Relationship memory updates
     
     NPC subjective memory is NEVER included in player-visible output.
     
     Returns metadata about memory write success/failure (non-fatal).
     """
+    from .memory_writer import MemoryWriter
+    from .npc_memory import NPCMemoryManager
+    from .summary import SummaryManager
+    from .event_log import EventLog
+    
     memory_summary_repo = MemorySummaryRepository(db)
     memory_fact_repo = MemoryFactRepository(db)
+    npc_belief_repo = NPCBeliefRepository(db)
+    npc_relationship_repo = NPCRelationshipMemoryRepository(db)
     
     result = {
         "summaries_created": 0,
         "facts_created": 0,
         "npc_memories_created": 0,
+        "npc_beliefs_created": 0,
+        "relationship_memories_created": 0,
         "fallback_reason": None,
     }
     
     try:
-        # 1. Create world/session chronicle summary
+        event_log = EventLog()
+        npc_memory = NPCMemoryManager(
+            scope_repo=None,
+            belief_repo=npc_belief_repo,
+            memory_repo=None,
+            secret_repo=None,
+            relationship_repo=npc_relationship_repo,
+            session_id=session_id,
+        )
+        summary_manager = SummaryManager()
+        
+        memory_writer = MemoryWriter(
+            event_log=event_log,
+            npc_memory_manager=npc_memory,
+            summary_manager=summary_manager,
+            memory_summary_repo=memory_summary_repo,
+            memory_fact_repo=memory_fact_repo,
+            npc_belief_repo=npc_belief_repo,
+            npc_relationship_repo=npc_relationship_repo,
+            session_id=session_id,
+        )
+        
         summary_parts = []
         if action_type:
             summary_parts.append(f"玩家执行了{action_type}动作")
@@ -3232,125 +3260,138 @@ def _persist_turn_memories(
             for qp in state_deltas["quest_progression"]:
                 summary_parts.append(f"任务进展: {qp.get('quest_name', '未知任务')}")
         
-        if summary_parts:
-            chronicle_text = f"回合{turn_no}: " + "; ".join(summary_parts)
+        if summary_parts and canonical_state:
+            from ..models.events import SceneEvent, EventType
+            mock_events = [SceneEvent(
+                event_id=event_id,
+                event_type=EventType.SCENE_EVENT,
+                turn_index=turn_no,
+                scene_id=current_location_id or "unknown",
+                trigger="player_action",
+                summary="; ".join(summary_parts),
+            )]
             
-            memory_summary_repo.create({
-                "id": f"sum_world_{session_id}_{turn_no}",
-                "session_id": session_id,
-                "scope_type": "world",
-                "scope_ref_id": None,
-                "summary_text": chronicle_text,
-                "source_turn_range": {"start": turn_no, "end": turn_no},
-                "importance_score": 0.5,
-            })
+            memory_writer.write_turn_summary(
+                turn_index=turn_no,
+                events=mock_events,
+                state=canonical_state,
+            )
             result["summaries_created"] += 1
         
-        # 2. Create scene summary for current location
-        if current_location_id and scene_event_summary:
-            scene_text = f"场景{current_location_id} 回合{turn_no}: "
+        if current_location_id and scene_event_summary and canonical_state:
             candidate_events = scene_event_summary.get("candidate_events", [])
-            if candidate_events:
-                event_descriptions = [e.get("description", "")[:50] for e in candidate_events[:3]]
-                scene_text += "; ".join(event_descriptions)
+            from ..models.events import SceneEvent, EventType
+            mock_events = [
+                SceneEvent(
+                    event_id=f"scene_{i}",
+                    event_type=EventType.SCENE_EVENT,
+                    turn_index=turn_no,
+                    scene_id=current_location_id,
+                    trigger=e.get("event_type", "scene"),
+                    summary=e.get("description", ""),
+                )
+                for i, e in enumerate(candidate_events[:3])
+            ]
             
-            memory_summary_repo.create({
-                "id": f"sum_scene_{session_id}_{turn_no}_{current_location_id}",
-                "session_id": session_id,
-                "scope_type": "scene",
-                "scope_ref_id": current_location_id,
-                "summary_text": scene_text,
-                "source_turn_range": {"start": turn_no, "end": turn_no},
-                "importance_score": 0.4,
-            })
+            memory_writer.write_scene_summary(
+                scene_id=current_location_id,
+                start_turn=turn_no,
+                end_turn=turn_no,
+                events=mock_events,
+                state=canonical_state,
+            )
             result["summaries_created"] += 1
         
-        # 3. Create facts from state deltas
         if state_deltas:
             if "location_id" in state_deltas:
-                memory_fact_repo.create({
-                    "id": f"fact_loc_{session_id}_{turn_no}",
-                    "session_id": session_id,
-                    "fact_type": "location_change",
-                    "subject_ref": "player",
-                    "fact_key": "current_location",
-                    "fact_value": state_deltas["location_id"],
-                    "confidence": 1.0,
-                    "source_event_id": event_id,
-                })
+                memory_writer._persist_fact_to_db(
+                    fact_id=f"fact_loc_{session_id}_{turn_no}",
+                    fact_type="location_change",
+                    subject_ref="player",
+                    fact_key="current_location",
+                    fact_value=state_deltas["location_id"],
+                    confidence=1.0,
+                    source_event_id=event_id,
+                )
                 result["facts_created"] += 1
             
             if "quest_progression" in state_deltas:
                 for i, qp in enumerate(state_deltas["quest_progression"]):
                     quest_name = qp.get("quest_name", "unknown")
-                    memory_fact_repo.create({
-                        "id": f"fact_quest_{session_id}_{turn_no}_{i}",
-                        "session_id": session_id,
-                        "fact_type": "quest_progress",
-                        "subject_ref": quest_name,
-                        "fact_key": "progression",
-                        "fact_value": qp.get("message", ""),
-                        "confidence": 0.9,
-                        "source_event_id": event_id,
-                    })
+                    memory_writer._persist_fact_to_db(
+                        fact_id=f"fact_quest_{session_id}_{turn_no}_{i}",
+                        fact_type="quest_progress",
+                        subject_ref=quest_name,
+                        fact_key="progression",
+                        fact_value=qp.get("message", ""),
+                        confidence=0.9,
+                        source_event_id=event_id,
+                    )
                     result["facts_created"] += 1
         
-        # 4. Create NPC subjective memories (scoped by NPC, NOT player-visible)
-        # CRITICAL: These are private NPC memories, never exposed to player narration
-        if npc_reactions:
+        if npc_reactions and canonical_state:
             for reaction in npc_reactions:
                 if reaction.get("accepted") and reaction.get("npc_id"):
                     npc_id = reaction.get("npc_id")
                     npc_name = reaction.get("npc_name", "unknown")
                     summary = reaction.get("summary", "")
                     
-                    # NPC subjective memory - scoped by NPC ID
-                    memory_summary_repo.create({
-                        "id": f"sum_npc_{npc_id}_{session_id}_{turn_no}",
-                        "session_id": session_id,
-                        "scope_type": "npc",
-                        "scope_ref_id": npc_id,
-                        "summary_text": f"{npc_name}的主观记忆: {summary}",
-                        "source_turn_range": {"start": turn_no, "end": turn_no},
-                        "importance_score": 0.6,
-                    })
+                    from ..models.events import NPCActionEvent, EventType
+                    mock_events = [NPCActionEvent(
+                        event_id=f"npc_{npc_id}_{turn_no}",
+                        event_type=EventType.NPC_ACTION,
+                        turn_index=turn_no,
+                        npc_id=npc_id,
+                        action_type=reaction.get("action_type", "idle"),
+                        summary=summary,
+                    )]
+                    
+                    memory_writer.write_npc_subjective_summary(
+                        npc_id=npc_id,
+                        start_turn=turn_no,
+                        end_turn=turn_no,
+                        events=mock_events,
+                        state=canonical_state,
+                    )
                     result["npc_memories_created"] += 1
                     
-                    # NPC belief fact (what NPC believes about player action)
                     if action_type and summary:
-                        memory_fact_repo.create({
-                            "id": f"fact_npc_belief_{npc_id}_{session_id}_{turn_no}",
-                            "session_id": session_id,
-                            "fact_type": "npc_belief",
-                            "subject_ref": npc_id,
-                            "fact_key": "player_action_observation",
-                            "fact_value": f"玩家执行了{action_type}: {summary[:100]}",
-                            "confidence": 0.8,
-                            "source_event_id": event_id,
-                        })
-                        result["facts_created"] += 1
+                        mock_event = SceneEvent(
+                            event_id=event_id,
+                            event_type=EventType.SCENE_EVENT,
+                            turn_index=turn_no,
+                            scene_id=current_location_id or "unknown",
+                            trigger="player_action",
+                            summary=f"玩家执行了{action_type}: {summary[:100]}",
+                        )
+                        
+                        memory_writer.write_npc_belief_update(
+                            npc_id=npc_id,
+                            observed_event=mock_event,
+                            current_turn=turn_no,
+                            belief_type="fact",
+                            confidence=0.8,
+                        )
+                        result["npc_beliefs_created"] += 1
         
-        # 5. Create world progression facts (if available)
         if world_progression:
             candidate_events = world_progression.get("candidate_events", [])
             for i, event in enumerate(candidate_events[:3]):
                 event_type = event.get("event_type", "unknown")
                 description = event.get("description", "")
                 if description:
-                    memory_fact_repo.create({
-                        "id": f"fact_world_{session_id}_{turn_no}_{i}",
-                        "session_id": session_id,
-                        "fact_type": "world_event",
-                        "subject_ref": "world",
-                        "fact_key": event_type,
-                        "fact_value": description[:200],
-                        "confidence": event.get("importance", 0.5),
-                        "source_event_id": event_id,
-                    })
+                    memory_writer._persist_fact_to_db(
+                        fact_id=f"fact_world_{session_id}_{turn_no}_{i}",
+                        fact_type="world_event",
+                        subject_ref="world",
+                        fact_key=event_type,
+                        fact_value=description[:200],
+                        confidence=event.get("importance", 0.5),
+                        source_event_id=event_id,
+                    )
                     result["facts_created"] += 1
         
     except Exception as e:
-        # Memory write failure is non-fatal - record fallback reason
         logger.warning("Memory persistence failed for session %s turn %s: %s", session_id, turn_no, e)
         result["fallback_reason"] = f"memory_write_error: {str(e)[:200]}"
     

@@ -1100,6 +1100,31 @@ class TestMemoryPersistence:
         db_session.commit()
         
         from llm_rpg.core.turn_service import MovementResult
+        from llm_rpg.models.states import CanonicalState, PlayerState, WorldState, CurrentSceneState, WorldTime
+        
+        canonical_state = CanonicalState(
+            player_state=PlayerState(
+                entity_id="player",
+                location_id="loc_trial_hall",
+            ),
+            world_state=WorldState(
+                entity_id="world",
+                world_id="test_world",
+                current_time=WorldTime(
+                    calendar="修仙历",
+                    season="春",
+                    day=1,
+                    period="辰时",
+                ),
+            ),
+            current_scene_state=CurrentSceneState(
+                entity_id="scene_1",
+                scene_id="scene_1",
+                location_id="loc_trial_hall",
+                active_actor_ids=["player"],
+            ),
+        )
+        
         movement_result = MovementResult(
             success=True,
             new_location_id="loc_trial_hall",
@@ -1120,6 +1145,7 @@ class TestMemoryPersistence:
             npc_reactions=[],
             world_progression=None,
             scene_event_summary=None,
+            canonical_state=canonical_state,
         )
         
         assert memory_result is not None
@@ -1188,6 +1214,31 @@ class TestMemoryPersistence:
             }
         ]
         
+        from llm_rpg.models.states import CanonicalState, PlayerState, WorldState, CurrentSceneState, WorldTime
+        
+        canonical_state = CanonicalState(
+            player_state=PlayerState(
+                entity_id="player",
+                location_id="loc_trial_hall",
+            ),
+            world_state=WorldState(
+                entity_id="world",
+                world_id="test_world",
+                current_time=WorldTime(
+                    calendar="修仙历",
+                    season="春",
+                    day=1,
+                    period="辰时",
+                ),
+            ),
+            current_scene_state=CurrentSceneState(
+                entity_id="scene_1",
+                scene_id="scene_1",
+                location_id="loc_trial_hall",
+                active_actor_ids=["player", "npc_001"],
+            ),
+        )
+        
         memory_result = _persist_turn_memories(
             db=db_session,
             session_id="test_npc_memory_session",
@@ -1201,6 +1252,7 @@ class TestMemoryPersistence:
             npc_reactions=npc_reactions,
             world_progression=None,
             scene_event_summary=None,
+            canonical_state=canonical_state,
         )
         
         assert memory_result is not None
@@ -1213,7 +1265,8 @@ class TestMemoryPersistence:
         ).all()
         
         assert len(npc_memories) >= 1
-        assert "师姐的主观记忆" in npc_memories[0].summary_text
+        assert "主观记忆" in npc_memories[0].summary_text
+        assert "师姐微笑着回应你的问候" in npc_memories[0].summary_text
 
     def test_no_hidden_memory_leakage_to_player_narration(self, db_session: Session):
         """Test that NPC subjective memory does not leak to player-visible narration context."""

@@ -246,6 +246,11 @@ class SessionModel(Base):
     combat_sessions = relationship("CombatSessionModel", back_populates="session")
     scheduled_events = relationship("ScheduledEventModel", back_populates="session")
     turn_transactions = relationship("TurnTransactionModel", back_populates="session")
+    npc_memory_scopes = relationship("NPCMemoryScopeModel", back_populates="session")
+    npc_beliefs = relationship("NPCBeliefModel", back_populates="session")
+    npc_private_memories = relationship("NPCPrivateMemoryModel", back_populates="session")
+    npc_secrets = relationship("NPCSecretModel", back_populates="session")
+    npc_relationship_memories = relationship("NPCRelationshipMemoryModel", back_populates="session")
 
 
 class SessionStateModel(Base):
@@ -618,4 +623,118 @@ class ValidationReportModel(Base):
     __table_args__ = (
         Index("idx_validation_reports_transaction", "transaction_id"),
         Index("idx_validation_reports_session_turn", "session_id", "turn_no"),
+    )
+
+
+class NPCMemoryScopeModel(Base):
+    __tablename__ = "npc_memory_scopes"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    npc_id = Column(String, nullable=False)
+    profile_json = Column(JSON, nullable=True)
+    forget_curve_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+    session = relationship("SessionModel", back_populates="npc_memory_scopes")
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "npc_id"),
+        Index("idx_npc_memory_scopes_session", "session_id"),
+        Index("idx_npc_memory_scopes_npc", "session_id", "npc_id"),
+    )
+
+
+class NPCBeliefModel(Base):
+    __tablename__ = "npc_beliefs"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    npc_id = Column(String, nullable=False)
+    belief_type = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    confidence = Column(Float, nullable=False, default=0.5)
+    truth_status = Column(String, nullable=False, default="unknown")
+    source_event_id = Column(String, nullable=True)
+    created_turn = Column(Integer, nullable=False)
+    last_updated_turn = Column(Integer, nullable=False)
+    embedding = Column(JSON, nullable=True)
+
+    session = relationship("SessionModel", back_populates="npc_beliefs")
+
+    __table_args__ = (
+        Index("idx_npc_beliefs_session", "session_id"),
+        Index("idx_npc_beliefs_npc", "session_id", "npc_id"),
+        Index("idx_npc_beliefs_type", "session_id", "belief_type"),
+    )
+
+
+class NPCPrivateMemoryModel(Base):
+    __tablename__ = "npc_private_memories"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    npc_id = Column(String, nullable=False)
+    memory_type = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    source_event_ids_json = Column(JSON, nullable=True)
+    entities_json = Column(JSON, nullable=True)
+    importance = Column(Float, nullable=False, default=0.5)
+    emotional_weight = Column(Float, nullable=False, default=0.0)
+    confidence = Column(Float, nullable=False, default=1.0)
+    current_strength = Column(Float, nullable=False, default=1.0)
+    created_turn = Column(Integer, nullable=False)
+    last_accessed_turn = Column(Integer, nullable=False)
+    recall_count = Column(Integer, nullable=False, default=0)
+    embedding = Column(JSON, nullable=True)
+
+    session = relationship("SessionModel", back_populates="npc_private_memories")
+
+    __table_args__ = (
+        Index("idx_npc_private_memories_session", "session_id"),
+        Index("idx_npc_private_memories_npc", "session_id", "npc_id"),
+        Index("idx_npc_private_memories_type", "session_id", "memory_type"),
+    )
+
+
+class NPCSecretModel(Base):
+    __tablename__ = "npc_secrets"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    npc_id = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    willingness_to_reveal = Column(Float, nullable=False, default=0.1)
+    reveal_conditions_json = Column(JSON, nullable=True)
+    status = Column(String, nullable=False, default="hidden")
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+    session = relationship("SessionModel", back_populates="npc_secrets")
+
+    __table_args__ = (
+        Index("idx_npc_secrets_session", "session_id"),
+        Index("idx_npc_secrets_npc", "session_id", "npc_id"),
+        Index("idx_npc_secrets_status", "session_id", "status"),
+    )
+
+
+class NPCRelationshipMemoryModel(Base):
+    __tablename__ = "npc_relationship_memories"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    npc_id = Column(String, nullable=False)
+    target_id = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    impact_json = Column(JSON, nullable=True)
+    source_event_id = Column(String, nullable=True)
+    created_turn = Column(Integer, nullable=False)
+
+    session = relationship("SessionModel", back_populates="npc_relationship_memories")
+
+    __table_args__ = (
+        Index("idx_npc_relationship_memories_session", "session_id"),
+        Index("idx_npc_relationship_memories_npc", "session_id", "npc_id"),
+        Index("idx_npc_relationship_memories_target", "session_id", "npc_id", "target_id"),
     )

@@ -36,6 +36,11 @@ from .models import (
     StateDeltaModel,
     LLMStageResultModel,
     ValidationReportModel,
+    NPCMemoryScopeModel,
+    NPCBeliefModel,
+    NPCPrivateMemoryModel,
+    NPCSecretModel,
+    NPCRelationshipMemoryModel,
 )
 
 T = TypeVar("T")
@@ -915,3 +920,155 @@ class ValidationReportRepository(BaseRepository):
                 ValidationReportModel.is_valid == False
             )
         ).order_by(ValidationReportModel.turn_no, ValidationReportModel.created_at).all()
+
+
+class NPCMemoryScopeRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCMemoryScopeModel)
+
+    def get_by_session(self, session_id: str) -> List[NPCMemoryScopeModel]:
+        return self.db.query(NPCMemoryScopeModel).filter(
+            NPCMemoryScopeModel.session_id == session_id
+        ).all()
+
+    def get_by_session_and_npc(self, session_id: str, npc_id: str) -> Optional[NPCMemoryScopeModel]:
+        return self.db.query(NPCMemoryScopeModel).filter(
+            and_(
+                NPCMemoryScopeModel.session_id == session_id,
+                NPCMemoryScopeModel.npc_id == npc_id
+            )
+        ).first()
+
+    def create_or_update(self, data: Dict[str, Any]) -> NPCMemoryScopeModel:
+        existing = self.get_by_session_and_npc(data["session_id"], data["npc_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+
+class NPCBeliefRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCBeliefModel)
+
+    def get_by_session(self, session_id: str) -> List[NPCBeliefModel]:
+        return self.db.query(NPCBeliefModel).filter(
+            NPCBeliefModel.session_id == session_id
+        ).order_by(NPCBeliefModel.created_turn).all()
+
+    def get_by_npc(self, session_id: str, npc_id: str) -> List[NPCBeliefModel]:
+        return self.db.query(NPCBeliefModel).filter(
+            and_(
+                NPCBeliefModel.session_id == session_id,
+                NPCBeliefModel.npc_id == npc_id
+            )
+        ).order_by(NPCBeliefModel.created_turn).all()
+
+    def get_by_type(self, session_id: str, npc_id: str, belief_type: str) -> List[NPCBeliefModel]:
+        return self.db.query(NPCBeliefModel).filter(
+            and_(
+                NPCBeliefModel.session_id == session_id,
+                NPCBeliefModel.npc_id == npc_id,
+                NPCBeliefModel.belief_type == belief_type
+            )
+        ).order_by(NPCBeliefModel.created_turn).all()
+
+
+class NPCPrivateMemoryRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCPrivateMemoryModel)
+
+    def get_by_session(self, session_id: str) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            NPCPrivateMemoryModel.session_id == session_id
+        ).order_by(NPCPrivateMemoryModel.created_turn).all()
+
+    def get_by_npc(self, session_id: str, npc_id: str) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_id == npc_id
+            )
+        ).order_by(NPCPrivateMemoryModel.created_turn).all()
+
+    def get_by_type(self, session_id: str, npc_id: str, memory_type: str) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_id == npc_id,
+                NPCPrivateMemoryModel.memory_type == memory_type
+            )
+        ).order_by(NPCPrivateMemoryModel.created_turn).all()
+
+    def get_recent(self, session_id: str, npc_id: str, limit: int = 10) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_id == npc_id
+            )
+        ).order_by(desc(NPCPrivateMemoryModel.created_turn)).limit(limit).all()
+
+    def update_recall(self, memory_id: str, current_turn: int) -> Optional[NPCPrivateMemoryModel]:
+        memory = self.get_by_id(memory_id)
+        if memory:
+            memory.recall_count += 1
+            memory.last_accessed_turn = current_turn
+            self.db.commit()
+            self.db.refresh(memory)
+        return memory
+
+
+class NPCSecretRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCSecretModel)
+
+    def get_by_session(self, session_id: str) -> List[NPCSecretModel]:
+        return self.db.query(NPCSecretModel).filter(
+            NPCSecretModel.session_id == session_id
+        ).order_by(NPCSecretModel.created_at).all()
+
+    def get_by_npc(self, session_id: str, npc_id: str) -> List[NPCSecretModel]:
+        return self.db.query(NPCSecretModel).filter(
+            and_(
+                NPCSecretModel.session_id == session_id,
+                NPCSecretModel.npc_id == npc_id
+            )
+        ).order_by(NPCSecretModel.created_at).all()
+
+    def get_by_status(self, session_id: str, npc_id: str, status: str) -> List[NPCSecretModel]:
+        return self.db.query(NPCSecretModel).filter(
+            and_(
+                NPCSecretModel.session_id == session_id,
+                NPCSecretModel.npc_id == npc_id,
+                NPCSecretModel.status == status
+            )
+        ).order_by(NPCSecretModel.created_at).all()
+
+    def update_status(self, secret_id: str, status: str) -> Optional[NPCSecretModel]:
+        return self.update(secret_id, {"status": status})
+
+
+class NPCRelationshipMemoryRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, NPCRelationshipMemoryModel)
+
+    def get_by_session(self, session_id: str) -> List[NPCRelationshipMemoryModel]:
+        return self.db.query(NPCRelationshipMemoryModel).filter(
+            NPCRelationshipMemoryModel.session_id == session_id
+        ).order_by(NPCRelationshipMemoryModel.created_turn).all()
+
+    def get_by_npc(self, session_id: str, npc_id: str) -> List[NPCRelationshipMemoryModel]:
+        return self.db.query(NPCRelationshipMemoryModel).filter(
+            and_(
+                NPCRelationshipMemoryModel.session_id == session_id,
+                NPCRelationshipMemoryModel.npc_id == npc_id
+            )
+        ).order_by(NPCRelationshipMemoryModel.created_turn).all()
+
+    def get_by_target(self, session_id: str, npc_id: str, target_id: str) -> List[NPCRelationshipMemoryModel]:
+        return self.db.query(NPCRelationshipMemoryModel).filter(
+            and_(
+                NPCRelationshipMemoryModel.session_id == session_id,
+                NPCRelationshipMemoryModel.npc_id == npc_id,
+                NPCRelationshipMemoryModel.target_id == target_id
+            )
+        ).order_by(NPCRelationshipMemoryModel.created_turn).all()

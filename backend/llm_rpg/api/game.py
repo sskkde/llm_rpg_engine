@@ -107,6 +107,7 @@ def get_or_create_orchestrator(game_id: str, db: Session) -> TurnOrchestrator:
 
 class TurnRequest(BaseModel):
     action: str = Field(..., description="Player action input")
+    idempotency_key: Optional[str] = Field(None, description="Idempotency key for deduplication")
 
 
 class TurnResponse(BaseModel):
@@ -275,6 +276,7 @@ def execute_turn(
             db=db,
             session_id=session_id,
             player_input=request.action,
+            idempotency_key=request.idempotency_key,
         )
 
         return TurnResponse(

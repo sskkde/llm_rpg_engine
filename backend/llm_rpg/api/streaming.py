@@ -212,6 +212,7 @@ def _initialize_game_state(game_id: str, state_manager: CanonicalStateManager):
 class StreamTurnRequest(BaseModel):
     """Request to stream a turn."""
     action: str = Field(..., description="Player action input")
+    idempotency_key: Optional[str] = Field(None, description="Idempotency key for deduplication")
 
 
 async def generate_narration_stream(
@@ -311,6 +312,7 @@ async def execute_turn_stream(
     db: Session,
     world_id: str,
     use_mock: bool = False,
+    idempotency_key: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Execute a turn with streaming SSE events.
@@ -342,6 +344,7 @@ async def execute_turn_stream(
             session_id=session_id,
             player_input=player_input,
             use_mock=use_mock,
+            idempotency_key=idempotency_key,
         )
         
         # 2. Emit event_committed after atomic commit
@@ -499,11 +502,13 @@ async def stream_turn(
             player_input=request.action,
             db=db,
             world_id=session.world_id,
+            idempotency_key=request.idempotency_key,
         ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Timeout-Seconds": "180",
         },
     )
 
@@ -548,10 +553,12 @@ async def stream_turn_mock(
             db=db,
             world_id=session.world_id,
             use_mock=True,
+            idempotency_key=request.idempotency_key,
         ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Timeout-Seconds": "180",
         },
     )

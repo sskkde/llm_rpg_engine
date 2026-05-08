@@ -1,9 +1,44 @@
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..models.common import ProposedAction, ValidationCheck, ValidationResult
 from ..models.states import CanonicalState
 from ..models.perspectives import Perspective
 from ..models.lore import LoreEntry
+
+
+@dataclass
+class ValidationContext:
+    """Context for validation operations containing all necessary state and metadata."""
+    db: Any  # Database session
+    session_id: str  # Game session ID
+    turn_no: int  # Current turn number
+    canonical_state: CanonicalState  # Current canonical state
+    perspective: Optional[Perspective] = None  # Optional perspective for filtering
+    source_event_id: Optional[str] = None  # Source event that triggered validation
+    actor_id: Optional[str] = None  # Actor performing the action
+    
+    @classmethod
+    def create(
+        cls,
+        db: Any,
+        session_id: str,
+        turn_no: int,
+        canonical_state: CanonicalState,
+        perspective: Optional[Perspective] = None,
+        source_event_id: Optional[str] = None,
+        actor_id: Optional[str] = None,
+    ) -> "ValidationContext":
+        """Factory method to create a ValidationContext."""
+        return cls(
+            db=db,
+            session_id=session_id,
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            perspective=perspective,
+            source_event_id=source_event_id,
+            actor_id=actor_id,
+        )
 
 
 class Validator:
@@ -19,7 +54,12 @@ class Validator:
         action: ProposedAction,
         state: CanonicalState,
         perspective: Optional[Perspective] = None,
+        context: Optional[ValidationContext] = None,
     ) -> ValidationResult:
+        if context is not None:
+            state = context.canonical_state
+            perspective = context.perspective or perspective
+        
         checks = []
         errors = []
         warnings = []
@@ -150,7 +190,11 @@ class Validator:
         old_value: Any,
         new_value: Any,
         state: CanonicalState,
+        context: Optional[ValidationContext] = None,
     ) -> ValidationResult:
+        if context is not None:
+            state = context.canonical_state
+        
         checks = []
         errors = []
         
@@ -225,7 +269,11 @@ class Validator:
         npc_id: str,
         knowledge: str,
         state: CanonicalState,
+        context: Optional[ValidationContext] = None,
     ) -> ValidationResult:
+        if context is not None:
+            state = context.canonical_state
+        
         npc_state = state.npc_states.get(npc_id)
         if npc_state is None:
             return ValidationResult(
@@ -253,100 +301,11 @@ class Validator:
         target_entity_ids: List[str],
         effects: Dict[str, Any],
         state: CanonicalState,
+        context: Optional[ValidationContext] = None,
     ) -> ValidationResult:
-        """
-        Validate a candidate event before it is added to the event list.
+        if context is not None:
+            state = context.canonical_state
         
-        Checks:
-        - Description is non-empty
-        - Target entities exist in state (if specified)
-        - Effects dict is well-formed
-        """
-        checks = []
-        errors = []
-        warnings = []
-        
-        if not description or not description.strip():
-            checks.append(ValidationCheck(
-                check_name="candidate_description",
-                passed=False,
-                reason="Candidate event has empty description",
-            ))
-            errors.append("Candidate event has empty description")
-        else:
-            checks.append(ValidationCheck(
-                check_name="candidate_description",
-                passed=True,
-            ))
-        
-        for entity_id in target_entity_ids:
-            if entity_id.startswith("npc_"):
-                if entity_id not in state.npc_states:
-                    checks.append(ValidationCheck(
-                        check_name="candidate_target_validation",
-                        passed=False,
-                        reason=f"Target NPC {entity_id} not found in state",
-                    ))
-                    errors.append(f"Target NPC {entity_id} not found in state")
-                else:
-                    checks.append(ValidationCheck(
-                        check_name="candidate_target_validation",
-                        passed=True,
-                    ))
-            elif entity_id.startswith("loc_"):
-                if entity_id not in state.location_states:
-                    checks.append(ValidationCheck(
-                        check_name="candidate_target_validation",
-                        passed=False,
-                        reason=f"Target location {entity_id} not found in state",
-                    ))
-                    errors.append(f"Target location {entity_id} not found in state")
-                else:
-                    checks.append(ValidationCheck(
-                        check_name="candidate_target_validation",
-                        passed=True,
-                    ))
-        
-        if not target_entity_ids:
-            checks.append(ValidationCheck(
-                check_name="candidate_target_validation",
-                passed=True,
-            ))
-        
-        if not isinstance(effects, dict):
-            checks.append(ValidationCheck(
-                check_name="candidate_effects_validation",
-                passed=False,
-                reason=f"Effects must be a dict, got {type(effects).__name__}",
-            ))
-            errors.append(f"Effects must be a dict, got {type(effects).__name__}")
-        else:
-            checks.append(ValidationCheck(
-                check_name="candidate_effects_validation",
-                passed=True,
-            ))
-        
-        return ValidationResult(
-            is_valid=all(c.passed for c in checks),
-            checks=checks,
-            errors=errors,
-            warnings=warnings,
-        )
-    
-    def validate_candidate_event(
-        self,
-        event_type: str,
-        description: str,
-        target_entity_ids: List[str],
-        effects: Dict[str, Any],
-        state: CanonicalState,
-    ) -> ValidationResult:
-        """
-        Validate a candidate event from world/scene proposals.
-        
-        Candidate events must pass validation before being committed.
-        This ensures LLM-generated proposals don't bypass rule constraints.
-        """
         checks = []
         errors = []
         warnings = []

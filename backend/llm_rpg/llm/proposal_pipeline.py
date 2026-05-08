@@ -471,7 +471,24 @@ class ProposalPipeline:
             ),
             LLMMessage(
                 role="user",
-                content=f"玩家输入: {raw_input}\n\n请输出JSON格式的意图解析结果。"
+                content=f"""玩家输入: {raw_input}
+
+请严格按照以下JSON格式输出意图解析结果，不要添加任何额外字段：
+{{
+  "intent_type": "move|talk|attack|inspect|interact|idle|unknown",
+  "target": "目标名称或地点名称（如果是移动/交互动作）",
+  "target_type": "npc|location|item",
+  "parameters": {{}},
+  "risk_level": "low|medium|high",
+  "confidence": 0.0到1.0之间的数值
+}}
+
+示例：
+玩家输入: "前往试炼堂"
+输出: {{"intent_type": "move", "target": "试炼堂", "target_type": "location", "parameters": {{}}, "risk_level": "low", "confidence": 0.9}}
+
+玩家输入: "和师姐说话"
+输出: {{"intent_type": "talk", "target": "师姐", "target_type": "npc", "parameters": {{}}, "risk_level": "low", "confidence": 0.9}}"""
             ),
         ]
         
@@ -502,7 +519,30 @@ class ProposalPipeline:
             ),
             LLMMessage(
                 role="user",
-                content=f"世界上下文: {world_context}\n\n请输出JSON格式的世界推进提案。"
+                content=f"""世界上下文: {world_context}
+
+请严格按照以下JSON格式输出世界推进提案，不要添加任何额外字段：
+{{
+  "time_description": "时间推进描述",
+  "candidate_events": [
+    {{
+      "event_type": "事件类型",
+      "description": "事件描述",
+      "effects": {{}},
+      "importance": 0.0到1.0之间的数值,
+      "visibility": "player_visible|hidden|gm_only"
+    }}
+  ],
+  "state_deltas": [
+    {{
+      "path": "global_flags|quest_progress|location_flags|scheduled_event_hints|faction_pressure",
+      "operation": "set|update|delete",
+      "value": "新的值",
+      "reason": "变更原因"
+    }}
+  ],
+  "confidence": 0.0到1.0之间的数值
+}}"""
             ),
         ]
         
@@ -531,7 +571,23 @@ class ProposalPipeline:
             ),
             LLMMessage(
                 role="user",
-                content=f"场景ID: {scene_id}\n场景上下文: {scene_context}\n\n请输出JSON格式的场景事件提案。"
+                content=f"""场景ID: {scene_id}
+场景上下文: {scene_context}
+
+请严格按照以下JSON格式输出场景事件提案，不要添加任何额外字段：
+{{
+  "scene_id": "{scene_id}",
+  "scene_name": "场景名称",
+  "candidate_events": [
+    {{
+      "event_type": "事件类型（如：exploration、dialogue、combat、discovery）",
+      "description": "事件详细描述",
+      "importance": 0.0到1.0之间的数值
+    }}
+  ],
+  "recommended_actions": ["推荐行动1", "推荐行动2", "推荐行动3", "推荐行动4"],
+  "confidence": 0.0到1.0之间的数值
+}}"""
             ),
         ]
         
@@ -563,7 +619,19 @@ class ProposalPipeline:
             ),
             LLMMessage(
                 role="user",
-                content=f"NPC ID: {npc_id}\nNPC上下文: {npc_context}\n\n请输出JSON格式的NPC行动提案。"
+                content=f"""NPC ID: {npc_id}
+NPC上下文: {npc_context}
+
+请严格按照以下JSON格式输出NPC行动提案，不要添加任何额外字段：
+{{
+  "npc_id": "{npc_id}",
+  "action_type": "interact|observe|move|idle|dialogue|attack",
+  "target": "目标对象（如果有）",
+  "summary": "NPC行动的简短描述（一句话）",
+  "visible_motivation": "玩家可见的动机说明",
+  "visibility": "player_visible|hidden|gm_only",
+  "confidence": 0.0到1.0之间的数值
+}}"""
             ),
         ]
         
@@ -594,7 +662,13 @@ class ProposalPipeline:
             ),
             LLMMessage(
                 role="user",
-                content=f"可见上下文: {visible_context}\n\n请输出JSON格式的叙事提案。"
+                content=f"""可见上下文: {visible_context}
+
+请严格按照以下JSON格式输出叙事提案，不要添加任何额外字段：
+{{
+  "text": "叙事文本内容（一段生动的中文描述，100-300字）",
+  "confidence": 0.0到1.0之间的数值
+}}"""
             ),
         ]
         

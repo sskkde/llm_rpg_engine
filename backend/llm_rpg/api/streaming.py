@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
-from ..storage.models import SessionModel
+from ..storage.models import SessionModel, EventLogModel
 from ..storage.repositories import SessionRepository, LocationRepository, EventLogRepository
 
 from .auth import get_current_active_user
@@ -140,6 +140,15 @@ def _get_current_turn_index(game_id: str) -> int:
     recent_events = temp_orchestrator._event_log._store.get_recent_events(limit=1)
     if recent_events:
         return recent_events[0].turn_index
+    return 0
+
+
+def _get_current_turn_from_db(db: Session, session_id: str) -> int:
+    """Get the last completed turn number from the database."""
+    event_log_repo = EventLogRepository(db)
+    recent_events = event_log_repo.get_recent(session_id, limit=1)
+    if recent_events:
+        return recent_events[0].turn_no
     return 0
 
 
@@ -493,12 +502,13 @@ async def stream_turn(
         )
     
     game_id = f"game_{session_id}"
+    turn_index = _get_current_turn_from_db(db, session_id) + 1
     
     return StreamingResponse(
         execute_turn_stream(
             session_id=session_id,
             game_id=game_id,
-            turn_index=0,
+            turn_index=turn_index,
             player_input=request.action,
             db=db,
             world_id=session.world_id,
@@ -543,12 +553,13 @@ async def stream_turn_mock(
         )
     
     game_id = f"game_{session_id}"
+    turn_index = _get_current_turn_from_db(db, session_id) + 1
     
     return StreamingResponse(
         execute_turn_stream(
             session_id=session_id,
             game_id=game_id,
-            turn_index=0,
+            turn_index=turn_index,
             player_input=request.action,
             db=db,
             world_id=session.world_id,

@@ -777,20 +777,31 @@ class TestNPCMindAPITests:
         
         assert response.status_code == 403
 
-    def test_api_get_npc_mind_endpoint_invalid_role(self, client: TestClient):
+    def test_api_get_npc_mind_endpoint_invalid_role(self, client: TestClient, db_session: Session):
         """Test that invalid role is rejected."""
-        register_response = client.post("/auth/register", json={
-            "username": "npc_mind_invalid_test_user",
+        from llm_rpg.storage.models import UserModel
+        admin_user = UserModel(
+            id="admin_npc_mind_invalid_test_user",
+            username="admin_npc_mind_invalid_test_user",
+            email="admin_npc_mind_invalid_api@test.com",
+            password_hash=get_password_hash("password123"),
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+        login_response = client.post("/auth/login", json={
+            "username": "admin_npc_mind_invalid_test_user",
             "password": "password123"
         })
-        assert register_response.status_code == 201
-        token = register_response.json()["access_token"]
-        
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
+
         response = client.get(
             "/debug/sessions/test_session/npcs/npc_001/mind?role=invalid",
             headers={"Authorization": f"Bearer {token}"}
         )
-        
+
         assert response.status_code == 422
 
 

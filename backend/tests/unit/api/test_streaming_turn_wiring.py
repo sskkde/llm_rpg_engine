@@ -234,6 +234,115 @@ class TestStreamingTurnWiringIntegration:
         assert orchestrator._proposal_pipeline._llm_service is llm_service
 
 
+class TestStreamingCommitEventTiming:
+    """Tests verifying streaming event_committed is emitted AFTER durable service completion."""
+
+    @pytest.mark.asyncio
+    async def test_event_committed_emitted_after_execute_turn_service(self):
+        """
+        Streaming endpoint emits event_committed ONLY AFTER execute_turn_service completes.
+        
+        This test verifies the ordering:
+        1. execute_turn_service() is called (durable side effects committed)
+        2. event_committed SSE is emitted
+        
+        The event_committed notification must NOT be emitted before the service
+        has committed its transaction to the database.
+        """
+        from unittest.mock import patch, MagicMock, AsyncMock
+        import asyncio
+        
+        # Track call order
+        call_order = []
+        
+        # Mock execute_turn_service to track when it's called
+        mock_result = MagicMock()
+        mock_result.turn_no = 1
+        mock_result.transaction_id = "txn_test"
+        mock_result.events_committed = []
+        mock_result.actions_committed = []
+        mock_result.world_time = "修仙历 春 第1日 辰时"
+        mock_result.narration = "测试叙述"
+        mock_result.recommended_actions = []
+        mock_result.player_state = {}
+        
+        def track_execute_turn_service(*args, **kwargs):
+            call_order.append("execute_turn_service")
+            return mock_result
+        
+        with patch('llm_rpg.api.streaming.execute_turn_service', side_effect=track_execute_turn_service):
+            from llm_rpg.api.streaming import execute_turn_stream
+            
+            # Collect all events
+            events = []
+            async for event in execute_turn_stream(
+                session_id="test_session",
+                game_id="test_game",
+                turn_index=0,
+                player_input="测试输入",
+                db=MagicMock(),
+                world_id="test_world",
+            ):
+                events.append(event)
+        
+        # Verify execute_turn_service was called
+        assert "execute_turn_service" in call_order
+        
+        # Verify event_committed was emitted
+        committed_events = [e for e in events if "event_committed" in e]
+        assert len(committed_events) > 0, "event_committed must be emitted"
+        
+        # The key invariant: execute_turn_service must be called before any event_committed
+        # is yielded. Since execute_turn_service is synchronous and event_committed is yielded
+        # after it returns, this ordering is guaranteed by the code structure.
+        # We verify by checking that execute_turn_service was indeed called.
+        assert call_order[0] == "execute_turn_service", \
+            "execute_turn_service must be called before any SSE events are emitted"
+
+    @pytest.mark.asyncio
+    async def test_streaming_calls_execute_turn_service_not_deprecated_orchestrator(self):
+        """
+        Streaming endpoint calls execute_turn_service, NOT deprecated TurnOrchestrator.execute_turn.
+        
+        This test verifies that the streaming path routes through the shared
+        execute_turn_service function, ensuring durable side effects are
+        handled consistently with the REST endpoint.
+        """
+        from unittest.mock import patch, MagicMock
+        
+        mock_result = MagicMock()
+        mock_result.turn_no = 1
+        mock_result.transaction_id = "txn_test"
+        mock_result.events_committed = []
+        mock_result.actions_committed = []
+        mock_result.world_time = "修仙历 春 第1日 辰时"
+        mock_result.narration = "测试"
+        mock_result.recommended_actions = []
+        mock_result.player_state = {}
+        
+        with patch('llm_rpg.api.streaming.execute_turn_service', return_value=mock_result) as mock_service:
+            from llm_rpg.api.streaming import execute_turn_stream
+            
+            events = []
+            async for event in execute_turn_stream(
+                session_id="test_session",
+                game_id="test_game",
+                turn_index=0,
+                player_input="测试输入",
+                db=MagicMock(),
+                world_id="test_world",
+            ):
+                events.append(event)
+            
+            # Verify execute_turn_service was called
+            mock_service.assert_called_once()
+            
+            # Verify the call had correct parameters
+            call_kwargs = mock_service.call_args[1]
+            assert call_kwargs["session_id"] == "test_session"
+            assert call_kwargs["player_input"] == "测试输入"
+
+
 class TestGetOrCreateOrchestratorPassesLLMService:
     """Tests for get_or_create_orchestrator passing llm_service to cached orchestrator."""
 

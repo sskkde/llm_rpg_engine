@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..models.common import ContextPack, MemoryQuery, TimeRange
@@ -84,10 +85,21 @@ def _retrieve_memories_for_npc_context(
     
     Includes NPC subjective memories scoped by NPC ID.
     """
-    from ..storage.repositories import MemorySummaryRepository, MemoryFactRepository
+    from ..storage.repositories import (
+        MemorySummaryRepository,
+        MemoryFactRepository,
+        NPCBeliefRepository,
+        NPCPrivateMemoryRepository,
+        NPCSecretRepository,
+        NPCRelationshipMemoryRepository,
+    )
     
     memory_repo = MemorySummaryRepository(db)
     fact_repo = MemoryFactRepository(db)
+    belief_repo = NPCBeliefRepository(db)
+    private_memory_repo = NPCPrivateMemoryRepository(db)
+    secret_repo = NPCSecretRepository(db)
+    relationship_repo = NPCRelationshipMemoryRepository(db)
     
     summaries = []
     
@@ -120,9 +132,82 @@ def _retrieve_memories_for_npc_context(
     # Add belief facts
     for fact in npc_beliefs[:limit]:
         result.append({
+            "memory_kind": "fact",
             "fact_type": fact.fact_type,
             "fact_value": fact.fact_value,
             "confidence": fact.confidence,
+        })
+    
+    db_beliefs = sorted(
+        belief_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda belief: (belief.confidence, belief.last_updated_turn, belief.created_turn),
+        reverse=True,
+    )[:limit]
+    for belief in db_beliefs:
+        result.append({
+            "memory_kind": "npc_belief",
+            "belief_id": belief.id,
+            "belief_type": belief.belief_type,
+            "content": belief.content,
+            "confidence": belief.confidence,
+            "truth_status": belief.truth_status,
+            "source_event_id": belief.source_event_id,
+            "created_turn": belief.created_turn,
+            "last_updated_turn": belief.last_updated_turn,
+        })
+    
+    db_private_memories = sorted(
+        private_memory_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda memory: (memory.importance, memory.current_strength, memory.created_turn),
+        reverse=True,
+    )[:limit]
+    for memory in db_private_memories:
+        result.append({
+            "memory_kind": "npc_private_memory",
+            "memory_id": memory.id,
+            "memory_type": memory.memory_type,
+            "content": memory.content,
+            "source_event_ids": memory.source_event_ids_json or [],
+            "entities": memory.entities_json or [],
+            "importance": memory.importance,
+            "emotional_weight": memory.emotional_weight,
+            "confidence": memory.confidence,
+            "current_strength": memory.current_strength,
+            "created_turn": memory.created_turn,
+            "last_accessed_turn": memory.last_accessed_turn,
+            "recall_count": memory.recall_count,
+        })
+    
+    db_secrets = sorted(
+        secret_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda secret: (secret.willingness_to_reveal, secret.created_at),
+        reverse=True,
+    )[:limit]
+    for secret in db_secrets:
+        result.append({
+            "memory_kind": "npc_secret",
+            "secret_id": secret.id,
+            "content": secret.content,
+            "willingness_to_reveal": secret.willingness_to_reveal,
+            "reveal_conditions": secret.reveal_conditions_json or [],
+            "status": secret.status,
+            "created_at": secret.created_at.isoformat() if isinstance(secret.created_at, datetime) else None,
+        })
+    
+    db_relationship_memories = sorted(
+        relationship_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda memory: memory.created_turn,
+        reverse=True,
+    )[:limit]
+    for memory in db_relationship_memories:
+        result.append({
+            "memory_kind": "npc_relationship_memory",
+            "memory_id": memory.id,
+            "target_id": memory.target_id,
+            "content": memory.content,
+            "impact": memory.impact_json or {},
+            "source_event_id": memory.source_event_id,
+            "created_turn": memory.created_turn,
         })
     
     return result

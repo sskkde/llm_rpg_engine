@@ -157,6 +157,15 @@ class TurnResult(BaseModel):
     state: dict
 
 
+# ============================================================================
+# DEVELOPMENT/TESTING ONLY ENDPOINTS
+# ============================================================================
+# The following /dev/* endpoints are NOT available in production (APP_ENV=production).
+# They use in-memory state that is lost on server restart and bypass execute_turn_service().
+# For production gameplay, use:
+#   - POST /game/sessions/{session_id}/turn (REST)
+#   - POST /streaming/sessions/{session_id}/turn (SSE)
+# ============================================================================
 if APP_ENV in ("development", "testing"):
     @app.post("/dev/saves", response_model=str)
     def create_save_legacy() -> str:

@@ -71,10 +71,12 @@ BLOCKED_DELTA_PATHS: list[str] = [
     "session.created_at",
     "session.updated_at",
 
-    # NPC hidden states (must not be directly modified)
+    # NPC hidden states (must not be directly modified by LLM proposals)
+    # These represent high-authority fields that require rule-engine paths
     "npc_state.*.hidden_plan_state",
     "npc_state.*.secret_knowledge",
     "npc_state.*.true_identity",
+    "npc_state.*.hidden_identity",  # Alias for true_identity
     "npc_state.*.memory.*",
 
     # Player immutable fields
@@ -86,10 +88,14 @@ BLOCKED_DELTA_PATHS: list[str] = [
     "world_state.id",
     "world_state.seed",
 
+    # Quest status skips (must go through quest engine)
+    "quest_state.*.skip",  # Quest skips not allowed via direct write
+
     # Audit fields (modified only by system)
     "audit_log.*",
     "game_events.*",
     "state_deltas.*",
+    "validation_reports.*",
 ]
 
 # =============================================================================

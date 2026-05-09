@@ -162,6 +162,160 @@ def _make_valid_narration_proposal():
     )
 
 
+class TestNoDeprecatedRuntimeOrchestratorImport:
+    """Tests verifying production code does NOT import deprecated runtime.turn_orchestrator."""
+
+    def test_game_endpoint_does_not_import_deprecated_orchestrator(self):
+        import ast
+        import llm_rpg.api.game as game_module
+        
+        source_file = game_module.__file__
+        with open(source_file, 'r') as f:
+            source = f.read()
+        
+        tree = ast.parse(source)
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and 'runtime.turn_orchestrator' in node.module:
+                    pytest.fail(
+                        f"game.py imports from deprecated runtime.turn_orchestrator: {node.module}"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if 'runtime.turn_orchestrator' in alias.name:
+                        pytest.fail(
+                            f"game.py imports deprecated runtime.turn_orchestrator: {alias.name}"
+                        )
+
+    def test_streaming_endpoint_does_not_import_deprecated_orchestrator(self):
+        import ast
+        import llm_rpg.api.streaming as streaming_module
+        
+        source_file = streaming_module.__file__
+        with open(source_file, 'r') as f:
+            source = f.read()
+        
+        tree = ast.parse(source)
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and 'runtime.turn_orchestrator' in node.module:
+                    pytest.fail(
+                        f"streaming.py imports from deprecated runtime.turn_orchestrator: {node.module}"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if 'runtime.turn_orchestrator' in alias.name:
+                        pytest.fail(
+                            f"streaming.py imports deprecated runtime.turn_orchestrator: {alias.name}"
+                        )
+
+    def test_turn_factory_does_not_import_deprecated_orchestrator(self):
+        import ast
+        import llm_rpg.api.turn_factory as turn_factory_module
+        
+        source_file = turn_factory_module.__file__
+        with open(source_file, 'r') as f:
+            source = f.read()
+        
+        tree = ast.parse(source)
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and 'runtime.turn_orchestrator' in node.module:
+                    pytest.fail(
+                        f"turn_factory.py imports from deprecated runtime.turn_orchestrator: {node.module}"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if 'runtime.turn_orchestrator' in alias.name:
+                        pytest.fail(
+                            f"turn_factory.py imports deprecated runtime.turn_orchestrator: {alias.name}"
+                        )
+
+
+class TestGameEndpointCallsExecuteTurnService:
+    """Tests verifying game.py REST endpoint calls execute_turn_service."""
+
+    def test_game_endpoint_function_calls_execute_turn_service(self):
+        from llm_rpg.api.game import execute_turn
+        
+        mock_result = MagicMock()
+        mock_result.turn_no = 1
+        mock_result.transaction_id = "txn_test"
+        mock_result.events_committed = 0
+        mock_result.actions_committed = 0
+        mock_result.world_time = {"calendar": "修仙历", "season": "春", "day": 1, "period": "辰时"}
+        mock_result.narration = "测试叙述"
+        mock_result.recommended_actions = []
+        mock_result.player_state = {}
+        mock_result.validation_passed = True
+        
+        with patch('llm_rpg.api.game.execute_turn_service', return_value=mock_result) as mock_service:
+            mock_db = MagicMock()
+            mock_session = MagicMock()
+            mock_session.id = "session_1"
+            mock_session.user_id = "user_1"
+            
+            with patch('llm_rpg.api.game.SessionRepository') as mock_repo:
+                mock_repo.return_value.get_by_id.return_value = mock_session
+                
+                mock_user = MagicMock()
+                mock_user.id = "user_1"
+                
+                request = MagicMock()
+                request.action = "测试输入"
+                request.idempotency_key = None
+                
+                result = execute_turn(
+                    session_id="session_1",
+                    request=request,
+                    current_user=mock_user,
+                    db=mock_db,
+                )
+                
+                mock_service.assert_called_once()
+                call_kwargs = mock_service.call_args[1]
+                assert call_kwargs["session_id"] == "session_1"
+                assert call_kwargs["player_input"] == "测试输入"
+
+
+class TestStreamingEndpointCallsExecuteTurnService:
+    """Tests verifying streaming.py SSE endpoint calls execute_turn_service."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_turn_endpoint_calls_execute_turn_service(self):
+        mock_result = MagicMock()
+        mock_result.turn_no = 1
+        mock_result.transaction_id = "txn_test"
+        mock_result.events_committed = []
+        mock_result.actions_committed = []
+        mock_result.world_time = "修仙历 春 第1日 辰时"
+        mock_result.narration = "测试叙述"
+        mock_result.recommended_actions = []
+        mock_result.player_state = {}
+        
+        with patch('llm_rpg.api.streaming.execute_turn_service', return_value=mock_result) as mock_service:
+            from llm_rpg.api.streaming import execute_turn_stream
+            
+            events = []
+            async for event in execute_turn_stream(
+                session_id="test_session",
+                game_id="test_game",
+                turn_index=0,
+                player_input="测试输入",
+                db=MagicMock(),
+                world_id="test_world",
+            ):
+                events.append(event)
+            
+            mock_service.assert_called_once()
+            call_kwargs = mock_service.call_args[1]
+            assert call_kwargs["session_id"] == "test_session"
+            assert call_kwargs["player_input"] == "测试输入"
+
+
 class TestTurnFactoryWithPipeline:
     """Tests for factory when LLMService is provided."""
 

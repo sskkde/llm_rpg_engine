@@ -553,7 +553,7 @@ class StateDeltaModel(Base):
 
     id = Column(String, primary_key=True, default=generate_uuid)
     transaction_id = Column(String, ForeignKey("turn_transactions.id"), nullable=False)
-    source_event_id = Column(String, ForeignKey("game_events.id"), nullable=True)
+    source_event_id = Column(String, ForeignKey("game_events.id"), nullable=False)
     session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
     turn_no = Column(Integer, nullable=False)
     path = Column(String, nullable=False)

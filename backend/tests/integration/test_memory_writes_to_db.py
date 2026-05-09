@@ -386,5 +386,20 @@ class TestMemoryWriterDBPersistence:
         assert summary.summary_id is not None
 
 
+    def test_memory_stage_enabled_with_mock_provider(self, db_session):
+        """
+        Test that _is_memory_stage_enabled returns True even with mock provider.
+        
+        Memory persistence should work independently of LLM provider mode
+        because it uses already-computed deterministic data.
+        """
+        from llm_rpg.core.turn_service import _is_memory_stage_enabled
+        
+        # The function should return True regardless of provider mode
+        # because memory persistence uses deterministic data, not LLM output
+        result = _is_memory_stage_enabled(db_session)
+        assert result is True, "Memory stage should be enabled even with mock provider"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

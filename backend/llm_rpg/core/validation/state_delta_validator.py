@@ -172,29 +172,80 @@ class StateDeltaValidator:
     def _validate_old_value(
         self, path: str, old_value: Any, current_state: CanonicalState
     ) -> ValidationCheck:
-        """Validate that old_value matches current state."""
+        """Validate that old_value matches current state.
+        
+        For paths where we can retrieve the current value, the old_value
+        must match exactly. For paths where we cannot retrieve the value
+        (e.g., new dynamic paths like flags.*, inventory.*), we pass with
+        a warning.
+        """
         try:
             current_value = self._get_current_value(path, current_state)
+            
+            # If current_value is None and we couldn't resolve the path,
+            # check if this is a known "new value allowed" pattern
+            if current_value is None:
+                # Wildcard patterns for dynamic collections allow any old_value
+                if self._is_dynamic_collection_path(path):
+                    return ValidationCheck(
+                        check_name="old_value",
+                        passed=True,
+                        reason=f"dynamic collection path '{path}' allows any old_value",
+                        severity="info",
+                    )
+                # For non-wildcard paths, None means the field doesn't exist yet
+                # This is acceptable for new fields
+                return ValidationCheck(
+                    check_name="old_value",
+                    passed=True,
+                    reason=f"path '{path}' has no current value (new field)",
+                    severity="info",
+                )
+            
+            # Strict comparison for known paths
             if current_value != old_value:
                 return ValidationCheck(
                     check_name="old_value",
                     passed=False,
-                    reason=f"old_value mismatch: expected {current_value}, got {old_value}",
+                    reason=f"old_value mismatch for '{path}': expected {current_value!r}, got {old_value!r}",
                     severity="error",
                 )
             return ValidationCheck(
                 check_name="old_value",
                 passed=True,
-                reason="old_value matches current state",
+                reason=f"old_value matches current state for '{path}'",
             )
         except (ValueError, AttributeError, KeyError) as e:
-            # If we can't get current value, pass the check (path may be new)
+            # Path resolution failed - this could be a new dynamic path
+            if self._is_dynamic_collection_path(path):
+                return ValidationCheck(
+                    check_name="old_value",
+                    passed=True,
+                    reason=f"dynamic collection path '{path}' allows any old_value",
+                    severity="info",
+                )
+            # For other paths, log a warning but don't fail
             return ValidationCheck(
                 check_name="old_value",
                 passed=True,
-                reason=f"could not verify old_value: {str(e)}",
+                reason=f"could not verify old_value for '{path}': {str(e)}",
                 severity="warning",
             )
+    
+    def _is_dynamic_collection_path(self, path: str) -> bool:
+        """Check if path is a dynamic collection pattern (e.g., flags.*, inventory.*)."""
+        # These paths use wildcards for dynamic keys
+        dynamic_patterns = [
+            "session_state.flags.",
+            "player_state.inventory.",
+            "player_state.learned_techniques.",
+            "player_state.completed_quests.",
+            "player_state.reputation.",
+            "npc_state.*.quest_progress.",
+            "world_state.global_flags.",
+            "quest_state.*.objectives.",
+        ]
+        return any(path.startswith(pattern) for pattern in dynamic_patterns)
 
     def _validate_numeric_bounds(
         self, path: str, value: Any, bounds: tuple[int | None, int | None]
@@ -261,28 +312,31 @@ class StateDeltaValidator:
         field = field_parts[0]
         player = state.player_state
 
-        # Map contract paths to actual model fields
-        field_mapping = {
-            "hp": "hp",  # Note: PlayerState doesn't have hp directly, it's in physical attributes
-            "stamina": None,  # Not directly in PlayerState
-            "spirit_power": "spiritual_power",
-            "realm": "realm",
-            "experience": None,  # Not directly in PlayerState
-            "gold": None,  # Not directly in PlayerState
-            "inventory": "inventory_ids",
-            "learned_techniques": None,
-            "completed_quests": None,
-            "reputation": None,
-        }
+        if field == "hp":
+            if hasattr(player, 'physical_state') and player.physical_state:
+                return player.physical_state.hp
+            return None
+        elif field == "stamina":
+            if hasattr(player, 'physical_state') and player.physical_state:
+                return int(player.physical_state.fatigue * 100)
+            return None
+        elif field == "spirit_power":
+            return player.spiritual_power
+        elif field == "realm":
+            return player.realm
+        elif field == "experience":
+            return None
+        elif field == "gold":
+            return None
+        elif field == "inventory":
+            return player.inventory_ids
+        elif field == "learned_techniques":
+            return None
+        elif field == "completed_quests":
+            return None
+        elif field == "reputation":
+            return None
 
-        if field in field_mapping:
-            mapped_field = field_mapping[field]
-            if mapped_field is None:
-                # Field not in current model, return None to allow any old_value
-                return None
-            return getattr(player, mapped_field, None)
-
-        # Try direct attribute access
         return getattr(player, field, None)
 
     def _get_session_state_value(self, field_parts: list[str], state: CanonicalState) -> Any:
@@ -297,10 +351,11 @@ class StateDeltaValidator:
         elif field == "world_time":
             return state.world_state.current_time
         elif field == "current_chapter_id":
-            # Not directly available, return None
             return None
         elif field == "flags":
-            # Wildcard pattern, return the flags dict
+            if len(field_parts) > 1:
+                flag_key = field_parts[1]
+                return state.player_state.flags.get(flag_key)
             return state.player_state.flags
 
         return None

@@ -1,7 +1,11 @@
 """
-Turn Execution Service.
+Turn Execution Service - PRODUCTION TURN PATH.
 
-This module provides a unified turn execution service that handles:
+This module provides the authoritative turn execution service for all production
+gameplay. Both REST and streaming endpoints route through execute_turn_service()
+to ensure identical side effects for the same input.
+
+Responsibilities:
 - Session initialization (baseline story state rows)
 - State reconstruction from DB
 - Turn allocation (DB-authoritative numbering)
@@ -9,13 +13,16 @@ This module provides a unified turn execution service that handles:
 - State persistence (session_state, adventure log, recommended_actions)
 - Error mapping
 
-Both /game/sessions/{session_id}/turn and /streaming/sessions/{session_id}/turn
-should call this service to ensure identical side effects for the same input.
+Production endpoints using this service:
+- POST /game/sessions/{session_id}/turn (REST)
+- POST /streaming/sessions/{session_id}/turn (SSE)
 
 Key invariants:
 - No state mutation without corresponding DB record
 - Streaming may stream narration AFTER durable commit
 - Both endpoints produce identical DB side effects
+
+Note: runtime/turn_orchestrator.py is DEPRECATED and for reference only.
 """
 
 import asyncio
@@ -74,6 +81,8 @@ from ..storage.repositories import (
     LLMStageResultRepository,
     ValidationReportRepository,
     NPCBeliefRepository,
+    NPCPrivateMemoryRepository,
+    NPCSecretRepository,
     NPCRelationshipMemoryRepository,
 )
 from ..models.states import CanonicalState
@@ -706,6 +715,7 @@ def _execute_world_stage(
     canonical_state: CanonicalState,
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
+    transaction_id: Optional[str] = None,
 ) -> LLMStageResult:
     """
     Execute the world progression LLM stage.
@@ -781,6 +791,17 @@ def _execute_world_stage(
         is_valid, validation_errors = _validate_world_proposal(proposal)
 
         if not is_valid:
+            if transaction_id:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="proposal_world_tick",
+                    target_ref_id=None,
+                    is_valid=False,
+                    errors_json=validation_errors,
+                )
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
@@ -1436,6 +1457,15 @@ def _build_npc_context(
     if npc_memories:
         context["subjective_memories"] = npc_memories
     
+    npc_db_memories = _retrieve_npc_db_memories_for_context(
+        db=db,
+        session_id=session_id,
+        npc_id=npc_id,
+        limit=5,
+    )
+    if npc_db_memories:
+        context["npc_db_memories"] = npc_db_memories
+    
     return context
 
 
@@ -1698,6 +1728,7 @@ def _execute_llm_stages(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
+    transaction_id: Optional[str] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1737,6 +1768,7 @@ def _execute_llm_stages(
         canonical_state=canonical_state,
         current_location_id=current_location_id,
         use_mock=use_mock,
+        transaction_id=transaction_id,
     )
     results.append(world_result)
     
@@ -2852,6 +2884,7 @@ def execute_turn_service(
             state_deltas=state_deltas,
             current_location_id=current_location_id,
             use_mock=use_mock,
+            transaction_id=transaction_id,
         )
         
         # Step 14b: Validate all proposals before committing
@@ -2962,7 +2995,13 @@ def execute_turn_service(
                         )
                         
                         npc_id = reaction.get("npc_id", "unknown")
-                        knowledge = reaction.get("summary", "")
+                        knowledge = "\n".join(
+                            part for part in [
+                                reaction.get("summary", ""),
+                                reaction.get("visible_motivation", ""),
+                            ]
+                            if part
+                        )
                         npc_knowledge_validation = npc_knowledge_validator.validate_knowledge(
                             npc_id=npc_id,
                             knowledge=knowledge,
@@ -2983,6 +3022,9 @@ def execute_turn_service(
                                 warnings_json=npc_knowledge_validation.warnings,
                             )
                             logger.warning("NPC knowledge validation failed for %s: %s", npc_id, npc_knowledge_validation.errors)
+                            reaction["accepted"] = False
+                            reaction["fallback_reason"] = f"npc_knowledge_validation_failed: {', '.join(npc_knowledge_validation.errors[:3])}"
+                            continue
                         
                         is_valid, errors, warnings = _validate_proposal(
                             db=db,
@@ -3016,6 +3058,8 @@ def execute_turn_service(
                         forbidden_info=forbidden_patterns,
                         state=canonical_state,
                         context=validation_context,
+                        db=db,
+                        session_id=session_id,
                     )
                     
                     if not narration_leak_validation.is_valid:
@@ -3163,7 +3207,7 @@ def execute_turn_service(
                 },
             )
         
-        _create_game_event(
+        narration_event_id = _create_game_event(
             db=db,
             transaction_id=transaction_id,
             session_id=session_id,
@@ -3196,7 +3240,7 @@ def execute_turn_service(
             player_state_after=player_state,
             npc_states_before=None,
             npc_states_after=None,
-            source_event_id=event.id,
+            source_event_id=narration_event_id,
         )
         
         # Step 16d: Create llm_stage_result and validation_report records
@@ -3499,21 +3543,15 @@ def _get_player_state(
 
 def _is_memory_stage_enabled(db: Session) -> bool:
     """
-    Check if memory persistence stage is enabled via SystemSettingsService.
+    Check if memory persistence stage is enabled.
     
-    Memory stage is enabled when:
-    1. provider_mode is not "mock" (real LLM provider configured)
+    Memory persistence is ALWAYS enabled because it uses already-computed
+    deterministic data (turn results, state deltas) rather than LLM output.
+    This decouples memory writes from LLM provider availability.
     
-    Currently uses the same condition as other LLM stages.
+    Memory persistence should work in mock provider mode for testing.
     """
-    try:
-        from ..services.settings import SystemSettingsService
-        settings_service = SystemSettingsService(db)
-        provider_config = settings_service.get_provider_config()
-        provider_mode = provider_config.get("provider_mode", "mock")
-        return provider_mode != "mock"
-    except Exception:
-        return False
+    return True
 
 
 def _persist_turn_memories(
@@ -3777,6 +3815,112 @@ def _retrieve_memories_for_context(
         }
         for s in sorted_summaries
     ]
+
+
+def _retrieve_npc_db_memories_for_context(
+    db: Session,
+    session_id: str,
+    npc_id: str,
+    limit: int = 5,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Retrieve DB-backed subjective memory for a single NPC.
+    
+    CRITICAL: Every repository query is scoped by both session_id and npc_id.
+    This data is intended for NPC decision context only; do not use it for
+    narration/player-visible context construction.
+    """
+    from datetime import datetime as datetime_type
+    
+    belief_repo = NPCBeliefRepository(db)
+    private_memory_repo = NPCPrivateMemoryRepository(db)
+    secret_repo = NPCSecretRepository(db)
+    relationship_repo = NPCRelationshipMemoryRepository(db)
+    
+    beliefs = sorted(
+        belief_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda belief: (belief.confidence, belief.last_updated_turn, belief.created_turn),
+        reverse=True,
+    )[:limit]
+    private_memories = sorted(
+        private_memory_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda memory: (memory.importance, memory.current_strength, memory.created_turn),
+        reverse=True,
+    )[:limit]
+    secrets = sorted(
+        secret_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda secret: (secret.willingness_to_reveal, secret.created_at),
+        reverse=True,
+    )[:limit]
+    relationship_memories = sorted(
+        relationship_repo.get_by_npc(session_id=session_id, npc_id=npc_id),
+        key=lambda memory: memory.created_turn,
+        reverse=True,
+    )[:limit]
+    
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    
+    if beliefs:
+        result["beliefs"] = [
+            {
+                "belief_id": belief.id,
+                "belief_type": belief.belief_type,
+                "content": belief.content,
+                "confidence": belief.confidence,
+                "truth_status": belief.truth_status,
+                "source_event_id": belief.source_event_id,
+                "created_turn": belief.created_turn,
+                "last_updated_turn": belief.last_updated_turn,
+            }
+            for belief in beliefs
+        ]
+    
+    if private_memories:
+        result["private_memories"] = [
+            {
+                "memory_id": memory.id,
+                "memory_type": memory.memory_type,
+                "content": memory.content,
+                "source_event_ids": memory.source_event_ids_json or [],
+                "entities": memory.entities_json or [],
+                "importance": memory.importance,
+                "emotional_weight": memory.emotional_weight,
+                "confidence": memory.confidence,
+                "current_strength": memory.current_strength,
+                "created_turn": memory.created_turn,
+                "last_accessed_turn": memory.last_accessed_turn,
+                "recall_count": memory.recall_count,
+            }
+            for memory in private_memories
+        ]
+    
+    if secrets:
+        result["secrets"] = [
+            {
+                "secret_id": secret.id,
+                "content": secret.content,
+                "willingness_to_reveal": secret.willingness_to_reveal,
+                "reveal_conditions": secret.reveal_conditions_json or [],
+                "status": secret.status,
+                "created_at": secret.created_at.isoformat() if isinstance(secret.created_at, datetime_type) else None,
+            }
+            for secret in secrets
+        ]
+    
+    if relationship_memories:
+        result["relationship_memories"] = [
+            {
+                "memory_id": memory.id,
+                "target_id": memory.target_id,
+                "content": memory.content,
+                "impact": memory.impact_json or {},
+                "source_event_id": memory.source_event_id,
+                "created_turn": memory.created_turn,
+            }
+            for memory in relationship_memories
+        ]
+    
+    return result
 
 
 def _retrieve_facts_for_context(

@@ -26,6 +26,7 @@ from llm_rpg.storage.models import (
     ChapterModel,
     EventLogModel,
     LocationModel,
+    NPCSecretModel,
     NPCTemplateModel,
     QuestTemplateModel,
     SaveSlotModel,
@@ -35,6 +36,7 @@ from llm_rpg.storage.models import (
     SessionQuestStateModel,
     SessionStateModel,
     SystemSettingsModel,
+    ValidationReportModel,
     UserModel,
     WorldModel,
 )
@@ -45,7 +47,17 @@ from llm_rpg.core.turn_service import (
     _execute_narration_stage,
     execute_turn_service,
 )
-from llm_rpg.llm.service import MockLLMProvider, LLMService, LLMMessage
+from llm_rpg.llm.service import MockLLMProvider, LLMService, LLMMessage, LLMResponse
+
+
+class ExactMockLLMProvider(MockLLMProvider):
+    def __init__(self, content: str):
+        super().__init__()
+        self.content = content
+
+    async def generate(self, messages, **kwargs):
+        self.call_count += 1
+        return LLMResponse(content=self.content, model=self.model, usage={})
 
 
 @pytest.fixture
@@ -675,6 +687,66 @@ class TestNarrationContextSecurity:
 
         assert "constraints" in context
         assert any("隐藏" in c for c in context["constraints"])
+
+    def test_leaky_narration_creates_validation_report_and_is_rejected(
+        self, client: TestClient, db: Session, seeded_session: SessionModel,
+    ):
+        db.add_all([
+            SystemSettingsModel(provider_mode="mock"),
+            SessionNPCStateModel(
+                id="narration_npc_public_state",
+                session_id=seeded_session.id,
+                npc_template_id="narration_npc_public",
+                current_location_id="narration_square",
+            ),
+            NPCSecretModel(
+                id="narration_secret",
+                session_id=seeded_session.id,
+                npc_id="narration_npc_public",
+                content="柳师姐私藏逆鳞令",
+                status="hidden",
+            ),
+        ])
+        db.commit()
+
+        mock_provider = ExactMockLLMProvider(
+            json.dumps({
+                "text": "柳师姐私藏逆鳞令，这个秘密浮现在你眼前。",
+                "tone": "neutral",
+            })
+        )
+        real_llm_service = LLMService(provider=mock_provider, db_session=db)
+
+        with patch(
+            "llm_rpg.core.turn_service._create_llm_service_from_config",
+            return_value=real_llm_service,
+        ):
+            with patch(
+                "llm_rpg.core.turn_service._is_narration_stage_enabled",
+                return_value=True,
+            ):
+                response = client.post(
+                    f"/game/sessions/{seeded_session.id}/turn",
+                    json={"action": "观察四周"},
+                )
+
+        assert response.status_code == 200
+        db.expire_all()
+
+        report = db.query(ValidationReportModel).filter_by(
+            session_id=seeded_session.id,
+            turn_no=1,
+            scope="narration_leak_validation",
+            is_valid=False,
+        ).one()
+        assert any("npc_secret:narration_npc_public" in error for error in report.errors_json)
+
+        event = db.query(EventLogModel).filter_by(
+            session_id=seeded_session.id,
+            turn_no=1,
+            event_type="player_turn",
+        ).one()
+        assert event.narrative_text != "柳师姐私藏逆鳞令，这个秘密浮现在你眼前。"
 
     def test_narration_stage_records_fallback_reason(
         self, client: TestClient, db: Session, seeded_session: SessionModel,

@@ -26,6 +26,7 @@ from llm_rpg.storage.models import (
     SessionNPCStateModel, SessionQuestStateModel, EventLogModel,
     MemorySummaryModel, MemoryFactModel,
 )
+from llm_rpg.storage.repositories import SessionStateRepository
 from llm_rpg.core.state_reconstruction import (
     reconstruct_canonical_state,
     get_latest_turn_number,
@@ -987,6 +988,449 @@ class TestStateReconstructionIntegration:
         
         assert reconstructed is not None
         assert reconstructed.player_state.location_id == "loc1"
+
+
+# =============================================================================
+# Replay/Live State Comparison Test Harness
+# =============================================================================
+
+class TestReplayLiveStateComparison:
+    """
+    Test harness for comparing reconstructed state from committed events/deltas
+    to live session_state in DB.
+    
+    SUPPORTED FIELDS (deterministically persisted):
+    - current_location_id: Player's current location
+    - world_time: Calendar, season, day, period (time_phase)
+    - turn_no: Latest turn number from event_logs
+    
+    UNSUPPORTED FIELDS (out-of-scope for this harness):
+    - NPC future simulation states (hidden_plan_state, current_goal_ids)
+    - Scene event predictions (would require LLM re-execution)
+    - Combat states (not fully persisted)
+    - Inventory states (not fully persisted)
+    - Knowledge states (not fully persisted)
+    - Schedule states (not fully persisted)
+    - Faction/relationship states (not fully persisted)
+    - Player HP/max HP (may drift due to combat resolution not in events)
+    
+    These unsupported fields require LLM re-execution or are not deterministically
+    persisted in the current event/delta schema.
+    """
+    
+    def setup_method(self):
+        """Reset replay store before each test."""
+        reset_replay_store()
+    
+    def _create_turn_event(
+        self,
+        db: DBSession,
+        session_id: str,
+        turn_no: int,
+        input_text: str,
+        result_json: Dict[str, Any],
+        narrative_text: str = "叙事文本",
+        state_deltas: Optional[List[Dict[str, Any]]] = None,
+    ) -> EventLogModel:
+        """Helper to create a turn event with state deltas."""
+        event = EventLogModel(
+            id=f"evt_replay_{turn_no}",
+            session_id=session_id,
+            turn_no=turn_no,
+            event_type="player_input",
+            input_text=input_text,
+            result_json=result_json,
+            narrative_text=narrative_text,
+            occurred_at=datetime.now(),
+        )
+        db.add(event)
+        db.commit()
+        return event
+    
+    def _update_live_session_state(
+        self,
+        db: DBSession,
+        session_id: str,
+        current_location_id: Optional[str] = None,
+        current_time: Optional[str] = None,
+        time_phase: Optional[str] = None,
+    ) -> None:
+        """Helper to update live session_state in DB."""
+        session_state_repo = SessionStateRepository(db)
+        update_data = {"session_id": session_id}
+        if current_location_id is not None:
+            update_data["current_location_id"] = current_location_id
+        if current_time is not None:
+            update_data["current_time"] = current_time
+        if time_phase is not None:
+            update_data["time_phase"] = time_phase
+        session_state_repo.create_or_update(update_data)
+    
+    def _compare_reconstructed_to_live(
+        self,
+        db: DBSession,
+        session_id: str,
+        expected_location_id: Optional[str] = None,
+        expected_world_time: Optional[Dict[str, Any]] = None,
+        expected_turn_no: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compare reconstructed state to live session_state.
+        
+        Returns a dict with:
+        - 'match': True if all provided fields match
+        - 'drifts': List of field drifts detected
+        - 'reconstructed': Reconstructed CanonicalState
+        - 'live': Live session_state from DB
+        """
+        # Reconstruct state from committed events/deltas
+        reconstructed = reconstruct_canonical_state(db, session_id)
+        
+        # Get live session_state from DB
+        session_state_repo = SessionStateRepository(db)
+        live_state = session_state_repo.get_by_session(session_id)
+        
+        # Get live turn_no from event_logs
+        live_turn_no = get_latest_turn_number(db, session_id)
+        
+        drifts = []
+        
+        # Compare current_location_id
+        if expected_location_id is not None:
+            live_location = live_state.current_location_id if live_state else None
+            recon_location = reconstructed.player_state.location_id if reconstructed else None
+            
+            if live_location != expected_location_id:
+                drifts.append({
+                    "field": "current_location_id",
+                    "expected": expected_location_id,
+                    "live": live_location,
+                    "reconstructed": recon_location,
+                    "type": "live_drift",
+                })
+            elif recon_location != expected_location_id:
+                drifts.append({
+                    "field": "current_location_id",
+                    "expected": expected_location_id,
+                    "live": live_location,
+                    "reconstructed": recon_location,
+                    "type": "reconstruction_drift",
+                })
+        
+        # Compare world_time
+        if expected_world_time is not None and reconstructed is not None:
+            live_time = live_state.current_time if live_state else None
+            live_phase = live_state.time_phase if live_state else None
+            
+            recon_time = reconstructed.world_state.current_time
+            
+            if expected_world_time.get("season") and recon_time.season != expected_world_time["season"]:
+                drifts.append({
+                    "field": "world_time.season",
+                    "expected": expected_world_time["season"],
+                    "live": live_time,
+                    "reconstructed": recon_time.season,
+                    "type": "reconstruction_drift",
+                })
+            
+            if expected_world_time.get("day") and recon_time.day != expected_world_time["day"]:
+                drifts.append({
+                    "field": "world_time.day",
+                    "expected": expected_world_time["day"],
+                    "live": live_time,
+                    "reconstructed": recon_time.day,
+                    "type": "reconstruction_drift",
+                })
+            
+            if expected_world_time.get("period") and recon_time.period != expected_world_time["period"]:
+                drifts.append({
+                    "field": "world_time.period",
+                    "expected": expected_world_time["period"],
+                    "live": live_phase,
+                    "reconstructed": recon_time.period,
+                    "type": "reconstruction_drift",
+                })
+        
+        # Compare turn_no
+        if expected_turn_no is not None:
+            if live_turn_no != expected_turn_no:
+                drifts.append({
+                    "field": "turn_no",
+                    "expected": expected_turn_no,
+                    "live": live_turn_no,
+                    "reconstructed": live_turn_no,  # Same source
+                    "type": "live_drift",
+                })
+        
+        return {
+            "match": len(drifts) == 0,
+            "drifts": drifts,
+            "reconstructed": reconstructed,
+            "live": live_state,
+            "live_turn_no": live_turn_no,
+        }
+    
+    def test_replay_matches_live_after_multiple_turns(self, db, session_with_state):
+        """
+        Test that reconstructed state matches live DB state after N turns.
+        
+        This test simulates multiple turns with state changes and verifies
+        that reconstruction from committed events produces the same state
+        as the live session_state in the DB.
+        """
+        # Create multiple turn events with state changes
+        turns_data = [
+            {
+                "turn_no": 1,
+                "input": "前往内院",
+                "result_json": {
+                    "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                    "world_progression": {"time_delta": 1},
+                    "parsed_intent": {"intent_type": "move", "target": "内院"},
+                },
+                "state_deltas": [
+                    {"path": "player_state.location_id", "old_value": "loc1", "new_value": "loc2", "operation": "set"},
+                ],
+            },
+            {
+                "turn_no": 2,
+                "input": "等待",
+                "result_json": {
+                    "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                    "world_progression": {"time_delta": 2},
+                    "parsed_intent": {"intent_type": "wait"},
+                },
+                "state_deltas": [],
+            },
+            {
+                "turn_no": 3,
+                "input": "与柳师姐交谈",
+                "result_json": {
+                    "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                    "world_progression": {"time_delta": 1},
+                    "parsed_intent": {"intent_type": "talk", "target": "柳师姐"},
+                },
+                "state_deltas": [],
+            },
+        ]
+        
+        for turn_data in turns_data:
+            self._create_turn_event(
+                db=db,
+                session_id="s1",
+                turn_no=turn_data["turn_no"],
+                input_text=turn_data["input"],
+                result_json=turn_data["result_json"],
+            )
+        
+        # Update live session_state to reflect turn progression
+        # (simulating what turn_service does at lines 3238-3246)
+        self._update_live_session_state(
+            db=db,
+            session_id="s1",
+            current_location_id="loc2",  # After move to inner court
+            current_time="修仙历 春 第8日 辰时",  # 5 + 1 + 2 = 8 days
+            time_phase="辰时",
+        )
+        
+        # Compare reconstructed to live
+        comparison = self._compare_reconstructed_to_live(
+            db=db,
+            session_id="s1",
+            expected_location_id="loc2",
+            expected_world_time={"season": "春", "day": 8, "period": "辰时"},
+            expected_turn_no=3,
+        )
+        
+        # Verify match
+        assert comparison["match"], f"Drifts detected: {comparison['drifts']}"
+        assert comparison["reconstructed"] is not None
+        assert comparison["reconstructed"].player_state.location_id == "loc2"
+        assert comparison["live_turn_no"] == 3
+    
+    def test_drift_detection_location_mismatch(self, db, session_with_state):
+        """
+        Test that drift is detected when live location differs from expected.
+        
+        This is a regression test that deliberately mutates live state
+        and verifies the comparison harness detects the drift.
+        """
+        # Create a turn event
+        self._create_turn_event(
+            db=db,
+            session_id="s1",
+            turn_no=1,
+            input_text="前往内院",
+            result_json={
+                "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                "world_progression": {"time_delta": 1},
+            },
+        )
+        
+        # Deliberately set live state to WRONG location (simulating drift/corruption)
+        self._update_live_session_state(
+            db=db,
+            session_id="s1",
+            current_location_id="loc_wrong",  # WRONG - should be loc2 after move
+        )
+        
+        # Compare with expected location (correct value)
+        comparison = self._compare_reconstructed_to_live(
+            db=db,
+            session_id="s1",
+            expected_location_id="loc2",  # Expected after move
+        )
+        
+        # Verify drift is detected
+        assert not comparison["match"], "Drift should have been detected"
+        assert len(comparison["drifts"]) > 0
+        
+        # Find the location drift
+        location_drift = next(
+            (d for d in comparison["drifts"] if d["field"] == "current_location_id"),
+            None,
+        )
+        assert location_drift is not None, "Location drift should be recorded"
+        assert location_drift["expected"] == "loc2"
+        assert location_drift["live"] == "loc_wrong"
+    
+    def test_drift_detection_time_mismatch(self, db, session_with_state):
+        """
+        Test that drift is detected when live time differs from expected.
+        """
+        # Create a turn event
+        self._create_turn_event(
+            db=db,
+            session_id="s1",
+            turn_no=1,
+            input_text="等待",
+            result_json={
+                "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                "world_progression": {"time_delta": 3},
+            },
+        )
+        
+        # Update live state with WRONG time (simulating drift)
+        self._update_live_session_state(
+            db=db,
+            session_id="s1",
+            current_time="修仙历 冬 第1日 辰时",  # WRONG - should be 春
+            time_phase="子时",  # WRONG
+        )
+        
+        # Compare with expected time
+        comparison = self._compare_reconstructed_to_live(
+            db=db,
+            session_id="s1",
+            expected_world_time={"season": "春", "day": 8, "period": "辰时"},
+        )
+        
+        # Verify drift is detected
+        assert not comparison["match"], "Time drift should have been detected"
+        
+        # Find the time drift
+        time_drifts = [d for d in comparison["drifts"] if "world_time" in d["field"]]
+        assert len(time_drifts) > 0, "Time drift should be recorded"
+    
+    def test_drift_detection_turn_no_mismatch(self, db, session_with_state):
+        """
+        Test that drift is detected when turn_no differs from expected.
+        """
+        # Create turn events
+        for turn_no in [1, 2, 3]:
+            self._create_turn_event(
+                db=db,
+                session_id="s1",
+                turn_no=turn_no,
+                input_text=f"turn {turn_no}",
+                result_json={
+                    "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                },
+            )
+        
+        # Compare with WRONG expected turn (simulating drift detection)
+        comparison = self._compare_reconstructed_to_live(
+            db=db,
+            session_id="s1",
+            expected_turn_no=5,  # WRONG - actual is 3
+        )
+        
+        # Verify drift is detected
+        assert not comparison["match"], "Turn number drift should have been detected"
+        
+        turn_drift = next(
+            (d for d in comparison["drifts"] if d["field"] == "turn_no"),
+            None,
+        )
+        assert turn_drift is not None
+        assert turn_drift["expected"] == 5
+        assert turn_drift["live"] == 3
+    
+    def test_reconstruction_from_event_history_matches_live(self, db, session_with_state):
+        """
+        Test that reconstruction from event history produces same state as live.
+        
+        This test verifies that the canonical reconstruction logic
+        (state_reconstruction.py) correctly reads from persisted DB rows
+        and produces the same values as the live session_state.
+        """
+        # Set up known state in session_state
+        session_state_repo = SessionStateRepository(db)
+        session_state_repo.create_or_update({
+            "session_id": "s1",
+            "current_location_id": "loc2",
+            "current_time": "修仙历 夏 第15日 午时",
+            "time_phase": "午时",
+            "active_mode": "dialogue",
+            "global_flags_json": {"test_flag": True},
+        })
+        
+        # Create event history
+        for turn_no in range(1, 6):
+            self._create_turn_event(
+                db=db,
+                session_id="s1",
+                turn_no=turn_no,
+                input_text=f"action {turn_no}",
+                result_json={
+                    "llm_stages": [{"stage_name": "narration", "enabled": True, "accepted": True}],
+                },
+            )
+        
+        # Reconstruct from DB
+        reconstructed = reconstruct_canonical_state(db, "s1")
+        
+        # Get live state
+        live_state = session_state_repo.get_by_session("s1")
+        
+        # Verify reconstruction matches live
+        assert reconstructed is not None
+        assert reconstructed.player_state.location_id == live_state.current_location_id
+        assert reconstructed.world_state.current_time.period == live_state.time_phase
+        
+        # Verify turn_no from events
+        latest_turn = get_latest_turn_number(db, "s1")
+        assert latest_turn == 5
+    
+    def test_supported_fields_documented(self, db, session_with_state):
+        """
+        Meta-test: Verify supported/unsupported fields are documented.
+        
+        This test exists to ensure the class docstring remains accurate
+        about which fields are supported for comparison.
+        """
+        docstring = self.__class__.__doc__
+        
+        # Verify supported fields are documented
+        assert "SUPPORTED FIELDS" in docstring
+        assert "current_location_id" in docstring
+        assert "world_time" in docstring
+        assert "turn_no" in docstring
+        
+        # Verify unsupported fields are documented
+        assert "UNSUPPORTED FIELDS" in docstring
+        assert "NPC future simulation" in docstring or "hidden_plan_state" in docstring
+        assert "Scene event predictions" in docstring or "not deterministically" in docstring
 
 
 if __name__ == "__main__":

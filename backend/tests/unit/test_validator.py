@@ -6,7 +6,13 @@ Tests the ValidationContext dataclass and its integration with validation method
 
 import pytest
 from unittest.mock import MagicMock
+from datetime import datetime
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from llm_rpg.core.validation.narration_leak_validator import NarrationLeakValidator
+from llm_rpg.core.validation.npc_knowledge_validator import NPCKnowledgeValidator
 from llm_rpg.core.validator import Validator, ValidationContext
 from llm_rpg.models.states import (
     CanonicalState,
@@ -19,6 +25,18 @@ from llm_rpg.models.states import (
 )
 from llm_rpg.models.perspectives import NPCPerspective, PerspectiveType
 from llm_rpg.models.common import ProposedAction
+from llm_rpg.storage.database import Base
+from llm_rpg.storage.models import (
+    GameEventModel,
+    NPCBeliefModel,
+    NPCTemplateModel,
+    NPCSecretModel,
+    SessionModel,
+    SessionNPCStateModel,
+    TurnTransactionModel,
+    UserModel,
+    WorldModel,
+)
 
 
 def create_sample_state() -> CanonicalState:
@@ -60,6 +78,174 @@ def create_sample_state() -> CanonicalState:
             ),
         },
     )
+
+
+@pytest.fixture
+def npc_knowledge_db():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    session.add_all([
+        UserModel(id="user_npc_knowledge", username="npc_knowledge", email="npc_knowledge@example.com", password_hash="hashed"),
+        WorldModel(id="world_npc_knowledge", code="world_npc_knowledge", name="NPC知识世界"),
+        SessionModel(id="session_npc_knowledge", user_id="user_npc_knowledge", world_id="world_npc_knowledge", status="active"),
+        NPCTemplateModel(
+            id="npc_alchemist",
+            world_id="world_npc_knowledge",
+            code="alchemist",
+            name="丹师",
+            public_identity="宗门丹师",
+            hidden_identity="他其实是叛逃药王",
+        ),
+        NPCTemplateModel(
+            id="npc_guard",
+            world_id="world_npc_knowledge",
+            code="guard",
+            name="守卫",
+            public_identity="山门守卫",
+            hidden_identity="她其实是暗线密探",
+        ),
+        SessionNPCStateModel(
+            id="npc_state_alchemist",
+            session_id="session_npc_knowledge",
+            npc_template_id="npc_alchemist",
+            current_location_id="loc_tavern",
+        ),
+        SessionNPCStateModel(
+            id="npc_state_guard",
+            session_id="session_npc_knowledge",
+            npc_template_id="npc_guard",
+            current_location_id="loc_tavern",
+        ),
+        NPCSecretModel(
+            id="secret_alchemist",
+            session_id="session_npc_knowledge",
+            npc_id="npc_alchemist",
+            content="丹师把九转还魂丹藏在炉底暗格",
+            status="hidden",
+        ),
+        NPCSecretModel(
+            id="secret_guard",
+            session_id="session_npc_knowledge",
+            npc_id="npc_guard",
+            content="守卫知道东门阵眼今晚失效",
+            status="hidden",
+        ),
+        NPCBeliefModel(
+            id="belief_guard_secret_access",
+            session_id="session_npc_knowledge",
+            npc_id="npc_guard",
+            belief_type="perceived_secret",
+            content="丹师把九转还魂丹藏在炉底暗格",
+            confidence=0.9,
+            truth_status="true",
+            created_turn=1,
+            last_updated_turn=1,
+        ),
+        NPCBeliefModel(
+            id="belief_guard_public",
+            session_id="session_npc_knowledge",
+            npc_id="npc_guard",
+            belief_type="public_fact",
+            content="宗门广场每日辰时鸣钟",
+            confidence=1.0,
+            truth_status="true",
+            created_turn=1,
+            last_updated_turn=1,
+        ),
+    ])
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+def create_npc_knowledge_state() -> CanonicalState:
+    state = create_sample_state()
+    state.npc_states["npc_alchemist"] = NPCState(
+        entity_id="npc_alchemist",
+        npc_id="npc_alchemist",
+        name="丹师",
+        location_id="loc_tavern",
+    )
+    state.npc_states["npc_guard"] = NPCState(
+        entity_id="npc_guard",
+        npc_id="npc_guard",
+        name="守卫",
+        location_id="loc_tavern",
+    )
+    return state
+
+
+@pytest.fixture
+def narration_db():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    session.add_all([
+        UserModel(id="user_narration", username="narration", email="narration@example.com", password_hash="hashed"),
+        WorldModel(id="world_narration", code="world_narration", name="叙事世界"),
+        SessionModel(id="session_narration", user_id="user_narration", world_id="world_narration", status="active"),
+        NPCTemplateModel(
+            id="npc_mentor",
+            world_id="world_narration",
+            code="mentor",
+            name="柳师姐",
+            public_identity="宗门师姐",
+            hidden_identity="她其实是魔门卧底",
+        ),
+        SessionNPCStateModel(
+            id="npc_state_mentor",
+            session_id="session_narration",
+            npc_template_id="npc_mentor",
+            current_location_id="loc_tavern",
+        ),
+        NPCSecretModel(
+            id="secret_mentor",
+            session_id="session_narration",
+            npc_id="npc_mentor",
+            content="柳师姐藏着血契玉简",
+            status="hidden",
+        ),
+        TurnTransactionModel(
+            id="txn_narration",
+            session_id="session_narration",
+            turn_no=1,
+            idempotency_key="txn_narration_key",
+            status="committed",
+            started_at=datetime.now(),
+        ),
+        GameEventModel(
+            id="event_private",
+            transaction_id="txn_narration",
+            session_id="session_narration",
+            turn_no=1,
+            event_type="npc_private_thought",
+            actor_id="npc_mentor",
+            private_payload_json={"thought": "柳师姐准备午夜叛逃"},
+            occurred_at=datetime.now(),
+        ),
+    ])
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
 
 
 class TestValidationContextDataclass:
@@ -172,6 +358,135 @@ class TestValidationContextFactory:
         assert context.perspective is perspective
         assert context.source_event_id == "event_42"
         assert context.actor_id == "npc_merchant"
+
+
+class TestNarrationLeakValidatorDBBackedFacts:
+    def test_db_backed_npc_secret_leak_is_rejected(self, narration_db):
+        validator = NarrationLeakValidator()
+
+        result = validator.validate_narration(
+            text="柳师姐藏着血契玉简，不能让别人发现。",
+            forbidden_info=[],
+            db=narration_db,
+            session_id="session_narration",
+            npc_ids=["npc_mentor"],
+        )
+
+        assert not result.is_valid
+        assert any("npc_secret:npc_mentor" in error for error in result.errors)
+
+    def test_hidden_identity_exposure_is_rejected(self, narration_db):
+        validator = NarrationLeakValidator()
+
+        result = validator.validate_narration(
+            text="柳师姐表面温和，但她其实是魔门卧底。",
+            forbidden_info=[],
+            db=narration_db,
+            session_id="session_narration",
+            npc_ids=["npc_mentor"],
+        )
+
+        assert not result.is_valid
+        assert any("hidden_identity:npc_mentor" in error for error in result.errors)
+
+    def test_private_payload_content_is_rejected(self, narration_db):
+        validator = NarrationLeakValidator()
+
+        result = validator.validate_narration(
+            text="夜色中，柳师姐准备午夜叛逃。",
+            forbidden_info=[],
+            db=narration_db,
+            session_id="session_narration",
+        )
+
+        assert not result.is_valid
+        assert any("private_payload:event_private" in error for error in result.errors)
+
+    def test_safe_player_visible_narration_is_accepted(self, narration_db):
+        validator = NarrationLeakValidator()
+
+        result = validator.validate_narration(
+            text="柳师姐站在宗门广场，提醒你留意脚下青石。",
+            forbidden_info=[],
+            db=narration_db,
+            session_id="session_narration",
+            npc_ids=["npc_mentor"],
+        )
+
+        assert result.is_valid
+        assert result.errors == []
+
+
+class TestNPCKnowledgeValidatorDBBackedFacts:
+    def test_unknown_secret_reference_is_rejected(self, npc_knowledge_db):
+        validator = NPCKnowledgeValidator()
+
+        result = validator.validate_knowledge(
+            npc_id="npc_alchemist",
+            knowledge="我知道守卫知道东门阵眼今晚失效，正好可以利用。",
+            state=create_npc_knowledge_state(),
+            db=npc_knowledge_db,
+            session_id="session_npc_knowledge",
+        )
+
+        assert not result.is_valid
+        assert any("npc_secret:npc_guard" in error for error in result.errors)
+
+    def test_hidden_identity_exposure_is_rejected_without_access(self, npc_knowledge_db):
+        validator = NPCKnowledgeValidator()
+
+        result = validator.validate_knowledge(
+            npc_id="npc_alchemist",
+            knowledge="守卫表面寻常，但她其实是暗线密探。",
+            state=create_npc_knowledge_state(),
+            db=npc_knowledge_db,
+            session_id="session_npc_knowledge",
+        )
+
+        assert not result.is_valid
+        assert any("hidden_identity:npc_guard" in error for error in result.errors)
+
+    def test_owned_secret_is_accepted(self, npc_knowledge_db):
+        validator = NPCKnowledgeValidator()
+
+        result = validator.validate_knowledge(
+            npc_id="npc_alchemist",
+            knowledge="丹师把九转还魂丹藏在炉底暗格，所以他要守住丹房。",
+            state=create_npc_knowledge_state(),
+            db=npc_knowledge_db,
+            session_id="session_npc_knowledge",
+        )
+
+        assert result.is_valid
+        assert result.errors == []
+
+    def test_perceived_secret_in_belief_is_accepted(self, npc_knowledge_db):
+        validator = NPCKnowledgeValidator()
+
+        result = validator.validate_knowledge(
+            npc_id="npc_guard",
+            knowledge="她记得丹师把九转还魂丹藏在炉底暗格，因此加派人手。",
+            state=create_npc_knowledge_state(),
+            db=npc_knowledge_db,
+            session_id="session_npc_knowledge",
+        )
+
+        assert result.is_valid
+        assert result.errors == []
+
+    def test_public_common_knowledge_is_not_blocked(self, npc_knowledge_db):
+        validator = NPCKnowledgeValidator()
+
+        result = validator.validate_knowledge(
+            npc_id="npc_guard",
+            knowledge="宗门广场每日辰时鸣钟，守卫准备按时开门。",
+            state=create_npc_knowledge_state(),
+            db=npc_knowledge_db,
+            session_id="session_npc_knowledge",
+        )
+
+        assert result.is_valid
+        assert result.errors == []
 
 
 class TestValidatorWithValidationContext:

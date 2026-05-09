@@ -41,6 +41,20 @@ from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
 from .quest_progression import check_quest_progression, QuestProgressionError
 from .validator import Validator, ValidationContext
+from .validation import (
+    MovementValidator,
+    QuestValidator,
+    NPCKnowledgeValidator,
+    NarrationLeakValidator,
+)
+from ..engines.scene_transition import SceneTransitionResolver
+from .perception import PerceptionResolver
+from .projections import (
+    PlayerVisibleProjectionBuilder,
+    NPCVisibleProjectionBuilder,
+    NarratorProjectionBuilder,
+)
+from ..engines.scheduled_event_processor import ScheduledEventProcessor
 
 from ..storage.models import SessionModel, EventLogModel, MemorySummaryModel, MemoryFactModel
 from ..storage.repositories import (
@@ -859,12 +873,13 @@ def _build_narration_context(
     Build narration context from committed state only.
     
     CRITICAL: Only includes player-visible facts. No hidden NPC info.
+    Uses NarratorProjectionBuilder to ensure private_payload is never included.
     
     Context includes:
     - Session state (current location, world time)
     - Action result (movement success/blocked, quest progression)
     - Visible NPCs at location (public identity only, NO hidden_identity)
-    - Recent event log entries (last 5 turns)
+    - Narration events (filtered by NarratorProjectionBuilder, NO private_payload)
     - Current location details
     - State deltas from this turn
     - Relevant memory summaries (world/scene level, NO NPC subjective)
@@ -880,8 +895,11 @@ def _build_narration_context(
         current_location_id: The current location ID after any movement
         
     Returns:
-        Dict with narration context for LLM
+        Dict with narration context for LLM (private_payload excluded)
     """
+    from ..models.events import GameEvent, EventType
+    from ..models.perspectives import PlayerPerspective, NarratorPerspective
+    
     context: Dict[str, Any] = {
         "session_id": session_id,
         "player_input": player_input,
@@ -891,6 +909,7 @@ def _build_narration_context(
             "不能泄露隐藏的秘密或未揭示的信息",
             "不能添加未发生的事件或未提交的状态变化",
             "叙事必须基于已提交的事实",
+            "private_payload 严禁出现在叙事中",
         ],
     }
     
@@ -944,8 +963,63 @@ def _build_narration_context(
     active_quests = _get_active_quests(db, session_id)
     context["active_quests"] = active_quests
     
-    recent_events = _get_recent_events(db, session_id, limit=5)
-    context["recent_events"] = recent_events
+    game_event_repo = GameEventRepository(db)
+    recent_event_models = game_event_repo.get_by_session(session_id, limit=10)
+    
+    if recent_event_models:
+        recent_game_events = []
+        for em in recent_event_models:
+            try:
+                event = GameEvent(
+                    event_id=em.id,
+                    event_type=EventType(em.event_type),
+                    turn_index=em.turn_no,
+                    timestamp=em.occurred_at,
+                    metadata=em.public_payload_json or {},
+                )
+                recent_game_events.append(event)
+            except Exception:
+                continue
+        
+        if recent_game_events:
+            player_perspective = PlayerPerspective(
+                perspective_id="player",
+                owner_id="player",
+                known_facts=getattr(player_state, "known_fact_ids", []),
+            )
+            
+            narrator_perspective = NarratorPerspective(
+                perspective_id="narrator",
+                owner_id="narrator",
+                base_perspective_id="player",
+                tone="neutral",
+                pacing="normal",
+                forbidden_info=["hidden_identity", "secret_plan", "private_payload"],
+                allowed_hints=["foreshadowing", "rumor"],
+            )
+            
+            perception_resolver = PerceptionResolver()
+            narrator_projection_builder = NarratorProjectionBuilder(perception_resolver)
+            
+            projection_context = {
+                "player_location_id": context.get("current_location_id", "unknown"),
+                "current_turn": canonical_state.world_state.current_turn if hasattr(canonical_state.world_state, 'current_turn') else 0,
+                "player_perspective": player_perspective,
+            }
+            
+            narration_events = narrator_projection_builder.build_projection(
+                events=recent_game_events,
+                perspective=narrator_perspective,
+                context=projection_context,
+            )
+            
+            context["narration_events"] = narration_events
+        else:
+            recent_events = _get_recent_events(db, session_id, limit=5)
+            context["recent_events"] = recent_events
+    else:
+        recent_events = _get_recent_events(db, session_id, limit=5)
+        context["recent_events"] = recent_events
     
     if npc_reactions:
         player_visible_reactions = [
@@ -961,7 +1035,6 @@ def _build_narration_context(
         if player_visible_reactions:
             context["npc_reactions"] = player_visible_reactions
     
-    # Retrieve relevant memory summaries (world/scene level only, NO NPC subjective)
     memory_summaries = _retrieve_memories_for_context(
         db=db,
         session_id=session_id,
@@ -1206,7 +1279,8 @@ def _build_npc_context(
     - NPC public identity, personality, goals
     - Relationship scores (trust, suspicion)
     - Current location
-    - Recent visible events
+    - Perceived events (filtered by NPCVisibleProjectionBuilder)
+    - Perception constraints
     - Player action context
     - Other NPCs' visible reactions (from sequential processing)
     - NPC subjective memories (scoped by NPC ID)
@@ -1214,7 +1288,11 @@ def _build_npc_context(
     NEVER includes:
     - hidden_identity from NPCTemplateModel
     - hidden_plan_state from SessionNPCStateModel
+    - private_payload from events
     """
+    from ..models.events import GameEvent, EventType
+    from ..models.perspectives import NPCPerspective
+    
     npc_template_repo = NPCTemplateRepository(db)
     npc_template = npc_template_repo.get_by_id(npc_template_id)
     
@@ -1228,6 +1306,9 @@ def _build_npc_context(
         if ns.id == npc_id:
             npc_state = ns
             break
+    
+    # Determine NPC location
+    npc_location_id = npc_state.current_location_id if npc_state else current_location_id
     
     context: Dict[str, Any] = {
         "npc_id": npc_id,
@@ -1264,8 +1345,76 @@ def _build_npc_context(
     if state_deltas:
         context["state_deltas"] = state_deltas
     
-    recent_events = _get_recent_events(db, session_id, limit=3)
-    context["recent_events"] = recent_events
+    # Use NPCVisibleProjectionBuilder to filter events for NPC perspective
+    game_event_repo = GameEventRepository(db)
+    recent_event_models = game_event_repo.get_by_session(session_id, limit=10)
+    
+    if recent_event_models:
+        # Convert GameEventModel to GameEvent Pydantic model
+        recent_game_events = []
+        for em in recent_event_models:
+            try:
+                event = GameEvent(
+                    event_id=em.id,
+                    event_type=EventType(em.event_type),
+                    turn_index=em.turn_no,
+                    timestamp=em.occurred_at,
+                    metadata=em.public_payload_json or {},
+                )
+                recent_game_events.append(event)
+            except Exception:
+                continue
+        
+        if recent_game_events:
+            # Build NPC perspective for projection
+            npc_perspective = NPCPerspective(
+                perspective_id=f"npc_{npc_id}",
+                owner_id=npc_id,
+                npc_id=npc_id,
+                known_facts=getattr(npc_state, "known_fact_ids", []) if npc_state else [],
+                forbidden_knowledge=getattr(npc_template, "forbidden_knowledge", []) if npc_template else [],
+            )
+            
+            # Create projection builder
+            perception_resolver = PerceptionResolver()
+            npc_projection_builder = NPCVisibleProjectionBuilder(perception_resolver)
+            
+            # Build projection context
+            projection_context = {
+                "npc_location_id": npc_location_id or "unknown",
+                "current_turn": canonical_state.world_state.current_turn if hasattr(canonical_state.world_state, 'current_turn') else 0,
+            }
+            
+            # Get perceived events filtered by NPC perspective
+            perceived_events = npc_projection_builder.build_projection(
+                events=recent_game_events,
+                perspective=npc_perspective,
+                context=projection_context,
+            )
+            
+            context["perceived_events"] = perceived_events
+            
+            # Add perception constraints based on NPC perspective
+            perception_constraints = [
+                "只能感知当前位置发生的事件",
+                "无法感知被标记为隐藏的事件",
+                "无法获取禁止知识相关的事件",
+            ]
+            
+            if npc_perspective.forbidden_knowledge:
+                perception_constraints.append(
+                    f"禁止知识: {', '.join(npc_perspective.forbidden_knowledge[:3])}"
+                )
+            
+            context["perception_constraints"] = perception_constraints
+        else:
+            # Fallback to simple recent events if no GameEvent objects
+            recent_events = _get_recent_events(db, session_id, limit=3)
+            context["recent_events"] = recent_events
+    else:
+        # Fallback to simple recent events if no events in DB
+        recent_events = _get_recent_events(db, session_id, limit=3)
+        context["recent_events"] = recent_events
     
     if recent_npc_actions:
         context["recent_npc_reactions"] = [
@@ -2440,8 +2589,90 @@ def execute_turn_service(
         state_deltas: Dict[str, Any] = {}
         
         if action_type == "move" and target:
-            # Handle movement
-            movement_result = handle_movement(db, session_id, target)
+            from_location_id = current_location_id or ""
+            
+            # Resolve target location code for validation
+            from .movement_handler import _resolve_location_code
+            resolved_target_code = _resolve_location_code(target)
+            target_location_id = resolved_target_code or target
+            
+            # Step 7a: Check scene transition blocked paths first
+            scene_transition_resolver = SceneTransitionResolver()
+            game_state_for_transition = {
+                "player_location": from_location_id,
+                "current_turn": turn_no,
+            }
+            can_move, blocked_reason = scene_transition_resolver.can_move_to(
+                from_location=from_location_id,
+                to_location=target_location_id,
+                game_state=game_state_for_transition,
+            )
+            
+            if not can_move:
+                # Scene transition blocked - record validation report and game event
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="scene_transition_validation",
+                    is_valid=False,
+                    errors_json=[blocked_reason or "Movement blocked by scene"],
+                    warnings_json=[],
+                )
+                _create_game_event(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type="movement_blocked",
+                    actor_id="player",
+                    target_ids=[target_location_id],
+                    visibility_scope="player_visible",
+                    public_payload={
+                        "from_location_id": from_location_id,
+                        "to_location_id": target_location_id,
+                        "blocked_reason": blocked_reason,
+                    },
+                )
+                logger.warning("Scene transition blocked: %s", blocked_reason)
+                movement_result = MovementResult(
+                    success=False,
+                    blocked_reason=blocked_reason or "Movement blocked by scene",
+                    previous_location_id=from_location_id,
+                )
+            else:
+                # Step 7b: Validate movement with MovementValidator
+                movement_validator = MovementValidator()
+                movement_validation = movement_validator.validate_movement(
+                    actor_id="player",
+                    from_location_id=from_location_id,
+                    to_location_id=target_location_id,
+                    state=canonical_state,
+                    context=validation_context,
+                )
+                
+                if not movement_validation.is_valid:
+                    # Record validation failure
+                    _create_validation_report(
+                        db=db,
+                        transaction_id=transaction_id,
+                        session_id=session_id,
+                        turn_no=turn_no,
+                        scope="movement_validation",
+                        is_valid=False,
+                        errors_json=movement_validation.errors,
+                        warnings_json=movement_validation.warnings,
+                    )
+                    logger.warning("Movement validation failed: %s", movement_validation.errors)
+                    movement_result = MovementResult(
+                        success=False,
+                        blocked_reason=movement_validation.errors[0] if movement_validation.errors else "Movement validation failed",
+                        previous_location_id=from_location_id,
+                    )
+                else:
+                    # Handle movement
+                    movement_result = handle_movement(db, session_id, target)
             
             if movement_result.success:
                 state_deltas["location_id"] = movement_result.new_location_id
@@ -2451,6 +2682,28 @@ def execute_turn_service(
         
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
+            # Validate quest progression before checking
+            quest_validator = QuestValidator()
+            quest_validation = quest_validator.validate_quest_progress(
+                quest_id="current",
+                new_stage=0,  # Placeholder - actual stage determined by quest system
+                state=canonical_state,
+                context=validation_context,
+            )
+            
+            if not quest_validation.is_valid:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="quest_progression_validation",
+                    is_valid=False,
+                    errors_json=quest_validation.errors,
+                    warnings_json=quest_validation.warnings,
+                )
+                logger.warning("Quest progression validation failed: %s", quest_validation.errors)
+            
             try:
                 quest_results = check_quest_progression(
                     db=db,
@@ -2497,6 +2750,39 @@ def execute_turn_service(
         # Step 11: Advance world time for the committed turn
         world_time_before = _get_world_time(session_state)
         world_time = _advance_world_time(world_time_before)
+        
+        # Step 11b: Process scheduled events with new world time
+        scheduled_event_results: list[dict[str, Any]] = []
+        try:
+            from ..models.events import WorldTime
+            world_time_obj = WorldTime(
+                calendar=world_time.get("calendar", "修仙历"),
+                season=world_time.get("season", "春"),
+                day=world_time.get("day", "第1日"),
+                period=world_time.get("period", "辰时"),
+            )
+            scheduled_processor = ScheduledEventProcessor(db)
+            scheduled_event_results = scheduled_processor.process_scheduled_events(
+                session_id=session_id,
+                world_time=world_time_obj,
+                current_turn=turn_no,
+                world_state=None,
+                transaction_id=transaction_id,
+            )
+            if scheduled_event_results:
+                logger.info(
+                    "Fired %d scheduled events for session %s turn %d",
+                    len(scheduled_event_results),
+                    session_id,
+                    turn_no,
+                )
+        except Exception as e:
+            logger.warning(
+                "ScheduledEventProcessor failed for session %s turn %d: %s",
+                session_id,
+                turn_no,
+                e,
+            )
         
         # Step 12: Get player state
         player_state = _get_player_state(canonical_state, current_location_id)
@@ -2658,6 +2944,7 @@ def execute_turn_service(
                     
             elif stage_result.stage_name == "npc":
                 npc_reactions = stage_result.parsed_proposal.get("npc_reactions", [])
+                npc_knowledge_validator = NPCKnowledgeValidator()
                 for reaction in npc_reactions:
                     if not reaction.get("accepted"):
                         continue
@@ -2673,6 +2960,30 @@ def execute_turn_service(
                                 source_engine=ProposalSource.NPC_ENGINE,
                             ),
                         )
+                        
+                        npc_id = reaction.get("npc_id", "unknown")
+                        knowledge = reaction.get("summary", "")
+                        npc_knowledge_validation = npc_knowledge_validator.validate_knowledge(
+                            npc_id=npc_id,
+                            knowledge=knowledge,
+                            state=canonical_state,
+                            context=validation_context,
+                        )
+                        
+                        if not npc_knowledge_validation.is_valid:
+                            _create_validation_report(
+                                db=db,
+                                transaction_id=transaction_id,
+                                session_id=session_id,
+                                turn_no=turn_no,
+                                scope="npc_knowledge_validation",
+                                target_ref_id=npc_id,
+                                is_valid=False,
+                                errors_json=npc_knowledge_validation.errors,
+                                warnings_json=npc_knowledge_validation.warnings,
+                            )
+                            logger.warning("NPC knowledge validation failed for %s: %s", npc_id, npc_knowledge_validation.errors)
+                        
                         is_valid, errors, warnings = _validate_proposal(
                             db=db,
                             proposal=npc_proposal,
@@ -2688,6 +2999,7 @@ def execute_turn_service(
                         logger.warning("Failed to validate NPCActionProposal: %s", e)
                         
             elif stage_result.stage_name == "narration":
+                narration_leak_validator = NarrationLeakValidator()
                 try:
                     narration_text = stage_result.parsed_proposal.get("text", "")
                     narration_proposal = NarrationProposal(
@@ -2697,6 +3009,31 @@ def execute_turn_service(
                             source_engine=ProposalSource.NARRATION_ENGINE,
                         ),
                     )
+                    
+                    forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+                    narration_leak_validation = narration_leak_validator.validate_narration(
+                        text=narration_text,
+                        forbidden_info=forbidden_patterns,
+                        state=canonical_state,
+                        context=validation_context,
+                    )
+                    
+                    if not narration_leak_validation.is_valid:
+                        _create_validation_report(
+                            db=db,
+                            transaction_id=transaction_id,
+                            session_id=session_id,
+                            turn_no=turn_no,
+                            scope="narration_leak_validation",
+                            is_valid=False,
+                            errors_json=narration_leak_validation.errors,
+                            warnings_json=narration_leak_validation.warnings,
+                        )
+                        logger.warning("Narration leak validation failed: %s", narration_leak_validation.errors)
+                        stage_result.accepted = False
+                        stage_result.validation_errors = narration_leak_validation.errors
+                        stage_result.fallback_reason = f"leak_detected: {', '.join(narration_leak_validation.errors[:3])}"
+                    
                     is_valid, errors, warnings = _validate_proposal(
                         db=db,
                         proposal=narration_proposal,

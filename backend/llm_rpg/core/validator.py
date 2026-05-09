@@ -1,4 +1,12 @@
-from dataclasses import dataclass
+"""Validator Facade Module.
+
+This module provides the Validator class as a facade over the validation subsystem.
+It maintains backward compatibility with existing code while delegating to
+specialized validators in the validation/ subpackage.
+
+For new code, prefer importing directly from llm_rpg.core.validation.
+"""
+
 from typing import Any, Dict, List, Optional
 
 from ..models.common import ProposedAction, ValidationCheck, ValidationResult
@@ -6,45 +14,28 @@ from ..models.states import CanonicalState
 from ..models.perspectives import Perspective
 from ..models.lore import LoreEntry
 
-
-@dataclass
-class ValidationContext:
-    """Context for validation operations containing all necessary state and metadata."""
-    db: Any  # Database session
-    session_id: str  # Game session ID
-    turn_no: int  # Current turn number
-    canonical_state: CanonicalState  # Current canonical state
-    perspective: Optional[Perspective] = None  # Optional perspective for filtering
-    source_event_id: Optional[str] = None  # Source event that triggered validation
-    actor_id: Optional[str] = None  # Actor performing the action
-    
-    @classmethod
-    def create(
-        cls,
-        db: Any,
-        session_id: str,
-        turn_no: int,
-        canonical_state: CanonicalState,
-        perspective: Optional[Perspective] = None,
-        source_event_id: Optional[str] = None,
-        actor_id: Optional[str] = None,
-    ) -> "ValidationContext":
-        """Factory method to create a ValidationContext."""
-        return cls(
-            db=db,
-            session_id=session_id,
-            turn_no=turn_no,
-            canonical_state=canonical_state,
-            perspective=perspective,
-            source_event_id=source_event_id,
-            actor_id=actor_id,
-        )
+# Import from new validation module for re-export
+from .validation.context import ValidationContext
+from .validation.result import ValidationResult, ValidationCheck
+from .validation.state_delta_validator import StateDeltaValidator
 
 
 class Validator:
-    
+    """Facade for validation operations.
+
+    This class provides a unified interface for all validation operations.
+    It delegates to specialized validators internally while maintaining
+    backward compatibility with existing code.
+
+    For new code, consider using specific validators directly:
+    - StateDeltaValidator for state delta validation
+    - (Future) MovementValidator for movement validation
+    - (Future) QuestValidator for quest validation
+    """
+
     def __init__(self):
         self._rules: Dict[str, callable] = {}
+        self._state_delta_validator = StateDeltaValidator()
     
     def register_rule(self, rule_name: str, rule_func: callable) -> None:
         self._rules[rule_name] = rule_func

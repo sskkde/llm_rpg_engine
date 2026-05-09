@@ -7,9 +7,9 @@ instances with all required engines and services. It ensures:
 - SceneEngine is always constructed and passed to TurnOrchestrator
 - Consistent dependency injection across all engines
 
-Two factory functions are provided:
-- build_db_turn_orchestrator: Production use with DB session and repositories
+Factory functions:
 - build_memory_turn_orchestrator_for_tests: Testing use with in-memory dependencies
+- build_hybrid_turn_orchestrator_for_legacy: DEPRECATED - Legacy hybrid orchestrator
 """
 
 from typing import Optional, TYPE_CHECKING
@@ -55,28 +55,27 @@ if TYPE_CHECKING:
     )
 
 
-def build_db_turn_orchestrator(
+def build_hybrid_turn_orchestrator_for_legacy(
     db: "Session",
     llm_service: LLMService,
     repositories: dict,
 ) -> TurnOrchestrator:
     """
-    Construct a TurnOrchestrator for production use with DB-backed dependencies.
+    DEPRECATED: Legacy hybrid orchestrator for backward compatibility only.
     
-    This function creates a TurnOrchestrator that uses database session and
-    repositories for persistent state management.
+    This function creates a TurnOrchestrator with in-memory EventLog and
+    CanonicalStateManager but DB-backed NPC memory repositories. This hybrid
+    approach is inconsistent with the new event-sourced architecture.
+    
+    DO NOT USE in new code. Use execute_turn_service() directly instead.
     
     Args:
         db: SQLAlchemy database session
         llm_service: LLMService instance for LLM calls
         repositories: Dictionary of repository instances for DB access
-            Expected keys: 'world', 'chapter', 'location', 'npc_template',
-                          'session', 'session_state', 'event_log', 
-                          'npc_memory_scope', 'npc_belief', 'npc_private_memory',
-                          'npc_secret', 'npc_relationship_memory'
     
     Returns:
-        TurnOrchestrator: Fully configured orchestrator with DB-backed dependencies.
+        TurnOrchestrator: Configured orchestrator with hybrid dependencies.
     """
     from llm_rpg.storage.repositories import (
         NPCMemoryScopeRepository,
@@ -183,17 +182,7 @@ def build_memory_turn_orchestrator_for_tests(
     """
     Construct a TurnOrchestrator for testing with in-memory dependencies.
     
-    This function creates a TurnOrchestrator that uses in-memory state
-    management, suitable for unit tests and integration tests that don't
-    require database persistence.
-    
-    Args:
-        llm_service: Optional LLMService instance. If provided, a ProposalPipeline
-                    will be created and shared across all engines.
-                    If None, engines use deterministic fallback behavior.
-    
-    Returns:
-        TurnOrchestrator: Fully configured orchestrator with in-memory dependencies.
+    FOR TESTING ONLY. Do not use in production code.
     """
     # Create shared in-memory dependencies
     event_log = EventLog()

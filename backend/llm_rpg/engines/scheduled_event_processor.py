@@ -75,7 +75,23 @@ class ScheduledEventProcessor:
         world_time: WorldTime,
         current_turn: int,
         world_state: dict[str, Any] | None = None,
+        transaction_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """
+        Process pending scheduled events for a session.
+        
+        Args:
+            session_id: Session to process events for
+            world_time: Current world time for condition checking
+            current_turn: Current turn number
+            world_state: Optional world state for condition checking
+            transaction_id: Optional transaction ID to use for game events.
+                           When provided, processor will NOT commit, allowing
+                           the caller to manage the transaction lifecycle.
+        
+        Returns:
+            List of fired event info dicts
+        """
         fired_events: list[dict[str, Any]] = []
         
         pending_events = self.scheduled_event_repo.get_pending(session_id)
@@ -89,6 +105,7 @@ class ScheduledEventProcessor:
                 fired_event = self._fire_scheduled_event(
                     scheduled_event=scheduled_event,
                     current_turn=current_turn,
+                    transaction_id=transaction_id,
                 )
                 if fired_event:
                     fired_events.append(fired_event)
@@ -212,6 +229,7 @@ class ScheduledEventProcessor:
         self,
         scheduled_event: ScheduledEventModel,
         current_turn: int,
+        transaction_id: str | None = None,
     ) -> dict[str, Any] | None:
         try:
             event_template = None
@@ -237,19 +255,28 @@ class ScheduledEventProcessor:
                 return None
             session_id = str(raw_session_id)
             
-            transaction = self._get_or_create_system_transaction(
-                session_id=session_id,
-                turn_no=current_turn,
-            )
-            
-            if transaction is None:
-                return None
+            # Use provided transaction_id, or create a system transaction if not provided
+            caller_managed = bool(transaction_id)  # Track if caller manages the transaction
+            if transaction_id:
+                # Verify the transaction exists
+                transaction = self.transaction_repo.get_by_id(transaction_id)
+                if transaction is None:
+                    return None
+            else:
+                # Legacy behavior: create a system transaction
+                transaction = self._get_or_create_system_transaction(
+                    session_id=session_id,
+                    turn_no=current_turn,
+                )
+                if transaction is None:
+                    return None
+                transaction_id = transaction.id
             
             raw_trigger_conditions = scheduled_event.trigger_conditions_json
             trigger_conditions = raw_trigger_conditions if raw_trigger_conditions else {}
             
             game_event = GameEventModel(
-                transaction_id=transaction.id,
+                transaction_id=transaction_id,
                 session_id=session_id,
                 turn_no=current_turn,
                 event_type=str(event_type),
@@ -274,8 +301,10 @@ class ScheduledEventProcessor:
             
             scheduled_event.status = "triggered"
             
-            self.db.commit()
-            self.db.refresh(game_event)
+            # When caller_managed is False, we created our own transaction, commit now
+            if not caller_managed:
+                self.db.commit()
+                self.db.refresh(game_event)
             
             return {
                 "game_event_id": game_event.id,
@@ -286,7 +315,9 @@ class ScheduledEventProcessor:
             }
             
         except Exception:
-            self.db.rollback()
+            # Only rollback in legacy mode
+            if not transaction_id:
+                self.db.rollback()
             return None
     
     def _get_or_create_system_transaction(

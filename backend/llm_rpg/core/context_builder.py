@@ -16,6 +16,12 @@ from ..models.events import GameEvent
 
 from .retrieval import RetrievalSystem
 from .perspective import PerspectiveService
+from .perception import PerceptionResolver
+from .projections import (
+    PlayerVisibleProjectionBuilder,
+    NPCVisibleProjectionBuilder,
+    NarratorProjectionBuilder,
+)
 
 
 def _retrieve_memories_for_narration_context(
@@ -136,9 +142,27 @@ class ContextBuilder:
         self,
         retrieval_system: RetrievalSystem,
         perspective_service: PerspectiveService,
+        perception_resolver: PerceptionResolver | None = None,
+        player_projection_builder: PlayerVisibleProjectionBuilder | None = None,
+        npc_projection_builder: NPCVisibleProjectionBuilder | None = None,
+        narrator_projection_builder: NarratorProjectionBuilder | None = None,
     ):
         self._retrieval = retrieval_system
         self._perspective = perspective_service
+        
+        # New perception system (optional, for gradual migration)
+        self._perception_resolver = perception_resolver
+        self._player_projection = player_projection_builder
+        self._npc_projection = npc_projection_builder
+        self._narrator_projection = narrator_projection_builder
+        
+        # Flag to determine whether to use new projection system
+        self._use_projection_system = (
+            perception_resolver is not None
+            and player_projection_builder is not None
+            and npc_projection_builder is not None
+            and narrator_projection_builder is not None
+        )
 
     def build_world_context(
         self,
@@ -237,10 +261,21 @@ class ContextBuilder:
         # Filter events for NPC perspective
         filtered_events = []
         if recent_events:
-            filtered_events = self._perspective.filter_events_for_perspective(
-                recent_events, npc_perspective
-            )
-            filtered_events = [e.model_dump() for e in filtered_events]
+            if self._use_projection_system:
+                context = {
+                    "npc_location_id": npc_state.location_id if npc_state else "unknown",
+                    "current_turn": getattr(state.world_state, 'current_turn', 0),
+                }
+                filtered_events = self._npc_projection.build_projection(
+                    events=recent_events,
+                    perspective=npc_perspective,
+                    context=context,
+                )
+            else:
+                filtered_events = self._perspective.filter_events_for_perspective(
+                    recent_events, npc_perspective
+                )
+                filtered_events = [e.model_dump() for e in filtered_events]
 
         # Build beliefs list (only those the NPC actually holds)
         beliefs = []
@@ -316,9 +351,22 @@ class ContextBuilder:
 
         visible_events = []
         if recent_events:
-            visible_events = self._perspective.filter_events_for_perspective(
-                recent_events, player_perspective
-            )
+            if self._use_projection_system:
+                context = {
+                    "player_location_id": player_state.location_id,
+                    "current_turn": getattr(state.world_state, 'current_turn', 0),
+                }
+                visible_events_dicts = self._player_projection.build_projection(
+                    events=recent_events,
+                    perspective=player_perspective,
+                    context=context,
+                )
+                visible_events = visible_events_dicts
+            else:
+                visible_events = self._perspective.filter_events_for_perspective(
+                    recent_events, player_perspective
+                )
+                visible_events = [e.model_dump() for e in visible_events]
 
         visible_npc_states = {}
         if scene_state:
@@ -337,7 +385,7 @@ class ContextBuilder:
             "visible_npc_states": visible_npc_states,
             "known_facts": player_perspective.known_facts,
             "known_rumors": player_perspective.known_rumors,
-            "visible_events": [e.model_dump() for e in visible_events],
+            "visible_events": visible_events,
             "available_actions": scene_state.available_actions if scene_state else [],
         }
 
@@ -368,7 +416,6 @@ class ContextBuilder:
 
         The narrator should only narrate what the player can perceive.
         """
-        # Build player-visible context first
         player_visible_context = self.build_player_visible_context(
             game_id=game_id,
             turn_id=turn_id,
@@ -377,12 +424,23 @@ class ContextBuilder:
             recent_events=recent_events,
         )
 
-        # Get lore visible to player (narrator uses PlayerVisibleProjection)
-        # IMPORTANT: Do NOT pass raw hidden lore to narrator
-        lore_entries = []  # Would come from lore_store
+        lore_entries = []
         filtered_lore_views = self._perspective.filter_lore_for_perspective(
             lore_entries, player_perspective
         )
+
+        if self._use_projection_system and recent_events:
+            context = {
+                "player_location_id": state.player_state.location_id,
+                "current_turn": getattr(state.world_state, 'current_turn', 0),
+                "player_perspective": player_perspective,
+            }
+            narration_events = self._narrator_projection.build_projection(
+                events=recent_events,
+                perspective=narrator_perspective,
+                context=context,
+            )
+            player_visible_context.content["visible_events"] = narration_events
 
         content = {
             "player_visible_context": player_visible_context.content,

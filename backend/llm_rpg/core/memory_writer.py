@@ -8,6 +8,7 @@ from ..models.states import CanonicalState
 
 from .event_log import EventLog
 from .npc_memory import NPCMemoryManager
+from .perception import PerceptionResolver, PerceptionType
 from .summary import SummaryManager
 
 if TYPE_CHECKING:
@@ -174,31 +175,57 @@ class MemoryWriter:
         state: CanonicalState,
         current_turn: int,
     ) -> List[Memory]:
+        """
+        Write memories for an event based on perception rules.
+        
+        Uses PerceptionResolver to determine who can perceive the event,
+        and sets memory confidence based on perception type:
+        - DIRECT_OBSERVATION: confidence = 1.0
+        - HEARD: confidence = 0.8
+        - RUMOR: confidence = 0.6
+        
+        Hidden/forbidden events are not written to any NPC's memory.
+        """
         memories = []
         
-        if hasattr(event, 'actor_id') and event.actor_id != "player":
+        # Use PerceptionResolver to determine who can perceive the event
+        resolver = PerceptionResolver()
+        event_visibility = resolver.extract_event_visibility(event)
+        perceivers = resolver.get_perceivers(event, event_visibility, state, current_turn)
+        
+        # Confidence mapping based on perception type
+        confidence_map = {
+            PerceptionType.DIRECT_OBSERVATION: 1.0,
+            PerceptionType.HEARD: 0.8,
+            PerceptionType.RUMOR: 0.6,
+        }
+        
+        # Write memories for each NPC that can perceive the event
+        for npc_id, perception_result in perceivers.items():
+            # Skip player (not an NPC)
+            if npc_id == "player":
+                continue
+            
+            # Skip if cannot perceive (hidden/forbidden)
+            if not perception_result.can_perceive:
+                continue
+            
+            # Get confidence based on perception type
+            confidence = confidence_map.get(perception_result.perception_type, 0.5)
+            
+            # Calculate importance with confidence modifier
+            base_importance = event.metadata.get("importance", 0.5)
+            importance = base_importance * confidence
+            
             memory = self._npc_memory.add_memory(
-                npc_id=event.actor_id,
+                npc_id=npc_id,
                 content=event.summary if hasattr(event, 'summary') else str(event),
                 memory_type=MemoryType.EPISODIC,
                 source_event_ids=[event.event_id],
-                importance=event.metadata.get("importance", 0.5),
+                importance=importance,
                 current_turn=current_turn,
             )
             memories.append(memory)
-        
-        if hasattr(event, 'visible_to_player') and event.visible_to_player:
-            for npc_id in state.current_scene_state.active_actor_ids:
-                if npc_id != "player" and npc_id != getattr(event, 'actor_id', None):
-                    memory = self._npc_memory.add_memory(
-                        npc_id=npc_id,
-                        content=event.summary if hasattr(event, 'summary') else str(event),
-                        memory_type=MemoryType.EPISODIC,
-                        source_event_ids=[event.event_id],
-                        importance=event.metadata.get("importance", 0.5) * 0.8,
-                        current_turn=current_turn,
-                    )
-                    memories.append(memory)
         
         return memories
     

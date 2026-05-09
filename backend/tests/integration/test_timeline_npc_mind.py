@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from llm_rpg.api.auth import get_password_hash
 from llm_rpg.core.audit import (
     get_audit_logger,
     reset_audit_logger,
@@ -615,15 +616,26 @@ class TestTimelineAPITests:
         reset_audit_logger()
         self.audit_logger = get_audit_logger()
 
-    def test_api_get_timeline_endpoint(self, client: TestClient):
+    def test_api_get_timeline_endpoint(self, client: TestClient, db_session: Session):
         """Test GET /debug/sessions/{session_id}/timeline endpoint."""
-        # First register and login to get auth token
-        register_response = client.post("/auth/register", json={
-            "username": "timeline_test_user",
+        # Create admin user directly in DB, then login
+        from llm_rpg.storage.models import UserModel
+        admin_user = UserModel(
+            id="admin_timeline_test_user",
+            username="admin_timeline_test_user",
+            email="admin_timeline_api@test.com",
+            password_hash=get_password_hash("password123"),
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+        login_response = client.post("/auth/login", json={
+            "username": "admin_timeline_test_user",
             "password": "password123"
         })
-        assert register_response.status_code == 201
-        token = register_response.json()["access_token"]
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
         
         # Create some audit data
         self.audit_logger.log_turn(
@@ -653,14 +665,25 @@ class TestTimelineAPITests:
         # But the endpoint structure is correct
         assert response.status_code in [200, 404]
 
-    def test_api_get_turn_timeline_endpoint(self, client: TestClient):
+    def test_api_get_turn_timeline_endpoint(self, client: TestClient, db_session: Session):
         """Test GET /debug/sessions/{session_id}/timeline/{turn_no} endpoint."""
-        register_response = client.post("/auth/register", json={
-            "username": "timeline_turn_test_user",
+        from llm_rpg.storage.models import UserModel
+        admin_user = UserModel(
+            id="admin_timeline_turn_test_user",
+            username="admin_timeline_turn_test_user",
+            email="admin_timeline_turn_api@test.com",
+            password_hash=get_password_hash("password123"),
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+        login_response = client.post("/auth/login", json={
+            "username": "admin_timeline_turn_test_user",
             "password": "password123"
         })
-        assert register_response.status_code == 201
-        token = register_response.json()["access_token"]
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
         
         self.audit_logger.log_turn(
             session_id="test_session_456",
@@ -684,14 +707,25 @@ class TestTimelineAPITests:
 class TestNPCMindAPITests:
     """Test NPC Mind Viewer API endpoints."""
 
-    def test_api_list_npcs_endpoint(self, client: TestClient):
+    def test_api_list_npcs_endpoint(self, client: TestClient, db_session: Session):
         """Test GET /debug/sessions/{session_id}/npcs endpoint."""
-        register_response = client.post("/auth/register", json={
-            "username": "npc_list_test_user",
+        from llm_rpg.storage.models import UserModel
+        admin_user = UserModel(
+            id="admin_npc_list_test_user",
+            username="admin_npc_list_test_user",
+            email="admin_npc_list_api@test.com",
+            password_hash=get_password_hash("password123"),
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+        login_response = client.post("/auth/login", json={
+            "username": "admin_npc_list_test_user",
             "password": "password123"
         })
-        assert register_response.status_code == 201
-        token = register_response.json()["access_token"]
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
         
         response = client.get(
             "/debug/sessions/test_session/npcs",
@@ -700,14 +734,25 @@ class TestNPCMindAPITests:
         
         assert response.status_code in [200, 404]
 
-    def test_api_get_npc_mind_endpoint_debug_role(self, client: TestClient):
+    def test_api_get_npc_mind_endpoint_debug_role(self, client: TestClient, db_session: Session):
         """Test GET /debug/sessions/{session_id}/npcs/{npc_id}/mind endpoint with debug role."""
-        register_response = client.post("/auth/register", json={
-            "username": "npc_mind_test_user",
+        from llm_rpg.storage.models import UserModel
+        admin_user = UserModel(
+            id="admin_npc_mind_test_user",
+            username="admin_npc_mind_test_user",
+            email="admin_npc_mind_api@test.com",
+            password_hash=get_password_hash("password123"),
+            is_admin=True,
+        )
+        db_session.add(admin_user)
+        db_session.commit()
+
+        login_response = client.post("/auth/login", json={
+            "username": "admin_npc_mind_test_user",
             "password": "password123"
         })
-        assert register_response.status_code == 201
-        token = register_response.json()["access_token"]
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
         
         response = client.get(
             "/debug/sessions/test_session/npcs/npc_001/mind?role=debug",

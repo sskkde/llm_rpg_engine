@@ -99,8 +99,8 @@ class PlayerVisibleProjectionBuilder(ProjectionBuilder[PlayerPerspective]):
     ) -> dict[str, Any]:
         event_dict = event.model_dump()
         
-        if not include_private and "private_payload" in event_dict:
-            del event_dict["private_payload"]
+        if not include_private:
+            self._remove_private_payload_recursive(event_dict)
         
         event_dict["_perception"] = {
             "type": perception_result.perception_type.value,
@@ -110,6 +110,18 @@ class PlayerVisibleProjectionBuilder(ProjectionBuilder[PlayerPerspective]):
         }
         
         return event_dict
+    
+    def _remove_private_payload_recursive(self, data: dict[str, Any]) -> None:
+        if "private_payload" in data:
+            del data["private_payload"]
+        
+        for value in data.values():
+            if isinstance(value, dict):
+                self._remove_private_payload_recursive(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        self._remove_private_payload_recursive(item)
 
 
 class NPCVisibleProjectionBuilder(ProjectionBuilder[NPCPerspective]):
@@ -165,8 +177,7 @@ class NPCVisibleProjectionBuilder(ProjectionBuilder[NPCPerspective]):
     ) -> dict[str, Any]:
         event_dict = event.model_dump()
         
-        if "private_payload" in event_dict:
-            del event_dict["private_payload"]
+        self._remove_private_payload_recursive(event_dict)
         
         event_dict["_perception"] = {
             "type": perception_result.perception_type.value,
@@ -182,6 +193,18 @@ class NPCVisibleProjectionBuilder(ProjectionBuilder[NPCPerspective]):
         }
         
         return event_dict
+    
+    def _remove_private_payload_recursive(self, data: dict[str, Any]) -> None:
+        if "private_payload" in data:
+            del data["private_payload"]
+        
+        for value in data.values():
+            if isinstance(value, dict):
+                self._remove_private_payload_recursive(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        self._remove_private_payload_recursive(item)
     
     def _is_known_fact(self, event: GameEvent, perspective: NPCPerspective) -> bool:
         event_id = event.event_id

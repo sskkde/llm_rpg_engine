@@ -253,7 +253,15 @@ def get_combat_state(
             detail="Combat session not in memory"
         )
 
-    current_round = manager.get_current_round(combat_id)
+    # Show the most recent round that has actions (NPC counter-actions may
+    # advance to an empty round; skip it to show meaningful content).
+    display_round = None
+    for r in reversed(combat.rounds):
+        if r.actions:
+            display_round = r
+            break
+    if display_round is None and combat.rounds:
+        display_round = combat.rounds[-1]
 
     return CombatSessionResponse(
         combat_id=combat.combat_id,
@@ -273,9 +281,9 @@ def get_combat_state(
             for p in combat.participants.values()
         ],
         current_round=CombatRoundResponse(
-            round_id=current_round.round_id,
-            round_no=current_round.round_no,
-            initiative_order=current_round.initiative_order,
+            round_id=display_round.round_id,
+            round_no=display_round.round_no,
+            initiative_order=display_round.initiative_order,
             actions=[
                 CombatActionResponse(
                     action_id=a.action_id,
@@ -286,10 +294,10 @@ def get_combat_state(
                     resolution=a.resolution,
                     created_at=a.created_at
                 )
-                for a in current_round.actions
+                for a in display_round.actions
             ],
-            is_complete=current_round.is_complete
-        ) if current_round else None,
+            is_complete=display_round.is_complete
+        ) if display_round else None,
         current_round_no=combat.current_round_no,
         winner=combat.winner,
         started_at=combat.started_at
@@ -356,6 +364,13 @@ def submit_turn(
     participant = combat.participants.get(actor_id)
     actor_type = participant.actor_type if participant else ActorType.PLAYER
 
+    # Capture round info before commit_action — NPC counter-actions may
+    # advance the round during commit, but the player action belongs to
+    # the round that was active when the action was submitted.
+    active_round = manager.get_current_round(combat_id)
+    round_id_before = active_round.round_id
+    round_no_before = active_round.round_no
+
     action = manager.commit_action(
         combat_id=combat_id,
         actor_id=actor_id,
@@ -367,7 +382,7 @@ def submit_turn(
     action_repo = CombatActionRepository(db)
     action_repo.create({
         "id": action.action_id,
-        "combat_round_id": manager.get_current_round(combat_id).round_id,
+        "combat_round_id": round_id_before,
         "actor_type": action_type.value,
         "actor_ref_id": actor_id,
         "action_type": action_type.value,
@@ -381,7 +396,7 @@ def submit_turn(
     return SubmitActionResponse(
         action_id=action.action_id,
         combat_id=combat_id,
-        round_no=manager.get_current_round(combat_id).round_no,
+        round_no=round_no_before,
         resolution=action.resolution,
         combat_status=combat.status.value
     )
@@ -423,12 +438,12 @@ def end_combat(
     manager = get_combat_manager()
     combat = manager.end_combat(combat_id, end_status, request.winner)
 
-    combat_repo.update_status(combat_id, end_status.value, request.winner)
+    combat_repo.update_status(combat_id, combat.status.value, combat.winner)
 
     return EndCombatResponse(
         combat_id=combat_id,
-        status=end_status.value,
-        winner=request.winner,
+        status=combat.status.value,
+        winner=combat.winner,
         duration_rounds=combat.current_round_no
     )
 

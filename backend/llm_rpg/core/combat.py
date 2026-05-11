@@ -241,6 +241,12 @@ class CombatManager:
         ))
 
         self._apply_resolution(combat, resolution)
+
+        # Process NPC counter-actions: NPCs that haven't acted this round
+        # get a deterministic counter-attack.
+        if combat.status == CombatStatus.ACTIVE:
+            self._process_npc_counter_actions(combat, current_round)
+
         self._check_round_completion(combat, current_round)
         self._check_combat_end(combat)
 
@@ -253,6 +259,8 @@ class CombatManager:
         winner: Optional[str] = None
     ) -> CombatSession:
         combat = self._sessions[combat_id]
+        if combat.status != CombatStatus.ACTIVE:
+            return combat
         combat.status = status
         combat.winner = winner
         combat.ended_at = datetime.now()
@@ -427,6 +435,78 @@ class CombatManager:
                     round_no=next_round.round_no,
                     details={}
                 ))
+
+    NPC_COUNTER_DAMAGE = 8
+
+    def _process_npc_counter_actions(
+        self,
+        combat: CombatSession,
+        current_round: CombatRound
+    ):
+        acted_ids = {a.actor_id for a in current_round.actions}
+        npc_participants = [
+            p for pid, p in combat.participants.items()
+            if p.actor_type == ActorType.NPC and p.is_active and p.hp > 0
+        ]
+        pending_npcs = [p for p in npc_participants if p.actor_id not in acted_ids]
+
+        for npc in pending_npcs:
+            seed = f"{combat.combat_id}_{current_round.round_no}_{npc.actor_id}_counter"
+            hash_val = int(hashlib.md5(seed.encode()).hexdigest(), 16)
+
+            valid_targets = [
+                p for pid, p in combat.participants.items()
+                if p.actor_id != npc.actor_id and p.is_active and p.hp > 0
+            ]
+
+            if not valid_targets:
+                continue
+
+            target = valid_targets[hash_val % len(valid_targets)]
+
+            action_id = f"{combat.combat_id}_r{current_round.round_no}_{npc.actor_id}_{len(current_round.actions)}"
+            resolution = {
+                "actor_id": npc.actor_id,
+                "action_type": "attack",
+                "success": True,
+                "target_id": target.actor_id,
+                "damage": self.NPC_COUNTER_DAMAGE,
+                "effects": [
+                    {
+                        "type": "damage",
+                        "target": target.actor_id,
+                        "amount": self.NPC_COUNTER_DAMAGE
+                    }
+                ]
+            }
+
+            action = CombatAction(
+                action_id=action_id,
+                actor_id=npc.actor_id,
+                actor_type=ActorType.NPC,
+                action_type=ActionType.ATTACK,
+                payload=CombatActionPayload(
+                    target_id=target.actor_id,
+                    description="NPC counter-attack"
+                ),
+                resolution=resolution
+            )
+
+            current_round.actions.append(action)
+            self._apply_resolution(combat, resolution)
+
+            self._log_event(CombatEvent(
+                event_type="npc_counter_action",
+                combat_id=combat.combat_id,
+                round_no=current_round.round_no,
+                actor_id=npc.actor_id,
+                details={
+                    "action_type": "attack",
+                    "target_id": target.actor_id,
+                    "damage": self.NPC_COUNTER_DAMAGE,
+                    "resolution": resolution
+                }
+            ))
 
     def _check_combat_end(self, combat: CombatSession):
         if combat.status != CombatStatus.ACTIVE:

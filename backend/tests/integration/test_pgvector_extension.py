@@ -46,6 +46,7 @@ def pgvector_db(postgres_skip):
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.mark.pgvector
 class TestPgvectorExtension:
     def test_pgvector_extension_available(self, postgres_skip):
         import psycopg2
@@ -79,7 +80,7 @@ class TestPgvectorExtension:
                     ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [1.1, 2.1, 3.1]))
         conn.commit()
         
-        cur.execute("SELECT * FROM test_vectors ORDER BY embedding <-> %s LIMIT 1",
+        cur.execute("SELECT * FROM test_vectors ORDER BY embedding <-> CAST(%s AS vector) LIMIT 1",
                     ([1.0, 2.0, 3.0],))
         result = cur.fetchone()
         
@@ -109,7 +110,7 @@ class TestPgvectorExtension:
                     ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]))
         conn.commit()
         
-        cur.execute("SELECT embedding <=> %s as distance FROM test_distances ORDER BY distance",
+        cur.execute("SELECT embedding <=> CAST(%s AS vector) as distance FROM test_distances ORDER BY distance",
                     ([1.0, 0.0, 0.0],))
         results = cur.fetchall()
         
@@ -244,6 +245,7 @@ class TestPgvectorExtension:
         assert len(fetched.embedding) == 384
 
 
+@pytest.mark.pgvector
 class TestPgvectorWithSQLAlchemy:
     def test_sqlalchemy_vector_column(self, postgres_skip):
         from sqlalchemy import create_engine, Column, String, JSON

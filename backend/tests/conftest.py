@@ -12,7 +12,9 @@ import os
 
 # Set APP_ENV to testing BEFORE any other imports
 os.environ["APP_ENV"] = "testing"
-os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+# Only set DATABASE_URL to SQLite if not already configured (e.g., for pgvector tests)
+if "DATABASE_URL" not in os.environ:
+    os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 import pytest
 import uuid

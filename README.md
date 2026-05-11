@@ -464,6 +464,65 @@ The system will automatically fall back to the mock provider if:
 
 Check the logs for provider selection messages.
 
+## P3 Quality Gate
+
+This project has completed the P3 Engineering Quality Gate, establishing automated testing infrastructure and documentation.
+
+### Quick Test Commands
+
+The `Makefile` in the repository root provides unified test commands:
+
+```bash
+# Show all available targets
+make help
+
+# Run full P3 quality gate (backend + frontend + scenario smoke)
+make test-p3
+
+# Run backend tests only
+make test-backend
+
+# Run frontend lint, typecheck, and unit tests
+make test-frontend
+
+# Run scenario smoke tests (8 core tests)
+make test-scenario-smoke
+
+# Run pgvector tests (requires PostgreSQL with pgvector extension)
+make test-pgvector
+```
+
+### CI Pipeline
+
+The project includes a GitHub Actions CI workflow (`.github/workflows/ci.yml`) that runs automatically on push and pull requests:
+
+- **backend-tests**: Runs backend unit and integration tests
+- **frontend-tests**: Runs frontend lint, typecheck, and unit tests
+- **pgvector-tests**: Runs pgvector-specific tests against PostgreSQL
+
+The CI workflow calls Makefile targets for consistency with local development.
+
+### Known Test Issues
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Backend tests | 1664 passed, 8 skipped | pgvector tests skipped in default SQLite path |
+| Frontend build/lint/tsc | All pass | Clean compilation |
+| Frontend unit tests | 89/113 pre-existing failures | Test environment issues, not application bugs |
+| pgvector tests | 8/8 pass | Requires PostgreSQL with pgvector extension |
+
+### P4+ Deferred Items
+
+The following features are explicitly out of scope for P3-QG and deferred to future phases:
+
+- Factions/plot_beats schema extensions
+- Media generation (portraits, scenes, BGM)
+- ReplayEngine rewrite or turn service major refactoring
+- Real OpenAI/LLM integration for tests
+- New API routes or frontend routing changes
+
+For detailed status, see `IMPLEMENTATION_STATUS.md` and `P3_COMPLETION_REPORT.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

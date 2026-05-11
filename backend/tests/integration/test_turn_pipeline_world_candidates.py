@@ -19,7 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from llm_rpg.storage.database import Base, get_db
-from llm_rpg.storage.models import WorldModel
+from llm_rpg.storage.models import WorldModel, SessionStateModel
 from llm_rpg.storage.repositories import WorldRepository
 from llm_rpg.main import app
 from llm_rpg.models.proposals import (
@@ -206,7 +206,6 @@ def create_mock_world_proposal(
 class TestWorldCandidatesInTurnPipeline:
     """Tests for world candidates integration in turn pipeline."""
 
-    @pytest.mark.skip(reason="Pre-existing bug: PlayerState.current_location_id should be location_id")
     def test_turn_generates_world_candidates(
         self,
         client,
@@ -230,7 +229,6 @@ class TestWorldCandidatesInTurnPipeline:
         assert "world_time" in data
         assert data["events_committed"] > 0
 
-    @pytest.mark.skip(reason="Pre-existing bug: PlayerState.current_location_id should be location_id")
     def test_turn_world_time_advances_deterministically(
         self,
         client,
@@ -255,7 +253,6 @@ class TestWorldCandidatesInTurnPipeline:
         
         assert len(set(times)) > 1 or times[0] != times[-1]
 
-    @pytest.mark.skip(reason="Pre-existing bug: PlayerState.current_location_id should be location_id")
     def test_turn_multiple_turns_with_world_candidates(
         self,
         client,
@@ -278,11 +275,50 @@ class TestWorldCandidatesInTurnPipeline:
             assert data["turn_index"] == i
             assert data["validation_passed"] is True
 
+    def test_canonical_location_synchronization(
+        self,
+        client,
+        auth_headers,
+        db_engine,
+        sample_world_data,
+    ):
+        """Verify SessionStateModel.current_location_id stays in sync with response player_state.location_id."""
+        session_id, world_id = create_session(client, auth_headers, db_engine, sample_world_data)
+        
+        from sqlalchemy.orm import sessionmaker
+        SessionLocal = sessionmaker(bind=db_engine)
+        
+        for turn in range(1, 4):
+            response = client.post(
+                f"/game/sessions/{session_id}/turn",
+                json={"action": f"观察四周_{turn}"},
+                headers=auth_headers
+            )
+            assert response.status_code == 200
+            data = response.json()
+            
+            response_location_id = data["player_state"]["location_id"]
+            assert response_location_id is not None, f"Turn {turn}: player_state.location_id must not be None"
+            
+            db = SessionLocal()
+            try:
+                session_state = db.query(SessionStateModel).filter_by(
+                    session_id=session_id
+                ).first()
+                db_location_id = session_state.current_location_id if session_state else None
+
+                if db_location_id is not None:
+                    assert db_location_id == response_location_id, (
+                        f"Turn {turn}: DB current_location_id={db_location_id} "
+                        f"!= response player_state.location_id={response_location_id}"
+                    )
+            finally:
+                db.close()
+
 
 class TestWorldCandidatesNoStateMutation:
     """Tests that world candidates do not directly mutate state."""
 
-    @pytest.mark.skip(reason="Pre-existing bug: PlayerState.current_location_id should be location_id")
     def test_world_candidates_are_proposals_only(
         self,
         client,
@@ -390,7 +426,6 @@ class TestWorldCandidatesAuditLog:
         assert len(audit_log) > 0
         assert audit_log[0]["type"] == "world_proposal_fallback"
 
-    @pytest.mark.skip(reason="Pre-existing bug: PlayerState.current_location_id should be location_id")
     def test_turn_audit_log_includes_world_candidates(
         self,
         client,

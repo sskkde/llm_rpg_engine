@@ -180,7 +180,6 @@ class TestNarrationEngineProposalPipeline:
         )
         return pipeline
 
-    @pytest.mark.skip(reason="MockLLMProvider returns plain text for Chinese prompts; use mocked pipeline instead")
     def test_narration_engine_fallback_without_pipeline(
         self,
         state_manager,

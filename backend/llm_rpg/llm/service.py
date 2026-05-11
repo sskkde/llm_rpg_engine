@@ -169,9 +169,15 @@ class MockLLMProvider(LLMProvider):
                 return response
         
         # Default responses based on content patterns
-        if "narrate" in content_lower or "describe" in content_lower or "narration" in content_lower:
+        # English keywords: narrate, describe, narration
+        # Chinese keywords: 叙述, 描述, 场景, 叙事, 描写, 讲述
+        if (any(kw in content_lower for kw in ["narrate", "describe", "narration"]) or
+            any(kw in content for kw in ["叙述", "描述", "场景", "叙事", "描写", "讲述"])):
             return "古老的山门广场铺满了青石板，岁月在上面留下了深深的痕迹。远处传来钟声，回荡在山谷之间。"
-        elif "npc" in content_lower or "decision" in content_lower or "action" in content_lower:
+        # English keywords: npc, decision, action
+        # Chinese keywords: NPC, 决定, 动作
+        elif (any(kw in content_lower for kw in ["npc", "decision", "action"]) or
+              any(kw in content for kw in ["决定", "动作"])):
             return json.dumps({
                 "action_type": "observe",
                 "target": "player",

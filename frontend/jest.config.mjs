@@ -17,6 +17,9 @@ const customJestConfig = {
   transformIgnorePatterns: [
     '/node_modules/(?!(next-intl|use-intl)/)',
   ],
+  globals: {
+    'IS_REACT_ACT_ENVIRONMENT': true,
+  },
 };
 
 export default createJestConfig(customJestConfig);

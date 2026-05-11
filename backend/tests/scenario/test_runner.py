@@ -14,6 +14,7 @@ from llm_rpg.observability.scenario_runner import (
 from tests.conftest import MockLLMProvider
 
 
+@pytest.mark.scenario
 class TestScenarioRunner:
     """Test Scenario Runner functionality."""
 
@@ -22,6 +23,7 @@ class TestScenarioRunner:
         self.mock_provider = MockLLMProvider()
         self.runner = ScenarioRunner(llm_provider=self.mock_provider)
 
+    @pytest.mark.smoke
     def test_get_available_scenarios(self):
         """Test getting list of available scenarios."""
         scenarios = self.runner.get_available_scenarios()
@@ -40,6 +42,7 @@ class TestScenarioRunner:
             assert scenario.description is not None
             assert len(scenario.expected_outcomes) > 0
 
+    @pytest.mark.smoke
     def test_run_secret_leak_prevention_scenario(self):
         """Test running secret leak prevention scenario."""
         result = self.runner.run_scenario(
@@ -86,6 +89,7 @@ class TestScenarioRunner:
         # Check logs
         assert len(result.logs) > 0
 
+    @pytest.mark.smoke
     def test_run_important_npc_attack_scenario(self):
         """Test running important NPC attack scenario."""
         result = self.runner.run_scenario(
@@ -108,6 +112,7 @@ class TestScenarioRunner:
         assert "npc_combat_response" in step_actions
         assert "verify_world_state_update" in step_actions
 
+    @pytest.mark.smoke
     def test_run_seal_countdown_scenario(self):
         """Test running seal countdown scenario."""
         result = self.runner.run_scenario(
@@ -132,6 +137,7 @@ class TestScenarioRunner:
         expected_countdown = 10 - 3
         assert "7" in advance_step.actual_result or str(expected_countdown) in advance_step.actual_result
 
+    @pytest.mark.smoke
     def test_run_forbidden_knowledge_scenario(self):
         """Test running forbidden knowledge scenario."""
         result = self.runner.run_scenario(
@@ -297,6 +303,7 @@ class TestScenarioRunner:
             assert result.completed_at >= result.started_at
 
 
+@pytest.mark.scenario
 class TestSecretLeakPreventionScenario:
     """Test secret leak prevention scenario specifics."""
 
@@ -335,6 +342,7 @@ class TestSecretLeakPreventionScenario:
         assert perspective_step.passed is True
 
 
+@pytest.mark.scenario
 class TestSealCountdownScenario:
     """Test seal countdown scenario specifics."""
 
@@ -385,6 +393,7 @@ class TestSealCountdownScenario:
         assert str(expected_hour) in time_step.actual_result or "14" in time_step.actual_result
 
 
+@pytest.mark.scenario
 class TestImportantNPCAttackScenario:
     """Test important NPC attack scenario specifics."""
 
@@ -422,6 +431,7 @@ class TestImportantNPCAttackScenario:
         assert any(word in response_step.actual_result.lower() for word in valid_words)
 
 
+@pytest.mark.scenario
 class TestForbiddenKnowledgeScenario:
     """Test forbidden knowledge scenario specifics."""
 
@@ -461,6 +471,7 @@ class TestForbiddenKnowledgeScenario:
         assert "blocked" in boundary_step.actual_result.lower()
 
 
+@pytest.mark.scenario
 class TestMockLLMProviderIntegration:
     """Test MockLLMProvider integration with scenarios."""
 
@@ -504,6 +515,7 @@ class TestMockLLMProviderIntegration:
         assert isinstance(result, dict)
 
 
+@pytest.mark.scenario
 class TestCoreLoopScenarios:
     """Test core game loop scenarios."""
 
@@ -512,6 +524,7 @@ class TestCoreLoopScenarios:
         self.mock_provider = MockLLMProvider()
         self.runner = ScenarioRunner(llm_provider=self.mock_provider)
 
+    @pytest.mark.smoke
     def test_core_loop_order_explicit(self):
         """Test that core loop executes in documented order."""
         result = self.runner.run_custom_scenario(
@@ -537,6 +550,7 @@ class TestCoreLoopScenarios:
         assert result.status == "passed"
         assert len(result.steps) == 12
 
+    @pytest.mark.smoke
     def test_fallback_matrix_coverage(self):
         """Test all fallback scenarios in fallback matrix."""
         result = self.runner.run_custom_scenario(
@@ -576,6 +590,7 @@ class TestCoreLoopScenarios:
         assert result.status == "passed"
         assert len(result.steps) == 4
 
+    @pytest.mark.smoke
     def test_audit_replay_no_llm_recall(self):
         """Test that audit data enables replay without LLM."""
         result = self.runner.run_custom_scenario(

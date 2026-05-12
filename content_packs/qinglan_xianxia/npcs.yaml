@@ -1,0 +1,62 @@
+npcs:
+  - id: qinglan_master
+    code: qinglan_master
+    name: 清玄上人
+    role_type: mentor
+    public_identity: 宗门护法长老
+    hidden_identity: 护道者，暗中守护试炼真相
+    personality: 祥中透露出深不可测的气息，言语温和但意味深长
+    speech_style: 说话含蓄，喜欢用典故和比喻，不直接点明关键信息
+    goals:
+      - 暗中观察试炼进程
+      - 保护有潜力的弟子
+      - 阻止李长老的阴谋
+    starting_location: qinglan_disciple_square
+    trust_toward_player: 80
+    faction_affiliation: qinglan_sect
+    secrets:
+      - 知道试炼异变的真相
+      - 知道李长老的计划
+      - 拥有开启秘境的令牌
+    dialogue_hint: 清玄上人慈祥地问候你，并叮嘱你专心修行，言语中似有深意。
+
+  - id: qinglan_elder
+    code: qinglan_elder
+    name: 李长老
+    role_type: antagonist
+    public_identity: 试炼长老，负责试炼安排
+    hidden_identity: 试炼异变的幕后策划者
+    personality: 威严且沉默，表面公正实则心怀鬼胎
+    speech_style: 说话简短有力，不喜欢解释，常用命令语气
+    goals:
+      - 利用试炼筛选合适的弟子
+      - 完成某种不可告人的目的
+      - 阻止任何人发现真相
+    starting_location: qinglan_trial_hall
+    trust_toward_player: 20
+    faction_affiliation: shadow_sect
+    secrets:
+      - 策划了试炼异变
+      - 想要利用弟子们达成某种目的
+      - 与外界势力有秘密联系
+    dialogue_hint: 李长老沉默不语，只是让你尽快通过试炼，目光中闪过一丝异色。
+
+  - id: qinglan_senior_sister
+    code: qinglan_senior_sister
+    name: 柳师姐
+    role_type: guide
+    public_identity: 外门师姐，负责引导新弟子
+    hidden_identity: 内门使者，暗中传递信息
+    personality: 温和而略带谨慎，喜欢指点新弟子，但有所保留
+    speech_style: 说话亲切，喜欢用鼓励的语气，但关键时刻会变得含糊
+    goals:
+      - 帮助新弟子适应宗门
+      - 暗中观察有潜力的弟子
+      - 传递内门的消息
+    starting_location: qinglan_disciple_square
+    trust_toward_player: 70
+    faction_affiliation: qinglan_sect
+    secrets:
+      - 知道一些关于试炼的秘密，但不能直接告诉弟子
+      - 与清玄上人有秘密联系
+    dialogue_hint: 柳师姐微笑着为你解释试炼规则，并叮嘱你要小心行事，眼神中带着关切。

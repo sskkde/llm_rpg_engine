@@ -1,0 +1,90 @@
+rules:
+  pack_id: qinglan_xianxia
+  version: 1.0
+  
+  cultivation_system:
+    enabled: true
+    realms:
+      - name: 炼气期
+        stages: 9
+        base_exp_per_stage: 1000
+      - name: 筑基期
+        stages: 3
+        base_exp_per_stage: 5000
+      - name: 金丹期
+        stages: 3
+        base_exp_per_stage: 20000
+    cultivation_methods:
+      - meditation
+      - pill_assisted
+      - spirit_absorption
+
+  combat_system:
+    enabled: true
+    base_hp: 100
+    base_stamina: 100
+    base_spirit_power: 100
+    damage_formula: "attack_power * (1 - defense / 100)"
+    dodge_formula: "speed / (speed + enemy_speed) * 100"
+
+  reputation_system:
+    enabled: true
+    factions:
+      - id: qinglan_sect
+        base_reputation: 0
+        reputation_levels:
+          - name: 敌对
+            range: [-100, -50]
+          - name: 冷淡
+            range: [-49, -10]
+          - name: 中立
+            range: [-9, 9]
+          - name: 友好
+            range: [10, 49]
+          - name: 亲密
+            range: [50, 100]
+      - id: shadow_sect
+        base_reputation: -20
+        reputation_levels:
+          - name: 敌对
+            range: [-100, -50]
+          - name: 可疑
+            range: [-49, -20]
+          - name: 警惕
+            range: [-19, 0]
+          - name: 观察
+            range: [1, 30]
+          - name: 信任
+            range: [31, 100]
+
+  time_system:
+    calendar: 青岚历
+    seasons:
+      - 春
+      - 夏
+      - 秋
+      - 冬
+    periods:
+      - 子时
+      - 丑时
+      - 寅时
+      - 卯时
+      - 辰时
+      - 巳时
+      - 午时
+      - 未时
+      - 申时
+      - 酉时
+      - 戌时
+      - 亥时
+    days_per_season: 90
+    turns_per_period: 10
+
+  secret_system:
+    enabled: true
+    reveal_conditions:
+      - trust_threshold
+      - quest_completion
+      - item_acquisition
+      - location_discovery
+    secret_decay: false

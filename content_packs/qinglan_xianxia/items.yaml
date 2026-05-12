@@ -1,0 +1,74 @@
+items:
+  - id: qi_condensing_pill
+    code: qi_condensing_pill
+    name: 聚气丹
+    item_type: consumable
+    rarity: common
+    description: |
+      青岚宗炼制的入门丹药，可帮助弟子凝聚灵气，提升修炼效率。
+      丹药呈淡蓝色，散发着淡淡的清香。
+    effects:
+      - type: spirit_power_restore
+        value: 30
+      - type: cultivation_boost
+        value: 10
+        duration: 1_hour
+    usage:
+      consumable: true
+      cooldown: 1_day
+    lore: 青岚宗炼丹房的入门作品，每位新弟子都会获赠一枚。
+
+  - id: wind_control_talisman
+    code: wind_control_talisman
+    name: 御风符
+    item_type: talisman
+    rarity: uncommon
+    description: |
+      刻有御风法阵的符箓，使用后可短暂提升身法速度。
+      符纸上绘有青色云纹，隐隐有风声流转。
+    effects:
+      - type: speed_boost
+        value: 50
+        duration: 10_minutes
+      - type: evasion_bonus
+        value: 15
+        duration: 10_minutes
+    usage:
+      consumable: true
+      cooldown: 1_hour
+    lore: 青岚宗剑修常用符箓，在试炼中可助弟子快速移动。
+
+  - id: spirit_stone
+    code: spirit_stone
+    name: 灵石
+    item_type: resource
+    rarity: common
+    description: |
+      蕴含灵力的晶石，是修仙界的通用货币。
+      可用于购买物品、修炼加速或支付服务费用。
+    effects:
+      - type: currency
+        value: 1
+    usage:
+      consumable: false
+      tradable: true
+    lore: 灵石是修仙者不可或缺的资源，可从灵脉中开采或通过交易获得。
+
+  - id: qinglan_token
+    code: qinglan_token
+    name: 青岚令牌
+    item_type: key_item
+    rarity: rare
+    description: |
+      青岚宗长老信物，刻有宗门印记。
+      持有此令牌可开启秘境入口，进入试炼异变的核心区域。
+    effects:
+      - type: unlock
+        target: qinglan_secret_realm_entrance
+      - type: reputation
+        faction: qinglan_sect
+        value: 20
+    usage:
+      consumable: false
+      quest_item: true
+    lore: 只有获得长老信任的弟子才能获得此令牌，它代表着宗门的认可。

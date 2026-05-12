@@ -1,0 +1,20 @@
+worlds:
+  - id: qinglan_world
+    code: qinglan_world
+    name: 青岚仙门
+    genre: xianxia
+    lore_summary: |
+      青岚宗乃千年仙门，以剑道与炼丹闻名于修仙界。
+      宗门位于青岚山脉深处，云雾缭绕，灵气充沛。
+      外门弟子需通过试炼方可入内门，内门弟子则可习得更高深功法。
+      然而近来宗门中异变暗生，试炼中藏有不可言说的秘密...
+    status: active
+    starting_location: qinglan_mountain_gate
+    calendar: 青岚历
+    starting_season: 春
+    starting_day: 1
+    starting_period: 辰时
+    theme_settings:
+      cultivation_system: true
+      sect_politics: true
+      hidden_secrets: true

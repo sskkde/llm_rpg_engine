@@ -1,0 +1,13 @@
+id: qinglan_xianxia
+name: 青岚仙侠世界
+version: 1.0.0
+description: 青岚宗门修仙试炼世界，包含宗门势力、修仙者NPC、试炼任务与灵物
+author: llm_rpg_engine
+genre: xianxia
+theme: cultivation_trial
+tags:
+  - xianxia
+  - cultivation
+  - sect
+  - trial
+created_at: "2026-05-12"

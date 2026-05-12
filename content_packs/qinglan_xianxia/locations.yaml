@@ -1,0 +1,183 @@
+locations:
+  - id: qinglan_mountain_gate
+    code: qinglan_mountain_gate
+    name: 青岚山门
+    description: |
+      巍峨的山门矗立于青岚山脉入口，石柱上刻着"青岚仙门"四个大字。
+      两旁石狮威严，山门内云雾缭绕，隐约可见远处的殿宇楼阁。
+      弟子们在此进出，有的神色匆匆，有的悠然自得。
+    tags:
+      - entrance
+      - public
+    danger_level: 0.0
+    connections:
+      - qinglan_disciple_square
+      - qinglan_outer_residence
+    hidden_features: []
+
+  - id: qinglan_disciple_square
+    code: qinglan_disciple_square
+    name: 弟子广场
+    description: |
+      宽阔的广场是外门弟子聚集之所，四周环绕着练功台与演武场。
+      正中一座巨大石碑，刻着宗门规矩与试炼规则。
+      弟子们在此切磋技艺，或三五成群低声交谈。
+    tags:
+      - public
+      - gathering
+    danger_level: 0.0
+    connections:
+      - qinglan_mountain_gate
+      - qinglan_trial_hall
+      - qinglan_library_outer
+    hidden_features: []
+
+  - id: qinglan_training_grounds
+    code: qinglan_training_grounds
+    name: 试炼场
+    description: |
+      试炼场位于宗门后山，四周布有阵法禁制。
+      场中设有各种试炼关卡，从基础的心性考验到高深的实战对决。
+      空气中弥漫着淡淡的灵力波动，令人心神警醒。
+    tags:
+      - trial
+      - restricted
+    danger_level: 0.3
+    connections:
+      - qinglan_trial_hall
+      - qinglan_spirit_forest
+    hidden_features:
+      - 试炼场深处藏有通往秘境的隐秘通道
+
+  - id: qinglan_trial_hall
+    code: qinglan_trial_hall
+    name: 试炼堂
+    description: |
+      高大的试炼堂内悬挂着历代长老的画像，庄严肃穆。
+      堂中设有数个接引台，弟子们在此领取试炼任务。
+      一位白发长老端坐主位，目光如炬，审视着每一位前来领任务的弟子。
+    tags:
+      - public
+      - administration
+    danger_level: 0.1
+    connections:
+      - qinglan_disciple_square
+      - qinglan_training_grounds
+    hidden_features: []
+
+  - id: qinglan_outer_residence
+    code: qinglan_outer_residence
+    name: 外门居所
+    description: |
+      简朴的居所散发着淡淡药香，是外门弟子起居之所。
+      房间虽不宽敞，却整洁有序，每间房前都种着一株灵草。
+      弟子们在此休息修炼，为即将到来的试炼做准备。
+    tags:
+      - residence
+      - private
+    danger_level: 0.0
+    connections:
+      - qinglan_mountain_gate
+      - qinglan_herb_garden
+    hidden_features: []
+
+  - id: qinglan_herb_garden
+    code: qinglan_herb_garden
+    name: 药园
+    description: |
+      药园里种着各类灵草，空气中弥漫着草木清香。
+      园中有一口灵泉，泉水清澈见底，据说有助修炼之效。
+      几位药堂弟子正在照料灵草，偶尔低声交流心得。
+    tags:
+      - resource
+      - public
+    danger_level: 0.0
+    connections:
+      - qinglan_outer_residence
+      - qinglan_spirit_forest
+    hidden_features:
+      - 药园深处有一株千年灵参，只有长老们知晓
+
+  - id: qinglan_library_outer
+    code: qinglan_library_outer
+    name: 藏经阁外区
+    description: |
+      藏经阁外区供外门弟子查阅基础功法，书架林立，卷帙浩繁。
+      内区被一道禁制隔绝，对外门弟子暂时封闭。
+      几位弟子正在翻阅典籍，神情专注。
+    tags:
+      - knowledge
+      - restricted
+    danger_level: 0.0
+    connections:
+      - qinglan_disciple_square
+    hidden_features:
+      - 藏经阁内区藏有关于试炼异变的记载
+
+  - id: qinglan_spirit_forest
+    code: qinglan_spirit_forest
+    name: 灵林试炼区
+    description: |
+      这片灵林是试炼的主要区域，古木参天，灵气氤氲。
+      林中偶有灵兽出没，是弟子们历练的好去处。
+      传说林深处藏着秘境入口，但无人能证实。
+    tags:
+      - trial
+      - wilderness
+    danger_level: 0.4
+    connections:
+      - qinglan_training_grounds
+      - qinglan_herb_garden
+      - qinglan_cliff_altar
+    hidden_features:
+      - 灵林深处有一处隐蔽的石门，通往秘境
+
+  - id: qinglan_cliff_altar
+    code: qinglan_cliff_altar
+    name: 崖边祭坛
+    description: |
+      悬崖旁的古老祭坛上刻满阵纹，似乎早已失去灵力。
+      祭坛四周风声呼啸，令人心生敬畏。
+      偶有弟子在此打坐，感悟天地之道。
+    tags:
+      - sacred
+      - dangerous
+    danger_level: 0.5
+    connections:
+      - qinglan_spirit_forest
+    hidden_features:
+      - 祭坛下封印着通往秘境核心的通道
+
+  - id: qinglan_secret_realm_entrance
+    code: qinglan_secret_realm_entrance
+    name: 秘境入口
+    description: |
+      灵林深处隐蔽着一处石门，石门缝隙里吹出寒气。
+      门上刻着古老的符文，似乎需要特定法器才能开启。
+      传说门后是试炼异变的源头所在。
+    tags:
+      - secret
+      - restricted
+    danger_level: 0.7
+    connections:
+      - qinglan_spirit_forest
+      - qinglan_core_anomaly
+    hidden_features:
+      - 需要青岚令牌才能完全开启
+
+  - id: qinglan_core_anomaly
+    code: qinglan_core_anomaly
+    name: 异变核心
+    description: |
+      这是试炼异变的源头，邪气缭绕，令人胆寒。
+      四周空间扭曲，灵力紊乱，仿佛连时间都变得不真实。
+      真正的幕后黑手或许就在此等待...
+    tags:
+      - secret
+      - dangerous
+      - finale
+    danger_level: 0.9
+    connections:
+      - qinglan_secret_realm_entrance
+    hidden_features:
+      - 真正的幕后黑手在此等待

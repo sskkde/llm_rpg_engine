@@ -1,0 +1,72 @@
+plot_beats:
+  - id: trial_anomaly_discovery
+    code: trial_anomaly_discovery
+    name: 试炼异变初现
+    event_type: discovery
+    trigger_conditions:
+      location: qinglan_training_grounds
+      event_flag: trial_basic_complete
+      turn_minimum: 5
+    effects:
+      - type: set_flag
+        key: anomaly_hint
+        value: true
+      - type: npc_hint
+        npc: qinglan_senior_sister
+        hint: "师姐似乎有些话想说，但又欲言又止..."
+      - type: narrative
+        text: |
+          在试炼场深处，你感受到一股异样的气息。
+          空气中的灵力似乎有些紊乱，与正常修炼的感觉不同。
+          这股异变似乎来自更深处...
+    prerequisites: []
+
+  - id: elder_suspicion
+    code: elder_suspicion
+    name: 长老的异样
+    event_type: character_revelation
+    trigger_conditions:
+      npc_interaction: qinglan_elder
+      event_flag: reported_to_sister
+      trust_threshold:
+        npc: qinglan_elder
+        below: 30
+    effects:
+      - type: set_flag
+        key: elder_suspicious
+        value: true
+      - type: npc_hint
+        npc: qinglan_master
+        hint: "清玄上人似乎在暗中观察着你..."
+      - type: narrative
+        text: |
+          李长老的眼神中闪过一丝异色，似乎在评估着什么。
+          你隐约感觉到，这位长老并不像表面上那么公正。
+          也许应该找其他人谈谈...
+    prerequisites:
+      - plot_beat: trial_anomaly_discovery
+
+  - id: secret_realm_entrance_found
+    code: secret_realm_entrance_found
+    name: 秘境入口现世
+    event_type: location_unlock
+    trigger_conditions:
+      location: qinglan_cliff_altar
+      event_flag: altar_discovered
+      item_held: qinglan_token
+    effects:
+      - type: unlock_location
+        location: qinglan_secret_realm_entrance
+      - type: set_flag
+        key: secret_realm_accessible
+        value: true
+      - type: narrative
+        text: |
+          青岚令牌在祭坛上发出淡淡光芒，古老的阵纹开始流转。
+          一道隐秘的石门缓缓显现，寒气从门缝中涌出。
+          秘境入口终于现世，真相就在前方...
+    prerequisites:
+      - plot_beat: elder_suspicion
+      - quest_stage:
+          quest: qinglan_secret_quest
+          stage: 3

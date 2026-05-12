@@ -1,0 +1,39 @@
+factions:
+  - id: qinglan_sect
+    code: qinglan_sect
+    name: 青岚宗
+    ideology: 以剑道与炼丹为本，追求正统修仙之道，维护宗门秩序与弟子安全
+    goals:
+      - 培养优秀的修仙弟子
+      - 维护宗门的声誉与地位
+      - 保护弟子免受试炼异变的伤害
+    relationships:
+      shadow_sect: hostile
+      player: neutral
+    description: |
+      青岚宗乃千年仙门，以剑道与炼丹闻名于修仙界。
+      宗门正统势力由清玄上人等长老领导，致力于维护宗门秩序。
+      近来宗门中异变暗生，正统势力正在暗中调查真相。
+    members:
+      - qinglan_master
+      - qinglan_senior_sister
+    reputation: 正统修仙宗门，声誉良好
+
+  - id: shadow_sect
+    code: shadow_sect
+    name: 暗影势力
+    ideology: 追求力量与秘密，不惜利用试炼异变达成目的
+    goals:
+      - 利用试炼筛选合适的弟子
+      - 完成某种不可告人的目的
+      - 阻止任何人发现真相
+    relationships:
+      qinglan_sect: hostile
+      player: suspicious
+    description: |
+      暗影势力是宗门中的隐秘派系，由李长老等人领导。
+      他们策划了试炼异变，目的不明，但显然心怀鬼胎。
+      此势力行事隐秘，不易被发现。
+    members:
+      - qinglan_elder
+    reputation: 隐秘势力，不为外人所知

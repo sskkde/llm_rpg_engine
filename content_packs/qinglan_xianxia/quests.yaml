@@ -1,0 +1,103 @@
+quests:
+  - id: qinglan_trial_quest
+    code: qinglan_trial_quest
+    name: 初入青岚
+    quest_type: main
+    summary: 通过青岚宗的基础试炼，正式成为外门弟子
+    visibility: visible
+    stages:
+      - step_no: 1
+        objective: 前往试炼堂领取试炼任务
+        success_conditions:
+          location: qinglan_trial_hall
+          npc_interaction: qinglan_elder
+        fail_conditions: {}
+        rewards:
+          exp: 100
+          items: []
+      - step_no: 2
+        objective: 在试炼场完成基础心性考验
+        success_conditions:
+          location: qinglan_training_grounds
+          event_flag: trial_basic_complete
+        fail_conditions:
+          hp_below: 30
+        rewards:
+          exp: 200
+          items:
+            - qi_condensing_pill
+      - step_no: 3
+        objective: 探索灵林，寻找试炼线索
+        success_conditions:
+          location: qinglan_spirit_forest
+          event_flag: forest_explored
+        fail_conditions: {}
+        rewards:
+          exp: 150
+          items: []
+      - step_no: 4
+        objective: 向柳师姐汇报试炼进展
+        success_conditions:
+          npc_interaction: qinglan_senior_sister
+          event_flag: reported_to_sister
+        fail_conditions: {}
+        rewards:
+          exp: 100
+          reputation: qinglan_sect_positive
+    prerequisites: []
+    rewards:
+      exp: 550
+      reputation: qinglan_sect_member
+
+  - id: qinglan_secret_quest
+    code: qinglan_secret_quest
+    name: 异变之谜
+    quest_type: side
+    summary: 发现试炼异变的真相，揭开宗门中的秘密
+    visibility: hidden
+    stages:
+      - step_no: 1
+        objective: 在藏经阁外区发现关于异变的记载
+        success_conditions:
+          location: qinglan_library_outer
+          event_flag: library_secret_found
+        fail_conditions: {}
+        rewards:
+          exp: 200
+          info: trial_anomaly_hint
+      - step_no: 2
+        objective: 与清玄上人交谈，获取更多线索
+        success_conditions:
+          npc_interaction: qinglan_master
+          trust_threshold: 60
+          event_flag: master_hint_received
+        fail_conditions:
+          trust_below: 30
+        rewards:
+          exp: 300
+          item: qinglan_token_hint
+      - step_no: 3
+        objective: 探索崖边祭坛，发现封印通道
+        success_conditions:
+          location: qinglan_cliff_altar
+          event_flag: altar_discovered
+        fail_conditions: {}
+        rewards:
+          exp: 250
+          info: secret_realm_location
+      - step_no: 4
+        objective: 进入秘境，面对异变核心
+        success_conditions:
+          location: qinglan_core_anomaly
+          item_required: qinglan_token
+        fail_conditions:
+          hp_below: 20
+        rewards:
+          exp: 500
+          truth: trial_anomaly_truth
+    prerequisites:
+      - quest: qinglan_trial_quest
+        stage: 3
+    rewards:
+      exp: 1250
+      truth: full_truth_revealed

@@ -532,6 +532,120 @@ The following features are explicitly out of scope for P3-QG and deferred to fut
 
 For detailed status, see `IMPLEMENTATION_STATUS.md` and `P3_COMPLETION_REPORT.md`.
 
+## P4 Content Productization
+
+This phase adds content productization infrastructure: structured content packs, Faction/PlotBeat persistence, Admin content editing, scenario regression testing, and replay reports.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run full P4 quality gate
+make test-p4
+
+# Run content pack validation
+make test-content
+
+# Run admin content API tests
+make test-admin-content
+
+# Run scenario regression tests
+make test-scenario-regression
+
+# Run replay report tests
+make test-replay-report
+
+# Run admin UI tests
+make test-frontend-admin
+```
+
+### Content Pack Commands
+
+Content packs are structured YAML directories for game content:
+
+```bash
+# Validate a content pack
+cd backend
+python -m llm_rpg.scripts.validate_content_pack ../content_packs/qinglan_xianxia
+
+# Validate with JSON output
+python -m llm_rpg.scripts.validate_content_pack ../content_packs/qinglan_xianxia --format json
+
+# Import a content pack (dry-run preview)
+python -m llm_rpg.scripts.import_content_pack ../content_packs/qinglan_xianxia --dry-run
+
+# Import a content pack
+python -m llm_rpg.scripts.import_content_pack ../content_packs/qinglan_xianxia
+```
+
+### Admin Content API Endpoints
+
+New Admin API endpoints require admin role authentication:
+
+#### Factions
+- `GET /admin/factions` - List all factions
+- `GET /admin/factions/{id}` - Get faction details
+- `PATCH /admin/factions/{id}` - Update faction
+
+#### Plot Beats
+- `GET /admin/plot-beats` - List all plot beats
+- `GET /admin/plot-beats/{id}` - Get plot beat details
+- `PATCH /admin/plot-beats/{id}` - Update plot beat
+
+#### Content Packs
+- `POST /admin/content-packs/validate` - Validate content pack at path
+- `POST /admin/content-packs/import` - Import content pack (supports `?dry_run=true`)
+
+### Admin UI
+
+New admin pages are available at:
+- `/admin` → Factions tab
+- `/admin` → Plot Beats tab
+- `/admin` → Content Packs tab
+
+The Content Packs panel provides a workflow: enter path → validate → dry-run preview → import with confirmation.
+
+### Content Pack Structure
+
+Content packs are YAML directories with the following structure:
+
+```
+content_packs/qinglan_xianxia/
+├── pack.yaml           # Manifest (id, name, version, dependencies)
+├── worlds.yaml         # World definitions
+├── locations.yaml      # Location definitions
+├── npcs.yaml           # NPC templates
+├── quests.yaml         # Quest definitions
+├── items.yaml          # Item templates
+├── factions.yaml       # Faction definitions
+├── plot_beats.yaml     # Plot beat triggers
+├── prompts.yaml        # LLM prompt templates
+├── rules.yaml          # Game rule configurations
+└── README.md           # Pack documentation
+```
+
+### Condition and Effect Whitelists
+
+Plot beat conditions and effects use a whitelist approach (no arbitrary code execution):
+
+**Conditions**: `fact_known`, `state_equals`, `state_in`, `quest_stage`, `npc_present`, `location_is`
+
+**Effects**: `add_known_fact`, `advance_quest`, `set_state`, `emit_event`, `change_relationship`, `add_memory`
+
+### P5 Deferred Items
+
+The following features are explicitly out of scope for P4 and deferred to future phases:
+
+- **Media generation**: Portrait, scene, and BGM async generation (`/media/*` endpoints remain 501)
+- **Async job infrastructure**: Celery, RQ, Temporal, or similar
+- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites
+- **Real LLM in tests**: Default tests must not require real OpenAI API
+- **Arbitrary expressions**: Plot beat conditions must use whitelist only
+
+For detailed status, see `IMPLEMENTATION_STATUS.md`, `P4_EXECUTION_STATUS.md`, and `P4_COMPLETION_REPORT.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

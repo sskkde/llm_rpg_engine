@@ -95,15 +95,21 @@ P4 adds content productization infrastructure. For detailed status, see `P4_EXEC
 
 | Deliverable | Status |
 |-------------|--------|
-| Content packs (qinglan_xianxia) | Pending |
-| Faction/PlotBeat persistence | Pending |
-| Admin content API/UI | Pending |
-| Scenario regression profile | Pending |
-| Replay report | Pending |
-| P4 Makefile/CI | Pending |
-| Frontend unit test debt | Pending |
+| Content packs (qinglan_xianxia) | Completed |
+| ContentPack schema, loader, validator, importer | Completed |
+| Faction/PlotBeat DB models, migration, repositories | Completed |
+| Admin API: factions, plot-beats, content-packs | Completed |
+| Admin UI: FactionEditor, PlotBeatEditor, ContentPackValidationPanel | Completed |
+| Quest/Story Progression Gate | Completed |
+| Scenario regression profile | Completed |
+| Replay report / state diff | Completed |
+| P4 Makefile targets + CI jobs | Completed |
+| Frontend unit test debt | Completed (explicitly isolated with skip) |
+| P4_COMPLETION_REPORT.md | Pending final verification |
 
 **P4 Gates**: `make test-p4`, `make test-content`, `make test-scenario-regression`
+
+**Note**: P4 deliverables are implemented. Final verification pending until Step 16 completes.
 
 ---
 
@@ -131,22 +137,19 @@ P4 adds content productization infrastructure. For detailed status, see `P4_EXEC
 
 ## P5+ Deferred Items
 
-The following items are explicitly out of scope for P3-QG and deferred to future phases:
+The following items are explicitly out of scope for P3-QG and P4 and deferred to future phases:
 
-### Schema Extensions
-- Factions/plot_beats schema and migrations
-- New entity types beyond existing world model
-
-### Media Generation
+### Media Generation (P5 Priority)
 - Portrait generation (`/media/portraits/generate`)
 - Scene image generation (`/media/scenes/generate`)
 - Background music generation (`/media/bgm/generate`)
+- Async job infrastructure (Celery/RQ/Temporal)
 
-### Engine Refactoring
+### Engine Refactoring (P5+ Priority)
 - ReplayEngine rewrite
-- Turn service major refactoring
+- Turn Orchestrator major refactoring
 
-### Test Infrastructure
+### Test Infrastructure (P5+ Priority)
 - Real OpenAI/LLM integration for tests
 - New API routes or frontend routing changes
 - E2E as required CI job (currently optional)

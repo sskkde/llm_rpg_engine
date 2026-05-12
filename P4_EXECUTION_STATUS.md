@@ -49,7 +49,7 @@ The following are explicitly NOT in P4 scope:
 | pgvector | `make test-pgvector` | ⚠️ 8 skipped (needs PostgreSQL; CI has pgvector job) |
 | Frontend unit | `make test-frontend-unit` | ✅ 21 passed, 118 skipped (explicitly isolated) |
 
-**Note**: `test-frontend-admin` is a deferred soft gate. Admin UI tests are known to skip (36 tests) due to React 19 / @testing-library compatibility. This is documented as P4 accepted debt. CI `frontend-admin-tests` job uses `continue-on-error: true`.
+**Note**: `test-frontend-admin` is accepted admin UI debt. Admin UI tests are known to skip (36 tests) due to React 19 / @testing-library compatibility. This is documented in `P4_COMPLETION_REPORT.md`. CI `frontend-admin-tests` job uses `continue-on-error: true`.
 
 ---
 

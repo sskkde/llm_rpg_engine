@@ -1,7 +1,7 @@
 # P4 Content Productization Completion Report
 
 **Generated**: 2026-05-12
-**Status**: COMPLETE WITH DEFERRED ADMIN UI SOFT GATE
+**Status**: COMPLETE WITH ACCEPTED ADMIN UI DEBT
 
 ---
 
@@ -242,12 +242,12 @@ Endpoints:
 - **Mitigation**: Individual test groups pass; components verified separately
 - **Impact**: None on production - all functional tests pass
 
-### 4. Admin UI Tests (Deferred Soft Gate)
+### 4. Admin UI Tests (Accepted Debt)
 - **Status**: 36 admin UI tests skipped
 - **Cause**: React 19 / @testing-library/react compatibility
 - **Impact**: Admin UI tests not blocking P4 gate
 - **Mitigation**: Documented as P4 accepted debt; CI uses `continue-on-error: true`
-- **P4 Scope**: Deferred soft gate — components render correctly in browser
+- **P4 Scope**: Accepted debt — components render correctly in browser, test harness remains deferred
 
 ---
 
@@ -338,7 +338,7 @@ The following items are explicitly out of scope for P4:
 - [x] Frontend unit debt resolved (explicitly isolated)
 - [x] Documentation complete
 
-**P4 Status**: ✅ **COMPLETE WITH DEFERRED ADMIN UI SOFT GATE**
+**P4 Status**: ✅ **COMPLETE WITH ACCEPTED ADMIN UI DEBT**
 
 ---
 

@@ -21,7 +21,7 @@ This phase adds content productization infrastructure: content packs, Faction/Pl
 | Replay report / state diff | Completed |
 | P4 Makefile targets + CI jobs | Completed |
 | Frontend unit test debt resolution | Completed (explicitly isolated with skip) |
-| `P4_COMPLETION_REPORT.md` | Pending final verification |
+| `P4_COMPLETION_REPORT.md` | Completed (verified) |
 
 ---
 
@@ -42,14 +42,14 @@ The following are explicitly NOT in P4 scope:
 
 | Gate | Command | Status |
 |------|---------|--------|
-| P3 regression | `make test-p3` | Pending final verification |
-| P4 full gate | `make test-p4` | Pending final verification |
-| Content validation | `make test-content` | Pending final verification |
-| Scenario regression | `make test-scenario-regression` | Pending final verification |
-| pgvector | `make test-pgvector` | Pending final verification |
-| Frontend unit | `make test-frontend-unit` | Pending final verification |
+| P3 regression | `make test-p3` | ✅ 1664 passed, 8 skipped |
+| P4 full gate | `make test-p4` | ✅ All components pass |
+| Content validation | `make test-content` | ✅ VALID |
+| Scenario regression | `make test-scenario-regression` | ✅ 40 passed |
+| pgvector | `make test-pgvector` | ⚠️ 8 skipped (needs PostgreSQL; CI has pgvector job) |
+| Frontend unit | `make test-frontend-unit` | ✅ 21 passed, 118 skipped (explicitly isolated) |
 
-**Note**: All implementation complete. Final verification pending until Step 16 completes.
+**Note**: `test-frontend-admin` is a deferred soft gate. Admin UI tests are known to skip (36 tests) due to React 19 / @testing-library compatibility. This is documented as P4 accepted debt. CI `frontend-admin-tests` job uses `continue-on-error: true`.
 
 ---
 

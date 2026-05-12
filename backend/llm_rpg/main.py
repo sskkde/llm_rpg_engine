@@ -34,7 +34,7 @@ from .core import (
     MemoryWriter,
 )
 from .engines import WorldEngine, NPCEngine, NarrationEngine
-from .api import auth, saves, sessions, game, streaming, world, combat, admin, debug, media
+from .api import auth, saves, sessions, game, streaming, world, combat, admin, debug, media, admin_content
 
 
 APP_ENV = os.getenv("APP_ENV", "development")
@@ -109,6 +109,7 @@ app.include_router(streaming.router)
 app.include_router(world.router)
 app.include_router(combat.router)
 app.include_router(admin.router)
+app.include_router(admin_content.router)
 app.include_router(debug.router)
 app.include_router(media.router)
 

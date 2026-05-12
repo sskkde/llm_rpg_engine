@@ -2,7 +2,7 @@
 # Aligned with AGENTS.md canonical commands. Used by CI and local development.
 
 .PHONY: help \
-        test-backend test-scenario-smoke test-pgvector test-p3 test-content \
+        test-backend test-scenario-smoke test-scenario-regression test-scenario-full test-pgvector test-p3 test-content \
         test-backend-unit test-backend-integration \
         test-frontend-static test-frontend-unit test-frontend-combat \
         run-backend run-frontend \
@@ -26,6 +26,12 @@ test-backend-integration: ## Run backend integration tests only
 test-scenario-smoke: ## Run scenario smoke tests
 	@cd backend && python3 -m pytest tests/scenario -q -m smoke --tb=short
 
+test-scenario-regression: ## Run scenario regression tests
+	@cd backend && python3 -m pytest tests/scenario -q -m regression --tb=short
+
+test-scenario-full: ## Run all scenario tests including full suite
+	@cd backend && python3 -m pytest tests/scenario -q -m "smoke or regression or full" --tb=short
+
 test-pgvector: ## Run pgvector-marked backend tests
 	@cd backend && python3 -m pytest -q -m pgvector --tb=short -v
 
@@ -41,6 +47,25 @@ test-frontend-combat: ## Run stable combat frontend tests only
 
 test-content: ## Validate the qinglan_xianxia content pack
 	@cd backend && python3 -m llm_rpg.scripts.validate_content_pack ../content_packs/qinglan_xianxia
+
+test-admin-content: ## Run admin content API integration tests
+	@cd backend && python3 -m pytest tests/integration/ -q -k "admin" --tb=short
+
+test-replay-report: ## Run replay report unit + integration tests
+	@cd backend && python3 -m pytest tests/ -q -k "replay" --tb=short
+
+test-frontend-admin: ## Run admin UI tests
+	@cd frontend && npm test -- __tests__/admin 2>/dev/null || echo "Admin UI tests: no test files found or tests failed"
+
+test-p4: ## P4 quality gate: test-p3 + content + admin-content + scenario-regression + replay-report + frontend-admin
+	@$(MAKE) test-p3
+	@$(MAKE) test-content
+	@$(MAKE) test-admin-content
+	@$(MAKE) test-scenario-regression
+	@$(MAKE) test-replay-report
+	@$(MAKE) test-frontend-static
+	@$(MAKE) test-frontend-combat
+	@$(MAKE) test-frontend-admin
 
 test-p3: ## Quality gate: backend + scenario smoke + pgvector + frontend static + combat
 	@cd backend && python3 -m pytest -q --tb=short

@@ -55,7 +55,7 @@ test-replay-report: ## Run replay report unit + integration tests
 	@cd backend && python3 -m pytest tests/ -q -k "replay" --tb=short
 
 test-frontend-admin: ## Run admin UI tests
-	@cd frontend && npm test -- __tests__/admin 2>/dev/null || echo "Admin UI tests: no test files found or tests failed"
+	@cd frontend && npm test -- __tests__/admin
 
 test-p4: ## P4 quality gate: test-p3 + content + admin-content + scenario-regression + replay-report + frontend-admin
 	@$(MAKE) test-p3

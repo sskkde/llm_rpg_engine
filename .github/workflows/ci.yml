@@ -156,6 +156,8 @@ jobs:
 
   frontend-admin-tests:
     runs-on: ubuntu-latest
+    # NOTE: Admin UI tests are deferred soft gate (see P4_EXECUTION_STATUS.md).
+    # If tests fail, inspect manually; do not block P4 completion.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

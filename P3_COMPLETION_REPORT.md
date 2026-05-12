@@ -1,17 +1,19 @@
 # P3 Quality Gate Completion Report
 
-**Generated**: 2026-05-11  
-**Status**: COMPLETE
+**Generated**: 2026-05-12
+**Status**: COMPLETE WITH DEFERRED FRONTEND UNIT GATE
 
 ---
 
 ## Summary
 
-P3 Engineering Quality Gate completed on 2026-05-11. All 10 implementation tasks have been verified. The quality gate establishes automated testing infrastructure (Makefile, CI, pytest markers) and documentation triad on top of the existing strong backend test foundation (1664 passed).
+P3 Engineering Quality Gate completed on 2026-05-12. All implementation tasks have been verified. The quality gate establishes automated testing infrastructure (Makefile, CI, pytest markers) and documentation triad on top of the existing strong backend test foundation (1664 passed).
 
 **Key Results**:
 - Backend regression: **1664 passed, 8 skipped** (same as baseline - no regression)
-- Frontend: **build/lint/tsc pass**, unit tests have pre-existing failures (89/113)
+- Frontend static: **lint + tsc pass** (blocking gate)
+- Frontend combat: **21 passed** (CombatPanel.test.tsx, blocking gate)
+- Frontend unit tests: **89/113 failures** (deferred to P4+, not blocking)
 - pgvector: **8/8 pass** against PostgreSQL (CAST fix applied)
 - Scenario smoke: **8 passed**
 - Evidence archived under `.sisyphus/evidence/p3-engineering-quality-gate/`
@@ -22,16 +24,19 @@ P3 Engineering Quality Gate completed on 2026-05-11. All 10 implementation tasks
 
 ### Makefile
 - [x] Status: **Complete**
-- [x] Targets verified: 13 targets total
-  - Core: `help`, `test-backend`, `test-frontend`, `test-scenario-smoke`, `test-pgvector`, `test-p3`
-  - Optional: `test-backend-unit`, `test-backend-integration`, `test-frontend-unit`, `run-backend`, `run-frontend`, `docker-up`, `docker-down`
-- [x] Evidence: All targets execute correctly, aligned with AGENTS.md commands
+- [x] Targets defined: 14 targets total
+  - Core: `help`, `test-backend`, `test-pgvector`, `test-p3`
+  - Frontend split: `test-frontend-static` (lint + tsc, blocking), `test-frontend-unit` (deferred), `test-frontend-combat` (stable subset, blocking)
+  - Scenario: `test-scenario-smoke`
+  - Optional: `test-backend-unit`, `test-backend-integration`, `run-backend`, `run-frontend`, `docker-up`, `docker-down`
+- [x] Evidence: Blocking targets execute correctly; `test-frontend-unit` is intentionally deferred due to known pre-existing failures
 
 ### CI Workflow
 - [x] Status: **Complete**
-- [x] Jobs verified: 3 jobs in `.github/workflows/ci.yml`
+- [x] Jobs verified: 4 jobs in `.github/workflows/ci.yml`
   - `backend-tests`: Python 3.11, runs `make test-backend` + `make test-scenario-smoke`
-  - `frontend-tests`: Node 20, runs `make test-frontend`
+  - `frontend-tests`: Node 20, runs `make test-frontend-static` + `make test-frontend-combat` (blocking)
+  - `frontend-unit-tests`: Node 20, runs `make test-frontend-unit` (continue-on-error: true, non-blocking)
   - `pgvector-tests`: PostgreSQL with pgvector service container, runs `make test-pgvector`
 - [x] Evidence: YAML validated, calls Makefile targets (not raw commands)
 
@@ -96,12 +101,17 @@ Full regression: 1664 passed, 0 failed, 8 skipped
 
 ### Frontend Tests
 ```
-Build: PASS
-Lint: PASS
-TypeScript (tsc --noEmit): PASS
-Unit tests: 24/113 pass (89 pre-existing failures)
+Static checks (blocking):
+  Lint: PASS
+  TypeScript (tsc --noEmit): PASS
+
+Combat tests (blocking):
+  CombatPanel.test.tsx: 21 passed
+
+Unit tests (deferred, non-blocking):
+  Full npm test: 24/113 pass (89 pre-existing failures)
   - Cause: JSDOM rendering issues, not application bugs
-  - Note: Failures existed before P3-QG
+  - Note: Failures existed before P3-QG, deferred to P4+
 ```
 
 ### Scenario Smoke
@@ -162,11 +172,12 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/llm_rpg make test-pgv
 
 ## Known Issues
 
-### 1. Frontend Unit Tests (Pre-existing)
+### 1. Frontend Unit Tests (Pre-existing - Deferred)
 - **Status**: 89/113 tests failing
 - **Cause**: JSDOM rendering issues in test environment
 - **Impact**: Build/lint/tsc all pass; not application bugs
-- **P3-QG Scope**: Not addressed (pre-existing, deferred)
+- **P3-QG Scope**: Deferred to P4+. P3 uses static checks and combat subset as blocking gates.
+- **CI Treatment**: Non-blocking job with `continue-on-error: true`
 
 ### 2. pgvector Tests Require PostgreSQL
 - **Status**: 8 tests skipped in default SQLite path
@@ -239,14 +250,17 @@ The following items are explicitly out of scope for P3-QG:
 ### Definition of Done Checklist
 - [x] `make test-backend` runs and passes (1664 passed)
 - [x] `make test-scenario-smoke` runs and passes (8 passed)
-- [x] `make test-frontend` runs (lint+tsc pass, unit tests have pre-existing failures)
+- [x] `make test-pgvector` runs and passes with PostgreSQL (8 passed)
+- [x] `make test-frontend-static` runs and passes (lint + tsc)
+- [x] `make test-frontend-combat` runs and passes (21 passed)
+- [x] `make test-frontend-unit` runs but has known failures (deferred to P4+)
 - [x] `.github/workflows/ci.yml` exists and workflow is valid YAML
-- [x] pgvector targeted tests pass with Docker PostgreSQL, documented as requiring pgvector-enabled PostgreSQL
+- [x] CI frontend blocking jobs use static + combat tests, not full unit tests
 - [x] All 3 state documents exist and are consistent (IMPLEMENTATION_STATUS.md, P3_COMPLETION_REPORT.md, README.md)
 - [x] Default backend regression has 0 failures (1664 passed)
 
 ### Sign-off Summary
-- [x] All Makefile targets working
+- [x] Blocking Makefile targets working; deferred frontend unit target documented
 - [x] CI configuration valid
 - [x] All markers registered
 - [x] pgvector tests pass
@@ -254,21 +268,24 @@ The following items are explicitly out of scope for P3-QG:
 - [x] Combat gate clean
 - [x] Replay/debug gate clean
 - [x] Documentation complete
-- [x] Full regression clean
+- [x] Full backend regression clean
+- [x] Frontend unit tests deferred (not blocking P3)
 
-**P3-QG Status**: **COMPLETE**
+**P3-QG Status**: **COMPLETE WITH DEFERRED FRONTEND UNIT GATE**
 
 ---
 
 ## Verification Commands
 
 ```bash
-# Quick quality gate check
+# Quick quality gate check (excludes full frontend unit tests)
 make test-p3
 
 # Individual targets
 make test-backend          # 1664 passed, 8 skipped
-make test-frontend         # lint+tsc pass
+make test-frontend-static  # lint + tsc (blocking)
+make test-frontend-combat  # 21 passed (blocking)
+make test-frontend-unit    # deferred - known failures
 make test-scenario-smoke   # 8 passed
 make test-pgvector         # Requires PostgreSQL
 

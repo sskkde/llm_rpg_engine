@@ -41,6 +41,8 @@ from .models import (
     NPCPrivateMemoryModel,
     NPCSecretModel,
     NPCRelationshipMemoryModel,
+    FactionModel,
+    PlotBeatModel,
 )
 
 T = TypeVar("T")
@@ -1072,3 +1074,75 @@ class NPCRelationshipMemoryRepository(BaseRepository):
                 NPCRelationshipMemoryModel.target_id == target_id
             )
         ).order_by(NPCRelationshipMemoryModel.created_turn).all()
+
+
+class FactionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, FactionModel)
+
+    def list_by_world(self, world_id: str) -> List[FactionModel]:
+        return self.db.query(FactionModel).filter(
+            FactionModel.world_id == world_id
+        ).all()
+
+    def get_by_logical_id(self, world_id: str, logical_id: str) -> Optional[FactionModel]:
+        return self.db.query(FactionModel).filter(
+            and_(
+                FactionModel.world_id == world_id,
+                FactionModel.logical_id == logical_id
+            )
+        ).first()
+
+    def upsert_definition(self, data: Dict[str, Any]) -> FactionModel:
+        existing = self.get_by_logical_id(data["world_id"], data["logical_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+    def delete_by_logical_id(self, world_id: str, logical_id: str) -> bool:
+        existing = self.get_by_logical_id(world_id, logical_id)
+        if existing:
+            self.db.delete(existing)
+            self.db.commit()
+            return True
+        return False
+
+
+class PlotBeatRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, PlotBeatModel)
+
+    def list_by_world(self, world_id: str) -> List[PlotBeatModel]:
+        return self.db.query(PlotBeatModel).filter(
+            PlotBeatModel.world_id == world_id
+        ).all()
+
+    def get_by_logical_id(self, world_id: str, logical_id: str) -> Optional[PlotBeatModel]:
+        return self.db.query(PlotBeatModel).filter(
+            and_(
+                PlotBeatModel.world_id == world_id,
+                PlotBeatModel.logical_id == logical_id
+            )
+        ).first()
+
+    def list_candidates(self, world_id: str, status: str) -> List[PlotBeatModel]:
+        return self.db.query(PlotBeatModel).filter(
+            and_(
+                PlotBeatModel.world_id == world_id,
+                PlotBeatModel.status == status
+            )
+        ).order_by(desc(PlotBeatModel.priority)).all()
+
+    def upsert_definition(self, data: Dict[str, Any]) -> PlotBeatModel:
+        existing = self.get_by_logical_id(data["world_id"], data["logical_id"])
+        if existing:
+            return self.update(existing.id, data)
+        return self.create(data)
+
+    def delete_by_logical_id(self, world_id: str, logical_id: str) -> bool:
+        existing = self.get_by_logical_id(world_id, logical_id)
+        if existing:
+            self.db.delete(existing)
+            self.db.commit()
+            return True
+        return False

@@ -31,6 +31,8 @@ class WorldModel(Base):
     item_templates = relationship("ItemTemplateModel", back_populates="world")
     quest_templates = relationship("QuestTemplateModel", back_populates="world")
     prompt_templates = relationship("PromptTemplateModel", back_populates="world")
+    factions = relationship("FactionModel", back_populates="world")
+    plot_beats = relationship("PlotBeatModel", back_populates="world")
 
 
 class ChapterModel(Base):
@@ -737,4 +739,51 @@ class NPCRelationshipMemoryModel(Base):
         Index("idx_npc_relationship_memories_session", "session_id"),
         Index("idx_npc_relationship_memories_npc", "session_id", "npc_id"),
         Index("idx_npc_relationship_memories_target", "session_id", "npc_id", "target_id"),
+    )
+
+
+class FactionModel(Base):
+    __tablename__ = "factions"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    logical_id = Column(String, nullable=False)
+    world_id = Column(String, ForeignKey("worlds.id"), nullable=False)
+    name = Column(String, nullable=False)
+    ideology = Column(JSON, default=dict)
+    goals = Column(JSON, default=list)
+    relationships = Column(JSON, default=list)
+    visibility = Column(String, default="public")
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    world = relationship("WorldModel", back_populates="factions")
+
+    __table_args__ = (
+        UniqueConstraint("world_id", "logical_id"),
+        Index("idx_factions_world", "world_id"),
+    )
+
+
+class PlotBeatModel(Base):
+    __tablename__ = "plot_beats"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    logical_id = Column(String, nullable=False)
+    world_id = Column(String, ForeignKey("worlds.id"), nullable=False)
+    title = Column(String, nullable=False)
+    conditions = Column(JSON, default=list)
+    effects = Column(JSON, default=list)
+    priority = Column(Integer, default=0)
+    visibility = Column(String, default="conditional")
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    world = relationship("WorldModel", back_populates="plot_beats")
+
+    __table_args__ = (
+        UniqueConstraint("world_id", "logical_id"),
+        Index("idx_plot_beats_world", "world_id"),
+        Index("idx_plot_beats_status", "world_id", "status"),
     )

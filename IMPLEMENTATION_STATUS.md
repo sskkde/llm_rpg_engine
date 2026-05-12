@@ -30,8 +30,8 @@ This phase adds the engineering quality gate layer on top of the existing strong
 - Evidence: `.sisyphus/evidence/p3-engineering-quality-gate/p3qg-baseline.txt`
 
 ### T2: Makefile Created
-- 13 targets: help, test-backend, test-frontend, test-scenario-smoke, test-pgvector, test-p3, plus optional targets
-- All targets verified working
+- 14 targets: help, test-backend, test-scenario-smoke, test-pgvector, test-p3, split frontend targets, plus optional targets
+- Blocking targets verified working; full frontend unit target remains deferred because of known pre-existing failures
 - Commit: `build: add Makefile with unified test/run targets`
 
 ### T3: Pytest Markers Added
@@ -91,11 +91,11 @@ Before entering P4, the following must be complete:
 
 ## Known Risks
 
-### 1. Frontend Unit Tests (Pre-existing)
+### 1. Frontend Unit Tests (Pre-existing - Deferred)
 - **Status**: 89/113 tests failing
 - **Cause**: Test environment / JSDOM issues, not application bugs
 - **Impact**: Build/lint/tsc all pass; these failures existed before P3-QG
-- **Mitigation**: Not in P3-QG scope; deferred to P4+ if needed
+- **Mitigation**: Not in P3-QG scope; deferred to P4+. P3 uses static checks (lint + tsc) and stable combat test subset as blocking gates.
 
 ### 2. pgvector Tests Require PostgreSQL
 - **Status**: 8 tests skipped in default SQLite path
@@ -138,12 +138,14 @@ The following items are explicitly out of scope for P3-QG and deferred to future
 ## Verification Commands
 
 ```bash
-# Quick quality gate check
+# Quick quality gate check (excludes full frontend unit tests)
 make test-p3
 
 # Individual targets
 make test-backend
-make test-frontend
+make test-frontend-static    # lint + tsc (blocking)
+make test-frontend-combat    # stable combat subset (blocking)
+make test-frontend-unit      # full unit tests (deferred, known failures)
 make test-scenario-smoke
 make test-pgvector
 

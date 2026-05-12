@@ -21,6 +21,9 @@ import type {
   AdminEventTemplate, AdminPromptTemplate,
 } from '@/types/api';
 import {SystemSettingsPanel} from '@/components/admin/SystemSettingsPanel';
+import {FactionEditor} from '@/components/admin/FactionEditor';
+import {PlotBeatEditor} from '@/components/admin/PlotBeatEditor';
+import {ContentPackValidationPanel} from '@/components/admin/ContentPackValidationPanel';
 
 export default function AdminPage() {
   return (
@@ -159,6 +162,9 @@ function AdminContent() {
           <Tab value="quests">{t('quests')}</Tab>
           <Tab value="events">{t('events')}</Tab>
           <Tab value="prompts">{t('prompts')}</Tab>
+          <Tab value="factions">{t('factions')}</Tab>
+          <Tab value="plotBeats">{t('plotBeats')}</Tab>
+          <Tab value="contentPacks">{t('contentPacks')}</Tab>
           <Tab value="settings">{t('settings')}</Tab>
         </TabList>
 
@@ -225,6 +231,15 @@ function AdminContent() {
             updateItem={updatePromptTemplate}
             columns={[{ key: 'name', label: t('name') }, { key: 'purpose', label: t('purpose') }]}
           />
+        </TabPanel>
+        <TabPanel value="factions">
+          <FactionEditor />
+        </TabPanel>
+        <TabPanel value="plotBeats">
+          <PlotBeatEditor />
+        </TabPanel>
+        <TabPanel value="contentPacks">
+          <ContentPackValidationPanel />
         </TabPanel>
         <TabPanel value="settings">
           <SystemSettingsPanel />

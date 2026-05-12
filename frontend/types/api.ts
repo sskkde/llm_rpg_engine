@@ -577,3 +577,128 @@ export interface SystemSettingsUpdateRequest {
   llm?: LLMSettingsUpdate;
   ops?: OpsSettingsUpdate;
 }
+
+// =============================================================================
+// Admin Content Types (Factions, PlotBeats, ContentPacks)
+// =============================================================================
+
+export interface FactionGoal {
+  goal_id: string;
+  description: string;
+  priority?: number;
+  status?: string;
+}
+
+export interface FactionRelationship {
+  target_faction_id: string;
+  relationship_type?: string;
+  score?: number;
+}
+
+export interface FactionListItem {
+  id: string;
+  logical_id: string;
+  world_id: string;
+  name: string;
+  visibility: string;
+  status: string;
+  created_at: string;
+}
+
+export interface FactionDetail extends FactionListItem {
+  ideology: Record<string, unknown>;
+  goals: FactionGoal[];
+  relationships: FactionRelationship[];
+}
+
+export interface FactionCreateRequest {
+  logical_id: string;
+  world_id: string;
+  name: string;
+  ideology?: Record<string, unknown>;
+  goals?: FactionGoal[];
+  relationships?: FactionRelationship[];
+  visibility?: string;
+  status?: string;
+}
+
+export interface FactionUpdateRequest {
+  name?: string;
+  ideology?: Record<string, unknown>;
+  goals?: FactionGoal[];
+  relationships?: FactionRelationship[];
+  visibility?: string;
+  status?: string;
+}
+
+export interface PlotBeatCondition {
+  type: string;
+  params: Record<string, unknown>;
+}
+
+export interface PlotBeatEffect {
+  type: string;
+  params: Record<string, unknown>;
+}
+
+export interface PlotBeatListItem {
+  id: string;
+  logical_id: string;
+  world_id: string;
+  title: string;
+  priority: number;
+  visibility: string;
+  status: string;
+  created_at: string;
+}
+
+export interface PlotBeatDetail extends PlotBeatListItem {
+  conditions: PlotBeatCondition[];
+  effects: PlotBeatEffect[];
+}
+
+export interface PlotBeatCreateRequest {
+  logical_id: string;
+  world_id: string;
+  title: string;
+  conditions?: PlotBeatCondition[];
+  effects?: PlotBeatEffect[];
+  priority?: number;
+  visibility?: string;
+  status?: string;
+}
+
+export interface PlotBeatUpdateRequest {
+  title?: string;
+  conditions?: PlotBeatCondition[];
+  effects?: PlotBeatEffect[];
+  priority?: number;
+  visibility?: string;
+  status?: string;
+}
+
+export interface ContentPackValidationIssue {
+  severity: string;
+  message: string;
+  path: string;
+  code: string;
+}
+
+export interface ContentPackValidateResponse {
+  is_valid: boolean;
+  issues: ContentPackValidationIssue[];
+  pack_id?: string;
+  pack_name?: string;
+}
+
+export interface ContentPackImportResponse {
+  success: boolean;
+  imported_count: number;
+  factions_imported: number;
+  plot_beats_imported: number;
+  errors: string[];
+  warnings: string[];
+  dry_run: boolean;
+  pack_id?: string;
+  pack_name?: string;
+}

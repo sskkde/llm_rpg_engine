@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-11  
-**Current Phase**: P3 (Engineering Quality Gate)
+**Last Updated**: 2026-05-12
+**Current Phase**: P4 (Content Productization)
 
 ---
 
@@ -89,6 +89,24 @@ Before entering P4, the following must be complete:
 
 ---
 
+## P4 Content Productization
+
+P4 adds content productization infrastructure. For detailed status, see `P4_EXECUTION_STATUS.md`.
+
+| Deliverable | Status |
+|-------------|--------|
+| Content packs (qinglan_xianxia) | Pending |
+| Faction/PlotBeat persistence | Pending |
+| Admin content API/UI | Pending |
+| Scenario regression profile | Pending |
+| Replay report | Pending |
+| P4 Makefile/CI | Pending |
+| Frontend unit test debt | Pending |
+
+**P4 Gates**: `make test-p4`, `make test-content`, `make test-scenario-regression`
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Deferred)
@@ -111,7 +129,7 @@ Before entering P4, the following must be complete:
 
 ---
 
-## P4+ Deferred Items
+## P5+ Deferred Items
 
 The following items are explicitly out of scope for P3-QG and deferred to future phases:
 

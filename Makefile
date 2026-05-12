@@ -2,7 +2,7 @@
 # Aligned with AGENTS.md canonical commands. Used by CI and local development.
 
 .PHONY: help \
-        test-backend test-scenario-smoke test-pgvector test-p3 \
+        test-backend test-scenario-smoke test-pgvector test-p3 test-content \
         test-backend-unit test-backend-integration \
         test-frontend-static test-frontend-unit test-frontend-combat \
         run-backend run-frontend \
@@ -38,6 +38,9 @@ test-frontend-unit: ## Run frontend unit tests (deferred - known failures)
 
 test-frontend-combat: ## Run stable combat frontend tests only
 	@cd frontend && npm test -- __tests__/combat/CombatPanel.test.tsx
+
+test-content: ## Validate the qinglan_xianxia content pack
+	@cd backend && python3 -m llm_rpg.scripts.validate_content_pack ../content_packs/qinglan_xianxia
 
 test-p3: ## Quality gate: backend + scenario smoke + pgvector + frontend static + combat
 	@cd backend && python3 -m pytest -q --tb=short

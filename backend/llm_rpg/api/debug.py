@@ -34,6 +34,10 @@ from ..core.replay import (
     get_replay_store, ReplayStore, ReplayResult, ReplayStep, ReplayEvent,
     StateSnapshot, ReplayPerspective, ReplayError
 )
+from ..core.replay_report import (
+    get_replay_report_builder, ReplayReportBuilder, ReplayReport,
+    StateDiff, StateDiffEntry
+)
 from ..observability.timeline import TimelineViewer, TurnTimeline, TimelineEntry
 from ..observability.npc_mind import NPCMindViewer, NPCMindView, ViewRole
 from .auth import get_current_active_user
@@ -1493,4 +1497,107 @@ def get_npc_mind(
         secrets_metadata=mind_view.secrets_metadata,
         viewed_at=mind_view.viewed_at,
         view_role=mind_view.view_role.value,
+    )
+
+
+class StateDiffEntryResponse(BaseModel):
+    path: str
+    operation: str
+    old_value: Any
+    new_value: Any
+
+
+class StateDiffResponse(BaseModel):
+    entries: List[StateDiffEntryResponse]
+    added_keys: List[str]
+    removed_keys: List[str]
+    changed_keys: List[str]
+
+
+class ReplayReportResponse(BaseModel):
+    session_id: str
+    snapshot_id: Optional[str] = None
+    from_turn: int
+    to_turn: int
+    replayed_event_count: int
+    deterministic: bool
+    llm_calls_made: int
+    state_diff: StateDiffResponse
+    warnings: List[str]
+    created_at: datetime
+
+
+@router.post("/sessions/{session_id}/replay-report", response_model=ReplayReportResponse)
+def get_replay_report(
+    session_id: str,
+    start_turn: int = Query(1, ge=1),
+    end_turn: int = Query(..., ge=1),
+    perspective: str = Query("admin", regex="^(admin|player|auditor)$"),
+    snapshot_id: Optional[str] = None,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Generate a replay report with state diff.
+    
+    Returns a human-readable and machine-parseable report showing:
+    - State differences between start_turn and end_turn
+    - Whether the replay was deterministic (no LLM calls made)
+    - Any warnings during replay
+    
+    Does NOT call LLM - uses only existing logged data.
+    
+    Perspective controls what information is visible:
+    - admin: Full access, sees hidden info
+    - player: Player view, no hidden info
+    - auditor: Audit view, sees audit data but not hidden lore
+    
+    Requires admin role.
+    """
+    require_admin_role(current_user)
+    
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
+    replay_perspective = ReplayPerspective(perspective)
+    builder = get_replay_report_builder()
+    
+    report = builder.build_report(
+        session_id=session_id,
+        from_turn=start_turn,
+        to_turn=end_turn,
+        snapshot_id=snapshot_id,
+        perspective=replay_perspective,
+    )
+    
+    return ReplayReportResponse(
+        session_id=report.session_id,
+        snapshot_id=report.snapshot_id,
+        from_turn=report.from_turn,
+        to_turn=report.to_turn,
+        replayed_event_count=report.replayed_event_count,
+        deterministic=report.deterministic,
+        llm_calls_made=report.llm_calls_made,
+        state_diff=StateDiffResponse(
+            entries=[
+                StateDiffEntryResponse(
+                    path=e.path,
+                    operation=e.operation,
+                    old_value=e.old_value,
+                    new_value=e.new_value,
+                )
+                for e in report.state_diff.entries
+            ],
+            added_keys=report.state_diff.added_keys,
+            removed_keys=report.state_diff.removed_keys,
+            changed_keys=report.state_diff.changed_keys,
+        ),
+        warnings=report.warnings,
+        created_at=report.created_at,
     )

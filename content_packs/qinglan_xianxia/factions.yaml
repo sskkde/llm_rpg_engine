@@ -9,7 +9,6 @@ factions:
       - 保护弟子免受试炼异变的伤害
     relationships:
       shadow_sect: hostile
-      player: neutral
     description: |
       青岚宗乃千年仙门，以剑道与炼丹闻名于修仙界。
       宗门正统势力由清玄上人等长老领导，致力于维护宗门秩序。
@@ -29,7 +28,6 @@ factions:
       - 阻止任何人发现真相
     relationships:
       qinglan_sect: hostile
-      player: suspicious
     description: |
       暗影势力是宗门中的隐秘派系，由李长老等人领导。
       他们策划了试炼异变，目的不明，但显然心怀鬼胎。

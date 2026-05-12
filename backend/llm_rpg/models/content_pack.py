@@ -215,3 +215,39 @@ class ContentValidationReport(BaseModel):
     def has_warnings(self) -> bool:
         """Check if there are any warning-level issues."""
         return any(issue.severity == "warning" for issue in self.issues)
+
+
+class ContentImportReport(BaseModel):
+    success: bool = Field(..., description="Whether the import succeeded")
+    imported_count: int = Field(
+        default=0,
+        description="Number of items imported (factions + plot beats)"
+    )
+    factions_imported: int = Field(
+        default=0,
+        description="Number of factions imported"
+    )
+    plot_beats_imported: int = Field(
+        default=0,
+        description="Number of plot beats imported"
+    )
+    errors: List[str] = Field(
+        default_factory=list,
+        description="Error messages"
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Warning messages"
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Whether this was a dry run (no actual writes)"
+    )
+    pack_id: str = Field(
+        default="",
+        description="ID of the content pack"
+    )
+    pack_name: str = Field(
+        default="",
+        description="Name of the content pack"
+    )

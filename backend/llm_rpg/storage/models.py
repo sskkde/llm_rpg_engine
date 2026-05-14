@@ -457,6 +457,83 @@ class ModelCallAuditLogModel(Base):
     )
 
 
+class ProposalAuditLogModel(Base):
+    __tablename__ = "proposal_audit_logs"
+
+    audit_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=True, index=True)
+    turn_no = Column(Integer, nullable=False)
+    proposal_type = Column(String, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_proposal_audit_logs_session", "session_id"),
+        Index("idx_proposal_audit_logs_session_turn", "session_id", "turn_no"),
+    )
+
+
+class ContextBuildAuditLogModel(Base):
+    __tablename__ = "context_build_audit_logs"
+
+    build_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=False, index=True)
+    turn_no = Column(Integer, nullable=False)
+    perspective_type = Column(String, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_ctx_build_audit_logs_session", "session_id"),
+        Index("idx_ctx_build_audit_logs_session_turn", "session_id", "turn_no"),
+    )
+
+
+class ValidationAuditLogModel(Base):
+    __tablename__ = "validation_audit_logs"
+
+    validation_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=False, index=True)
+    turn_no = Column(Integer, nullable=False)
+    validation_type = Column(String, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_validation_audit_logs_session", "session_id"),
+        Index("idx_validation_audit_logs_session_turn", "session_id", "turn_no"),
+    )
+
+
+class TurnAuditLogModel(Base):
+    __tablename__ = "turn_audit_logs"
+
+    audit_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=False, index=True)
+    turn_no = Column(Integer, nullable=False)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_turn_audit_logs_session", "session_id"),
+        Index("idx_turn_audit_logs_session_turn", "session_id", "turn_no"),
+    )
+
+
+class ErrorAuditLogModel(Base):
+    __tablename__ = "error_audit_logs"
+
+    error_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=True, index=True)
+    error_type = Column(String, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_error_audit_logs_session", "session_id"),
+    )
+
+
 class CombatSessionModel(Base):
     __tablename__ = "combat_sessions"
 
@@ -811,4 +888,37 @@ class PlotBeatModel(Base):
         UniqueConstraint("world_id", "logical_id"),
         Index("idx_plot_beats_world", "world_id"),
         Index("idx_plot_beats_status", "world_id", "status"),
+    )
+
+
+class AssetModel(Base):
+    """Asset model for tracking generated media assets (portraits, scenes, bgm, sfx).
+
+    Uses STRING IDs only - NO foreign key constraints to game entity tables.
+    This allows assets to reference entities that may not exist yet or may have been deleted.
+    """
+    __tablename__ = "assets"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    asset_id = Column(String, unique=True, nullable=False, index=True)
+    asset_type = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, index=True, default="pending")
+    owner_entity_id = Column(String, nullable=True, index=True)
+    owner_entity_type = Column(String, nullable=True)
+    session_id = Column(String, nullable=True, index=True)
+    world_id = Column(String, nullable=True, index=True)
+    scene_id = Column(String, nullable=True, index=True)
+    provider_name = Column(String, nullable=True)
+    request_params = Column(JSON, default=dict)
+    cache_key = Column(String, unique=True, nullable=True, index=True)
+    result_url = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index("idx_assets_cache_key", "cache_key"),
+        Index("idx_assets_session_type", "session_id", "asset_type"),
+        Index("idx_assets_owner", "owner_entity_id", "owner_entity_type"),
     )

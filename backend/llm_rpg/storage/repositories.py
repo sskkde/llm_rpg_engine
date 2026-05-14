@@ -44,6 +44,7 @@ from .models import (
     NPCRelationshipMemoryModel,
     FactionModel,
     PlotBeatModel,
+    AssetModel,
 )
 
 T = TypeVar("T")
@@ -1187,3 +1188,46 @@ class PlotBeatRepository(BaseRepository):
             self.db.commit()
             return True
         return False
+
+
+class AssetRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, AssetModel)
+
+    def get_by_asset_id(self, asset_id: str) -> Optional[AssetModel]:
+        return self.db.query(AssetModel).filter(AssetModel.asset_id == asset_id).first()
+
+    def get_ready_by_cache_key(self, cache_key: str) -> Optional[AssetModel]:
+        if cache_key is None:
+            return None
+        return self.db.query(AssetModel).filter(
+            and_(
+                AssetModel.cache_key == cache_key,
+                AssetModel.status == "completed"
+            )
+        ).first()
+
+    def list_by_session(self, session_id: str, asset_type: Optional[str] = None, limit: int = 100) -> List[AssetModel]:
+        query = self.db.query(AssetModel).filter(AssetModel.session_id == session_id)
+        if asset_type:
+            query = query.filter(AssetModel.asset_type == asset_type)
+        return query.order_by(desc(AssetModel.created_at)).limit(limit).all()
+
+    def list_by_owner(self, owner_entity_id: str, owner_entity_type: Optional[str] = None) -> List[AssetModel]:
+        query = self.db.query(AssetModel).filter(AssetModel.owner_entity_id == owner_entity_id)
+        if owner_entity_type:
+            query = query.filter(AssetModel.owner_entity_type == owner_entity_type)
+        return query.order_by(desc(AssetModel.created_at)).all()
+
+    def update_status(self, asset_id: str, status: str, error_message: Optional[str] = None, result_url: Optional[str] = None) -> Optional[AssetModel]:
+        asset = self.get_by_asset_id(asset_id)
+        if asset:
+            asset.status = status
+            if error_message is not None:
+                asset.error_message = error_message
+            if result_url is not None:
+                asset.result_url = result_url
+            asset.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(asset)
+        return asset

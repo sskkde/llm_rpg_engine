@@ -27,6 +27,8 @@ from llm_rpg.storage.models import (
     SessionNPCStateModel, SessionInventoryItemModel, SessionQuestStateModel,
     NPCTemplateModel, ItemTemplateModel, QuestTemplateModel, LocationModel,
     ChapterModel, SystemSettingsModel,
+    ProposalAuditLogModel, ContextBuildAuditLogModel, ValidationAuditLogModel,
+    TurnAuditLogModel, ErrorAuditLogModel,
 )
 from llm_rpg.main import app
 from llm_rpg.core.audit import (
@@ -77,6 +79,10 @@ def client(db_engine, db_session):
             db.close()
     
     app.dependency_overrides[get_db] = override_get_db
+    
+    # Ensure global engine has all tables (wire_audit_db uses get_db() directly)
+    from llm_rpg.storage.database import init_db
+    init_db()
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

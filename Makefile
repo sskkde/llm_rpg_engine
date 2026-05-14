@@ -6,6 +6,7 @@
         test-backend-unit test-backend-integration \
         test-frontend-static test-frontend-unit test-frontend-combat test-frontend-admin \
         test-prompt-inspector test-replay-report \
+        test-assets-unit test-media-api test-frontend-assets test-p6-fast test-p6 \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -67,6 +68,25 @@ test-p4: ## P4 quality gate: test-p3 + content + admin-content + scenario-regres
 	@$(MAKE) test-frontend-static
 	@$(MAKE) test-frontend-combat
 	@$(MAKE) test-frontend-admin
+
+test-assets-unit: ## Run P6 asset unit tests (cache key, repository, service, provider factory)
+	@cd backend && python3 -m pytest tests/unit/test_asset_cache_key.py tests/unit/test_asset_repository.py tests/unit/test_asset_generation_service.py tests/unit/test_asset_provider_factory.py -q --tb=short
+
+test-media-api: ## Run P6 media API integration tests
+	@cd backend && python3 -m pytest tests/integration/test_media_api.py -q --tb=short
+
+test-frontend-assets: ## Run frontend asset component tests
+	@cd frontend && npm test -- __tests__/assets --runInBand
+
+test-p6-fast: ## P6 fast gate: p5-fast + asset unit + media API + frontend assets
+	@$(MAKE) test-p5-fast
+	@$(MAKE) test-assets-unit
+	@$(MAKE) test-media-api
+	@$(MAKE) test-frontend-assets
+
+test-p6: ## P6 quality gate: p6-fast + p4 (full regression)
+	@$(MAKE) test-p6-fast
+	@$(MAKE) test-p4
 
 test-scenario-p5: ## Run P5 scenario tests (new scenario types)
 	@cd backend && python3 -m pytest tests/scenario/ -q -m "p5_scenario" --tb=short

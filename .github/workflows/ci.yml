@@ -216,3 +216,33 @@ jobs:
         run: make test-p5-fast
         env:
           APP_ENV: testing
+
+  # ── P6 Asset Pipeline Jobs ────────────────────────────────
+
+  p6-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run P6 fast gate
+        run: make test-p6-fast
+        env:
+          APP_ENV: testing

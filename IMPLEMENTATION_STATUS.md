@@ -131,6 +131,7 @@ P5 adds debug/test/replay productization with complete frontend UIs for all 14 d
 | P5_COMPLETION_REPORT.md | Completed |
 | Frontend Debug Tests (105/105) | Completed (unskipped + fixed) |
 | Backend Memory Writer Fix | Completed (UUID for summary_id) |
+| Testing Strategy Documentation | Completed |
 
 **P5 Gates**: `make test-p5`, `make test-scenario-p5`, `make test-prompt-inspector`
 

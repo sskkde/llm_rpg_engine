@@ -199,20 +199,20 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Install backend dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run P5 scenario tests
-        run: make test-scenario-p5
-        env:
-          APP_ENV: testing
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
 
-      - name: Run P5 replay report tests
-        run: make test-replay-report
-        env:
-          APP_ENV: testing
-
-      - name: Run P5 prompt inspector tests
-        run: make test-prompt-inspector
+      - name: Run P5 fast gate
+        run: make test-p5-fast
         env:
           APP_ENV: testing

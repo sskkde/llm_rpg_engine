@@ -759,6 +759,7 @@ For detailed status, see `IMPLEMENTATION_STATUS.md`, `P5_COMPLETION_REPORT.md`, 
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)
 - [Requirements Traceability](doc/requirements-traceability.md)
+- [Testing Strategy](doc/testing_strategy.md) — Test pyramid, gates, and coverage requirements
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [Pydantic V2](https://docs.pydantic.dev/)
 - [Next.js Documentation](https://nextjs.org/docs)

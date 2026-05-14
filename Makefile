@@ -2,7 +2,7 @@
 # Aligned with AGENTS.md canonical commands. Used by CI and local development.
 
 .PHONY: help \
-        test-backend test-scenario-smoke test-scenario-regression test-scenario-full test-scenario-p5 test-pgvector test-p3 test-p4 test-p5 test-content \
+        test-backend test-scenario-smoke test-scenario-regression test-scenario-full test-scenario-p5 test-pgvector test-p3 test-p4 test-p5 test-p5-fast test-debug-contract test-content \
         test-backend-unit test-backend-integration \
         test-frontend-static test-frontend-unit test-frontend-combat test-frontend-admin \
         test-prompt-inspector test-replay-report \
@@ -73,6 +73,16 @@ test-scenario-p5: ## Run P5 scenario tests (new scenario types)
 
 test-prompt-inspector: ## Run prompt inspector API tests
 	@cd backend && python3 -m pytest tests/integration/test_prompt_inspector_api.py -q --tb=short
+
+test-debug-contract: ## Run debug contract tests (backend debug + frontend debug + tsc)
+	@cd backend && python3 -m pytest tests/ -q -k "debug" --tb=short
+	@cd frontend && npx tsc --noEmit
+	@cd frontend && npm test -- --testPathPatterns="debug" --runInBand
+
+test-p5-fast: ## P5 fast gate: debug contract + scenario-p5 + prompt-inspector (< 60s)
+	@$(MAKE) test-debug-contract
+	@$(MAKE) test-scenario-p5
+	@$(MAKE) test-prompt-inspector
 
 test-p5: ## P5 quality gate: test-p4 + scenario-p5 + replay-report + prompt-inspector
 	@$(MAKE) test-p4

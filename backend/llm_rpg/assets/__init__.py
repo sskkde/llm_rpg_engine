@@ -16,6 +16,7 @@ from .interfaces import (
     AssetGenerationResult,
     AssetType,
     AssetStatus,
+    MockAssetProvider,
 )
 from .portrait import (
     PortraitGenerator,
@@ -23,6 +24,7 @@ from .portrait import (
     PortraitResult,
     PortraitStyle,
     PortraitExpression,
+    MockPortraitGenerator,
 )
 from .scene import (
     SceneGenerator,
@@ -30,6 +32,7 @@ from .scene import (
     SceneResult,
     TimeOfDay,
     WeatherCondition,
+    MockSceneGenerator,
 )
 from .audio import (
     AudioGenerator,
@@ -39,6 +42,7 @@ from .audio import (
     SFXResult,
     MusicMood,
     SFXType,
+    MockAudioGenerator,
 )
 
 __all__ = [
@@ -68,4 +72,9 @@ __all__ = [
     "SFXResult",
     "MusicMood",
     "SFXType",
+    # Mock providers
+    "MockAssetProvider",
+    "MockPortraitGenerator",
+    "MockSceneGenerator",
+    "MockAudioGenerator",
 ]

@@ -202,7 +202,17 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run P5 quality gate (test-p5)
-        run: make test-p5
+      - name: Run P5 scenario tests
+        run: make test-scenario-p5
+        env:
+          APP_ENV: testing
+
+      - name: Run P5 replay report tests
+        run: make test-replay-report
+        env:
+          APP_ENV: testing
+
+      - name: Run P5 prompt inspector tests
+        run: make test-prompt-inspector
         env:
           APP_ENV: testing

@@ -625,5 +625,18 @@
     "continue": "Continue",
     "active": "active",
     "inactive": "inactive"
+  },
+  "Assets": {
+    "loading": "Loading...",
+    "generating": "Generating...",
+    "failed": "Failed to load",
+    "retry": "Retry",
+    "empty": "No data",
+    "scenePlaceholder": "Scene background",
+    "bgmAvailable": "BGM Available",
+    "bgmUnavailable": "BGM Unavailable",
+    "bgmMuted": "Muted",
+    "play": "Play",
+    "pause": "Pause"
   }
 }

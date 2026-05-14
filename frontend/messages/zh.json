@@ -626,5 +626,18 @@
     "continue": "继续",
     "active": "活跃",
     "inactive": "未激活"
+  },
+  "Assets": {
+    "loading": "加载中...",
+    "generating": "生成中...",
+    "failed": "加载失败",
+    "retry": "重试",
+    "empty": "暂无数据",
+    "scenePlaceholder": "场景背景",
+    "bgmAvailable": "背景音乐可用",
+    "bgmUnavailable": "背景音乐不可用",
+    "bgmMuted": "已静音",
+    "play": "播放",
+    "pause": "暂停"
   }
 }

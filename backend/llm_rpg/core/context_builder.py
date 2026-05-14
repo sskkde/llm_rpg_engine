@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..models.common import ContextPack, MemoryQuery, TimeRange
-from ..models.states import CanonicalState
+from ..models.states import CanonicalState, CurrentSceneState, NPCState
 from ..models.perspectives import (
     Perspective,
     WorldPerspective,
@@ -573,5 +573,325 @@ class ContextBuilder:
         return ContextPack(
             context_id=f"lore_{game_id}_{turn_id}",
             context_type="lore",
+            content=content,
+        )
+
+    # ========================================================================
+    # P2 NPCContextBuilder Strengthening — new methods
+    # ========================================================================
+
+    def get_npc_perspective_facts(
+        self,
+        npc_id: str,
+        state: CanonicalState,
+        npc_scope: NPCMemoryScope,
+    ) -> Dict[str, Any]:
+        """
+        Return facts visible to an NPC through their knowledge scope.
+
+        NEVER returns omniscient canonical state data. Only facts within the
+        NPC's knowledge_state.known_facts and directly perceivable scene info.
+        """
+        knowledge = npc_scope.knowledge_state
+        scene_state = state.current_scene_state
+        npc_state = state.npc_states.get(npc_id)
+
+        # Known facts (filtered: exclude anything in forbidden_knowledge)
+        forbidden_set = set(knowledge.forbidden_knowledge)
+        safe_known_facts = [
+            f for f in knowledge.known_facts
+            if f not in forbidden_set
+        ]
+
+        # Visible scene facts — only what the NPC can directly perceive
+        visible_scene = {}
+        if scene_state and npc_state:
+            npc_location = npc_state.location_id
+            scene_location = scene_state.location_id
+
+            if npc_location == scene_location:
+                visible_scene = {
+                    "scene_id": scene_state.scene_id,
+                    "location_id": scene_state.location_id,
+                    "active_actor_ids": scene_state.active_actor_ids,
+                    "visible_object_ids": scene_state.visible_object_ids,
+                    "scene_phase": scene_state.scene_phase,
+                    "danger_level": scene_state.danger_level,
+                }
+
+        # Visible NPC states — only NPCs in the same scene that the NPC can perceive
+        visible_npc_states: Dict[str, Dict[str, Any]] = {}
+        if scene_state and npc_state and npc_state.location_id == scene_state.location_id:
+            active_ids = set(scene_state.active_actor_ids)
+            # NPC can see other active actors in the scene (but not their inner state)
+            for other_id, other_state in state.npc_states.items():
+                if other_id == npc_id:
+                    continue
+                if other_id in active_ids or other_state.location_id == scene_state.location_id:
+                    visible_npc_states[other_id] = {
+                        "name": other_state.name,
+                        "location_id": other_state.location_id,
+                        "mood": other_state.mood,
+                        "current_action": other_state.current_action,
+                        "status": other_state.status,
+                    }
+
+        # Private memories — the NPC's own secrets (not mixed with known_facts)
+        private_memory_ids = [pm.memory_id for pm in npc_scope.private_memories]
+
+        return {
+            "known_facts": safe_known_facts,
+            "known_rumors": knowledge.known_rumors,
+            "known_secrets": knowledge.known_secrets,
+            "forbidden_knowledge": knowledge.forbidden_knowledge,
+            "visible_scene": visible_scene,
+            "visible_npc_states": visible_npc_states,
+            "private_memory_ids": private_memory_ids,
+        }
+
+    def get_npc_available_actions(
+        self,
+        npc_id: str,
+        npc_scope: NPCMemoryScope,
+        npc_state: NPCState,
+        scene_state: CurrentSceneState,
+    ) -> List[str]:
+        """
+        Return action types available to an NPC based on state and location.
+
+        Actions depend on:
+        - NPC status (dead NPCs have no actions)
+        - Location match with scene (remote NPCs have limited actions)
+        - Scene's available_actions
+        - NPC mood and scene phase (combat → hostile actions)
+        """
+        # Dead NPCs cannot act
+        if npc_state.status == "dead":
+            return []
+
+        # Base actions for alive NPCs
+        base_actions = ["observe", "idle"]
+
+        # Location-dependent actions
+        npc_location = npc_state.location_id
+        scene_location = scene_state.location_id
+
+        in_scene = (npc_location == scene_location)
+
+        if in_scene:
+            # NPC is in the current scene — full interaction possible
+            base_actions.extend(["talk", "act", "move"])
+
+            # Scene-specific available actions (only available when in scene)
+            scene_actions = set(scene_state.available_actions)
+            for action in scene_actions:
+                if action not in base_actions:
+                    base_actions.append(action)
+        else:
+            # NPC is elsewhere — only limited actions
+            base_actions.append("move")
+
+        # Condition-dependent actions
+        if npc_state.mood == "hostile" or scene_state.scene_phase == "combat":
+            for combat_action in ["attack", "flee", "defend"]:
+                if combat_action not in base_actions:
+                    base_actions.append(combat_action)
+
+        if npc_state.physical_state and npc_state.physical_state.injured:
+            if "flee" not in base_actions:
+                base_actions.append("flee")
+            if "hide" not in base_actions:
+                base_actions.append("hide")
+
+        return base_actions
+
+    def build_npc_decision_context(
+        self,
+        npc_id: str,
+        game_id: str,
+        turn_id: str,
+        state: CanonicalState,
+        npc_scope: NPCMemoryScope,
+        recent_events: List[GameEvent] = None,
+        relevant_lore: List[LoreEntry] = None,
+    ) -> ContextPack:
+        """
+        Build a complete decision context for NPC actions.
+
+        Includes:
+        - Visible scene facts (perspective-filtered)
+        - NPC known facts, beliefs, private memories
+        - NPC goals and forbidden knowledge flags
+        - Available actions based on state/location
+        - Constraints preventing use of forbidden knowledge
+
+        CRITICAL: Never includes omniscient canonical state data.
+        NPC decisions must be based on what the NPC actually knows.
+        """
+        npc_state = state.npc_states.get(npc_id)
+        scene_state = state.current_scene_state
+
+        # Get perspective-filtered facts
+        perspective_facts = self.get_npc_perspective_facts(
+            npc_id, state, npc_scope
+        )
+
+        # Get available actions
+        available_actions: List[str] = []
+        if npc_state and scene_state:
+            available_actions = self.get_npc_available_actions(
+                npc_id, npc_scope, npc_state, scene_state
+            )
+
+        # Build NPC perspective for event/lore filtering
+        known_facts = npc_scope.knowledge_state.known_facts
+        known_rumors = npc_scope.knowledge_state.known_rumors
+        known_secrets = npc_scope.knowledge_state.known_secrets
+        forbidden_knowledge = npc_scope.knowledge_state.forbidden_knowledge
+
+        npc_perspective = self._perspective.build_npc_perspective(
+            perspective_id=f"npc_{npc_id}",
+            npc_id=npc_id,
+            known_facts=known_facts,
+            believed_rumors=known_rumors,
+            secrets=known_secrets,
+            forbidden_knowledge=forbidden_knowledge,
+        )
+
+        # Filter recent events through NPC perspective
+        filtered_events: List[Dict[str, Any]] = []
+        if recent_events and npc_state:
+            if self._use_projection_system:
+                context = {
+                    "npc_location_id": npc_state.location_id,
+                    "current_turn": getattr(state.world_state, 'current_turn', 0),
+                }
+                filtered_events = self._npc_projection.build_projection(
+                    events=recent_events,
+                    perspective=npc_perspective,
+                    context=context,
+                )
+            else:
+                filtered = self._perspective.filter_events_for_perspective(
+                    recent_events, npc_perspective
+                )
+                filtered_events = [e.model_dump() for e in filtered]
+
+        # Filter lore through NPC perspective
+        filtered_lore: List[Dict[str, Any]] = []
+        if relevant_lore:
+            lore_views = self._perspective.filter_lore_for_perspective(
+                relevant_lore, npc_perspective
+            )
+            filtered_lore = [lv.model_dump() for lv in lore_views]
+
+        # Build beliefs list
+        beliefs = []
+        for belief in npc_scope.belief_state.beliefs:
+            beliefs.append({
+                "content": belief.content,
+                "type": belief.belief_type,
+                "confidence": belief.confidence,
+                "truth_status": belief.truth_status,
+            })
+
+        # Build private memories list
+        private_memories = []
+        for pm in npc_scope.private_memories:
+            private_memories.append({
+                "memory_id": pm.memory_id,
+                "memory_type": pm.memory_type,
+                "content": pm.content,
+                "emotional_weight": pm.emotional_weight,
+                "importance": pm.importance,
+                "confidence": pm.confidence,
+                "current_strength": pm.current_strength,
+                "created_turn": pm.created_turn,
+                "last_accessed_turn": pm.last_accessed_turn,
+                "recall_count": pm.recall_count,
+            })
+
+        # Build goals list
+        goals = []
+        for goal in npc_scope.goals.goals:
+            goals.append({
+                "goal_id": goal.goal_id,
+                "description": goal.description,
+                "priority": goal.priority,
+                "status": goal.status,
+                "related_entities": goal.related_entities,
+            })
+
+        # Build relationship memories
+        relationship_memories = []
+        for rm in npc_scope.relationship_memories:
+            entries = []
+            for entry in rm.relationship_memory:
+                entries.append({
+                    "content": entry.content,
+                    "impact": entry.impact,
+                    "current_strength": entry.current_strength,
+                })
+            relationship_memories.append({
+                "owner_id": rm.owner_id,
+                "target_id": rm.target_id,
+                "entries": entries,
+            })
+
+        # Forbidden knowledge flags — LLM needs to know what not to use
+        forbidden_flags = list(npc_scope.knowledge_state.forbidden_knowledge)
+
+        # Build constraints
+        constraints = [
+            "不得泄露或以任何方式使用 forbidden knowledge 中列出的信息",
+            "行动必须基于已知事实（known_facts）和信念（beliefs），不得使用超出知识范围的信息",
+            "决策必须符合当前可见环境和 NPC 角色设定",
+            "私有记忆（private_memories）中的信息不得直接透露",
+        ]
+        if forbidden_flags:
+            flags_str = ", ".join(forbidden_flags)
+            constraints.append(
+                f"严禁在行动中使用以下禁止知识: {flags_str}"
+            )
+
+        content: Dict[str, Any] = {
+            "profile": npc_scope.profile.model_dump(),
+            "current_state": npc_state.model_dump() if npc_state else None,
+            "visible_scene_facts": perspective_facts.get("visible_scene", {}),
+            "visible_npc_states": perspective_facts.get("visible_npc_states", {}),
+            "known_facts": perspective_facts.get("known_facts", []),
+            "known_rumors": perspective_facts.get("known_rumors", []),
+            "known_secrets": perspective_facts.get("known_secrets", []),
+            "beliefs": beliefs,
+            "private_memories": private_memories,
+            "goals": goals,
+            "relationship_memories": relationship_memories,
+            "forbidden_knowledge_flags": forbidden_flags,
+            "available_actions": available_actions,
+            "constraints": constraints,
+        }
+
+        if filtered_events:
+            content["recent_events"] = filtered_events
+
+        if filtered_lore:
+            content["relevant_lore"] = filtered_lore
+
+        # Secrets — NPC's own secrets (for internal decision context, not for output)
+        if npc_scope.secrets.secrets:
+            content["secrets"] = [
+                {
+                    "secret_id": s.secret_id,
+                    "content": s.content,
+                    "willingness": s.willingness_to_reveal,
+                    "conditions": s.reveal_conditions,
+                }
+                for s in npc_scope.secrets.secrets
+            ]
+
+        return ContextPack(
+            context_id=f"npc_decision_{npc_id}_{game_id}_{turn_id}",
+            context_type="npc_decision",
+            owner_id=npc_id,
             content=content,
         )

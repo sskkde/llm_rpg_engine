@@ -27,6 +27,7 @@ from .models import (
     MemorySummaryModel,
     MemoryFactModel,
     ModelCallLogModel,
+    ModelCallAuditLogModel,
     CombatSessionModel,
     CombatRoundModel,
     CombatActionModel,
@@ -551,6 +552,46 @@ class ModelCallLogRepository(BaseRepository):
             query = query.filter(ModelCallLogModel.prompt_type == prompt_type)
         
         return query.order_by(ModelCallLogModel.turn_no).all()
+
+
+class ModelCallAuditLogRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, ModelCallAuditLogModel)
+
+    def get_by_id(self, call_id: str) -> Optional[ModelCallAuditLogModel]:
+        return self.db.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.call_id == call_id
+        ).first()
+
+    def get_by_session(self, session_id: str) -> List[ModelCallAuditLogModel]:
+        return self.db.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.session_id == session_id
+        ).order_by(desc(ModelCallAuditLogModel.created_at)).all()
+
+    def get_by_turn(self, session_id: str, turn_no: int) -> List[ModelCallAuditLogModel]:
+        return self.db.query(ModelCallAuditLogModel).filter(
+            and_(
+                ModelCallAuditLogModel.session_id == session_id,
+                ModelCallAuditLogModel.turn_no == turn_no
+            )
+        ).order_by(ModelCallAuditLogModel.created_at).all()
+
+    def get_recent(self, session_id: str, limit: int = 100) -> List[ModelCallAuditLogModel]:
+        return self.db.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.session_id == session_id
+        ).order_by(desc(ModelCallAuditLogModel.created_at)).limit(limit).all()
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> List[ModelCallAuditLogModel]:
+        return self.db.query(ModelCallAuditLogModel).order_by(
+            desc(ModelCallAuditLogModel.created_at)
+        ).offset(skip).limit(limit).all()
+
+    def delete_by_session(self, session_id: str) -> int:
+        count = self.db.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.session_id == session_id
+        ).delete()
+        self.db.commit()
+        return count
 
 
 class CombatSessionRepository(BaseRepository):

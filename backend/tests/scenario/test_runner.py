@@ -28,7 +28,7 @@ class TestScenarioRunner:
         """Test getting list of available scenarios."""
         scenarios = self.runner.get_available_scenarios()
         
-        assert len(scenarios) == 4
+        assert len(scenarios) == 12
         
         scenario_types = [s.scenario_type for s in scenarios]
         assert ScenarioType.SECRET_LEAK_PREVENTION in scenario_types
@@ -163,7 +163,7 @@ class TestScenarioRunner:
         """Test running all scenarios at once."""
         results = self.runner.run_all_scenarios("session_all")
         
-        assert len(results) == 4
+        assert len(results) == 12
         
         scenario_types = [r.scenario_type for r in results]
         assert ScenarioType.SECRET_LEAK_PREVENTION in scenario_types

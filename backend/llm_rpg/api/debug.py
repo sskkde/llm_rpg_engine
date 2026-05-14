@@ -6,6 +6,9 @@ viewing state snapshots, and auditing system behavior.
 All endpoints require admin role authentication.
 """
 
+import hashlib
+import json
+
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -28,7 +31,7 @@ from ..storage.repositories import (
 from ..core.audit import (
     get_audit_logger, AuditLogger, ContextBuildAudit, ValidationResultAudit,
     TurnAuditLog, ModelCallLog, ErrorLogEntry, MemoryAuditEntry,
-    ValidationCheck, ValidationStatus, ErrorSeverity
+    ValidationCheck, ValidationStatus, ErrorSeverity, ProposalAuditEntry
 )
 from ..core.replay import (
     get_replay_store, ReplayStore, ReplayResult, ReplayStep, ReplayEvent,
@@ -270,6 +273,24 @@ class LLMStageEvidenceResponse(BaseModel):
     model_call_id: Optional[str] = None
 
 
+class ContextHashEntry(BaseModel):
+    """A context build hash for fingerprinting injected context."""
+    build_id: str
+    context_hash: str
+
+
+class ModelCallReference(BaseModel):
+    """Lightweight model call reference for turn debug."""
+    call_id: str
+    prompt_type: Optional[str] = None
+    model_name: Optional[str] = None
+    provider: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_estimate: Optional[float] = None
+    latency_ms: Optional[int] = None
+
+
 class TurnDebugResponse(BaseModel):
     audit_id: str
     session_id: str
@@ -293,6 +314,10 @@ class TurnDebugResponse(BaseModel):
     # LLM Stage Evidence
     llm_stages: List[LLMStageEvidenceResponse] = []
     fallback_reasons: List[str] = []
+    # Prompt-specific enhancements
+    prompt_template_ids: List[str] = []
+    context_hashes: List[ContextHashEntry] = []
+    model_call_references: List[ModelCallReference] = []
 
 
 class ReplayEventResponse(BaseModel):
@@ -350,6 +375,110 @@ class SnapshotResponse(BaseModel):
     snapshot_type: str
 
 
+class PromptTemplateUsageEntry(BaseModel):
+    """A prompt template as used in a proposal."""
+    prompt_template_id: str
+    proposal_type: str
+    turn_no: int
+    model_name: Optional[str] = None
+    confidence: Optional[float] = None
+
+
+class PromptInspectorModelCallEntry(BaseModel):
+    """Model call entry for prompt inspector."""
+    call_id: str
+    turn_no: int
+    prompt_type: Optional[str] = None
+    model_name: Optional[str] = None
+    provider: Optional[str] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_estimate: Optional[float] = None
+    latency_ms: Optional[int] = None
+    success: bool = True
+    created_at: datetime
+
+
+class PromptInspectorContextBuildEntry(BaseModel):
+    """Context build entry for prompt inspector."""
+    build_id: str
+    turn_no: int
+    perspective_type: str
+    perspective_id: str
+    included_memories: List[MemoryAuditResponse]
+    excluded_memories: List[MemoryAuditResponse]
+    total_candidates: int
+    included_count: int
+    excluded_count: int
+    context_token_count: int
+    build_duration_ms: int
+
+
+class ProposalInspectorEntry(BaseModel):
+    """Proposal audit entry for prompt inspector."""
+    audit_id: str
+    turn_no: int
+    proposal_type: str
+    prompt_template_id: Optional[str] = None
+    model_name: Optional[str] = None
+    input_tokens: int
+    output_tokens: int
+    latency_ms: int
+    raw_output_preview: str
+    raw_output_hash: Optional[str] = None
+    parsed_proposal: Optional[Dict[str, Any]] = None
+    parse_success: bool
+    repair_attempts: int
+    repair_strategies_tried: List[str]
+    repair_success: bool
+    validation_passed: bool
+    validation_errors: List[str]
+    validation_warnings: List[str]
+    rejected: bool
+    rejection_reason: Optional[str] = None
+    fallback_used: bool
+    fallback_reason: Optional[str] = None
+    fallback_strategy: Optional[str] = None
+    confidence: float
+    perspective_check_passed: bool
+    forbidden_info_detected: List[str]
+
+
+class ValidationInspectorEntry(BaseModel):
+    """Validation audit entry for prompt inspector."""
+    validation_id: str
+    turn_no: int
+    validation_target: str
+    overall_status: str
+    checks: List[ValidationCheckResponse]
+    error_count: int
+    warning_count: int
+    errors: List[str]
+    warnings: List[str]
+
+
+class PromptInspectorAggregates(BaseModel):
+    """Aggregated metrics for prompt inspector."""
+    total_tokens_used: int
+    total_cost: float
+    total_latency_ms: int
+    total_model_calls: int
+    call_success_rate: float
+    repair_success_rate: float
+
+
+class PromptInspectorResponse(BaseModel):
+    """Aggregated prompt-related data for a session."""
+    session_id: str
+    total_turns: int
+    prompt_templates: List[PromptTemplateUsageEntry]
+    model_calls: List[PromptInspectorModelCallEntry]
+    context_builds: List[PromptInspectorContextBuildEntry]
+    proposals: List[ProposalInspectorEntry]
+    validations: List[ValidationInspectorEntry]
+    aggregates: PromptInspectorAggregates
+
+
 def require_admin_role(user: UserModel) -> None:
     """Verify user has admin role for debug access."""
     pass
@@ -358,7 +487,8 @@ def require_admin_role(user: UserModel) -> None:
 @router.get("/sessions/{session_id}/logs", response_model=DebugSessionLogsResponse)
 def get_session_logs(
     session_id: str,
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
@@ -366,6 +496,7 @@ def get_session_logs(
     Get session event logs.
 
     Returns event logs for a specific session with full details.
+    Supports pagination via limit and offset parameters.
     Requires admin role.
     """
     require_admin_role(current_user)
@@ -380,14 +511,17 @@ def get_session_logs(
             detail="Session not found"
         )
 
-    # Get event logs
+    total_count = db.query(EventLogModel).filter(
+        EventLogModel.session_id == session_id
+    ).count()
+
     logs = db.query(EventLogModel).filter(
         EventLogModel.session_id == session_id
-    ).order_by(desc(EventLogModel.turn_no), desc(EventLogModel.occurred_at)).limit(limit).all()
+    ).order_by(desc(EventLogModel.turn_no), desc(EventLogModel.occurred_at)).offset(offset).limit(limit).all()
 
     return DebugSessionLogsResponse(
         session_id=session_id,
-        total_count=len(logs),
+        total_count=total_count,
         logs=[DebugSessionLogEntry.model_validate(log) for log in logs]
     )
 
@@ -512,7 +646,8 @@ def get_session_state(
 @router.get("/model-calls", response_model=DebugModelCallsResponse)
 def get_model_calls(
     session_id: Optional[str] = None,
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
@@ -521,6 +656,7 @@ def get_model_calls(
 
     Returns audit logs of LLM calls with token usage and costs.
     Optionally filter by session_id.
+    Supports pagination via limit and offset parameters.
     Requires admin role.
     """
     require_admin_role(current_user)
@@ -530,12 +666,13 @@ def get_model_calls(
     if session_id:
         query = query.filter(ModelCallLogModel.session_id == session_id)
 
-    calls = query.order_by(desc(ModelCallLogModel.created_at)).limit(limit).all()
+    total_count = query.count()
+    calls = query.order_by(desc(ModelCallLogModel.created_at)).offset(offset).limit(limit).all()
 
     total_cost = sum(call.cost_estimate or 0 for call in calls)
 
     return DebugModelCallsResponse(
-        total_count=len(calls),
+        total_count=total_count,
         total_cost=total_cost,
         calls=[DebugModelCallEntry.model_validate(call) for call in calls]
     )
@@ -615,7 +752,8 @@ def get_turn_debug(
     fallback_reasons = []
 
     event_log_repo = EventLogRepository(db)
-    event_log = event_log_repo.get_by_session_and_turn(session_id, turn_no)
+    event_logs = event_log_repo.get_by_turn(session_id, turn_no)
+    event_log = event_logs[0] if event_logs else None
 
     if event_log and event_log.result_json:
         result_json = event_log.result_json
@@ -636,6 +774,51 @@ def get_turn_debug(
             fallback_key = f"{stage_name}_fallback_reason"
             if fallback_key in result_json:
                 fallback_reasons.append(f"{stage_name}: {result_json[fallback_key]}")
+
+    # Collect prompt template IDs from proposal audits for this turn
+    prompt_template_ids: List[str] = []
+    proposals = store.get_proposal_audits_by_turn(session_id, turn_no)
+    for prop in proposals:
+        if prop.prompt_template_id and prop.prompt_template_id not in prompt_template_ids:
+            prompt_template_ids.append(prop.prompt_template_id)
+
+    # Compute context hashes for each context build ID
+    context_hashes: List[ContextHashEntry] = []
+    for ctx_build_id in turn_audit.context_build_ids:
+        ctx_build = store.get_context_build(ctx_build_id)
+        if ctx_build:
+            hash_source = {
+                "build_id": ctx_build.build_id,
+                "perspective_type": ctx_build.perspective_type,
+                "perspective_id": ctx_build.perspective_id,
+                "included_memory_ids": sorted([m.memory_id for m in ctx_build.included_memories]),
+                "excluded_memory_ids": sorted([m.memory_id for m in ctx_build.excluded_memories]),
+                "total_candidates": ctx_build.total_candidates,
+                "context_token_count": ctx_build.context_token_count,
+            }
+            ctx_hash = hashlib.sha256(
+                json.dumps(hash_source, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            context_hashes.append(ContextHashEntry(
+                build_id=ctx_build_id,
+                context_hash=ctx_hash,
+            ))
+
+    # Build model call references from the stored model call logs
+    model_call_references: List[ModelCallReference] = []
+    for call_id in turn_audit.model_call_ids:
+        model_call = store.get_model_call(call_id)
+        if model_call:
+            model_call_references.append(ModelCallReference(
+                call_id=model_call.call_id,
+                prompt_type=model_call.prompt_type,
+                model_name=model_call.model_name,
+                provider=model_call.provider,
+                input_tokens=model_call.input_tokens,
+                output_tokens=model_call.output_tokens,
+                cost_estimate=model_call.cost_estimate,
+                latency_ms=model_call.latency_ms,
+            ))
 
     return TurnDebugResponse(
         audit_id=turn_audit.audit_id,
@@ -677,6 +860,353 @@ def get_turn_debug(
         completed_at=turn_audit.completed_at,
         llm_stages=llm_stages,
         fallback_reasons=fallback_reasons,
+        prompt_template_ids=prompt_template_ids,
+        context_hashes=context_hashes,
+        model_call_references=model_call_references,
+    )
+
+
+@router.get("/sessions/{session_id}/prompt-inspector", response_model=PromptInspectorResponse)
+def get_prompt_inspector(
+    session_id: str,
+    start_turn: Optional[int] = Query(None, ge=1),
+    end_turn: Optional[int] = Query(None, ge=1),
+    prompt_type: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """
+    Get aggregated prompt-related data for a session.
+
+    Aggregates all prompt-relevant audit data including:
+    - Prompt templates used (from ProposalAuditEntry)
+    - Context build decisions (included/excluded memories with reasons)
+    - Raw LLM output previews and parsed results
+    - Repair traces (attempts, strategies, success)
+    - Validation results
+    - Token usage, cost, latency aggregates
+
+    Supports filtering by turn_range (start_turn, end_turn) and prompt_type.
+    Supports pagination via limit and offset parameters.
+
+    Requires admin role.
+    """
+    require_admin_role(current_user)
+
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    audit_logger = get_audit_logger()
+    store = audit_logger.get_store()
+
+    # Collect proposals for this session
+    proposal_audits = store.get_proposal_audits_by_session(session_id, limit=1000)
+
+    # Filter by turn range
+    if start_turn is not None:
+        proposal_audits = [p for p in proposal_audits if p.turn_no >= start_turn]
+    if end_turn is not None:
+        proposal_audits = [p for p in proposal_audits if p.turn_no <= end_turn]
+
+    # Filter by prompt type (match against proposal_type)
+    if prompt_type:
+        proposal_audits = [p for p in proposal_audits if p.proposal_type == prompt_type]
+
+    # Determine affected turn numbers
+    affected_turns = sorted(set(p.turn_no for p in proposal_audits))
+
+    # Collect model calls filtered by the same turn range and prompt_type
+    all_model_calls = store.get_model_calls_by_session(session_id, limit=1000)
+    # Also check in-memory calls that might be indexed differently
+    model_call_ids_from_turns: set = set()
+    for turn_no in affected_turns:
+        turn_audit = store.get_turn_audit_by_turn(session_id, turn_no)
+        if turn_audit:
+            model_call_ids_from_turns.update(turn_audit.model_call_ids)
+
+    model_calls: List[PromptInspectorModelCallEntry] = []
+    seen_call_ids: set = set()
+    for call in all_model_calls:
+        if call.call_id in seen_call_ids:
+            continue
+        if start_turn is not None and call.turn_no < start_turn:
+            continue
+        if end_turn is not None and call.turn_no > end_turn:
+            continue
+        if prompt_type and call.prompt_type != prompt_type:
+            continue
+        seen_call_ids.add(call.call_id)
+        model_calls.append(PromptInspectorModelCallEntry(
+            call_id=call.call_id,
+            turn_no=call.turn_no,
+            prompt_type=call.prompt_type,
+            model_name=call.model_name,
+            provider=call.provider,
+            input_tokens=call.input_tokens,
+            output_tokens=call.output_tokens,
+            cost_estimate=call.cost_estimate,
+            latency_ms=call.latency_ms,
+            success=call.success,
+            created_at=call.created_at,
+        ))
+
+    # Also resolve from turn audit model_call_ids for calls not yet seen
+    for call_id in model_call_ids_from_turns:
+        if call_id in seen_call_ids:
+            continue
+        call = store.get_model_call(call_id)
+        if call:
+            if prompt_type and call.prompt_type != prompt_type:
+                continue
+            seen_call_ids.add(call.call_id)
+            model_calls.append(PromptInspectorModelCallEntry(
+                call_id=call.call_id,
+                turn_no=call.turn_no,
+                prompt_type=call.prompt_type,
+                model_name=call.model_name,
+                provider=call.provider,
+                input_tokens=call.input_tokens,
+                output_tokens=call.output_tokens,
+                cost_estimate=call.cost_estimate,
+                latency_ms=call.latency_ms,
+                success=call.success,
+                created_at=call.created_at,
+            ))
+
+    # Collect context builds for affected turns
+    context_builds: List[PromptInspectorContextBuildEntry] = []
+    all_ctx_builds = store.get_context_builds_by_session(session_id, limit=1000)
+    # Also collect from turn audits
+    ctx_build_ids_from_turns: set = set()
+    for turn_no in affected_turns:
+        turn_audit = store.get_turn_audit_by_turn(session_id, turn_no)
+        if turn_audit:
+            ctx_build_ids_from_turns.update(turn_audit.context_build_ids)
+
+    seen_ctx_ids: set = set()
+    for ctx in all_ctx_builds:
+        if ctx.build_id in seen_ctx_ids:
+            continue
+        if start_turn is not None and ctx.turn_no < start_turn:
+            continue
+        if end_turn is not None and ctx.turn_no > end_turn:
+            continue
+        seen_ctx_ids.add(ctx.build_id)
+        context_builds.append(PromptInspectorContextBuildEntry(
+            build_id=ctx.build_id,
+            turn_no=ctx.turn_no,
+            perspective_type=ctx.perspective_type,
+            perspective_id=ctx.perspective_id,
+            included_memories=[
+                MemoryAuditResponse(
+                    memory_id=m.memory_id,
+                    memory_type=m.memory_type,
+                    owner_id=m.owner_id,
+                    included=m.included,
+                    reason=m.reason.value,
+                    relevance_score=m.relevance_score,
+                    importance_score=m.importance_score,
+                    recency_score=m.recency_score,
+                    perspective_filter_applied=m.perspective_filter_applied,
+                    forbidden_knowledge_flag=m.forbidden_knowledge_flag,
+                    notes=m.notes,
+                )
+                for m in ctx.included_memories
+            ],
+            excluded_memories=[
+                MemoryAuditResponse(
+                    memory_id=m.memory_id,
+                    memory_type=m.memory_type,
+                    owner_id=m.owner_id,
+                    included=m.included,
+                    reason=m.reason.value,
+                    relevance_score=m.relevance_score,
+                    importance_score=m.importance_score,
+                    recency_score=m.recency_score,
+                    perspective_filter_applied=m.perspective_filter_applied,
+                    forbidden_knowledge_flag=m.forbidden_knowledge_flag,
+                    notes=m.notes,
+                )
+                for m in ctx.excluded_memories
+            ],
+            total_candidates=ctx.total_candidates,
+            included_count=ctx.included_count,
+            excluded_count=ctx.excluded_count,
+            context_token_count=ctx.context_token_count,
+            build_duration_ms=ctx.build_duration_ms,
+        ))
+
+    for ctx_build_id in ctx_build_ids_from_turns:
+        if ctx_build_id in seen_ctx_ids:
+            continue
+        ctx = store.get_context_build(ctx_build_id)
+        if ctx:
+            if start_turn is not None and ctx.turn_no < start_turn:
+                continue
+            if end_turn is not None and ctx.turn_no > end_turn:
+                continue
+            seen_ctx_ids.add(ctx.build_id)
+            context_builds.append(PromptInspectorContextBuildEntry(
+                build_id=ctx.build_id,
+                turn_no=ctx.turn_no,
+                perspective_type=ctx.perspective_type,
+                perspective_id=ctx.perspective_id,
+                included_memories=[
+                    MemoryAuditResponse(
+                        memory_id=m.memory_id,
+                        memory_type=m.memory_type,
+                        owner_id=m.owner_id,
+                        included=m.included,
+                        reason=m.reason.value,
+                        relevance_score=m.relevance_score,
+                        importance_score=m.importance_score,
+                        recency_score=m.recency_score,
+                        perspective_filter_applied=m.perspective_filter_applied,
+                        forbidden_knowledge_flag=m.forbidden_knowledge_flag,
+                        notes=m.notes,
+                    )
+                    for m in ctx.included_memories
+                ],
+                excluded_memories=[
+                    MemoryAuditResponse(
+                        memory_id=m.memory_id,
+                        memory_type=m.memory_type,
+                        owner_id=m.owner_id,
+                        included=m.included,
+                        reason=m.reason.value,
+                        relevance_score=m.relevance_score,
+                        importance_score=m.importance_score,
+                        recency_score=m.recency_score,
+                        perspective_filter_applied=m.perspective_filter_applied,
+                        forbidden_knowledge_flag=m.forbidden_knowledge_flag,
+                        notes=m.notes,
+                    )
+                    for m in ctx.excluded_memories
+                ],
+                total_candidates=ctx.total_candidates,
+                included_count=ctx.included_count,
+                excluded_count=ctx.excluded_count,
+                context_token_count=ctx.context_token_count,
+                build_duration_ms=ctx.build_duration_ms,
+            ))
+
+    # Collect proposals
+    proposals: List[ProposalInspectorEntry] = []
+    for prop in proposal_audits:
+        proposals.append(ProposalInspectorEntry(
+            audit_id=prop.audit_id,
+            turn_no=prop.turn_no,
+            proposal_type=prop.proposal_type,
+            prompt_template_id=prop.prompt_template_id,
+            model_name=prop.model_name,
+            input_tokens=prop.input_tokens,
+            output_tokens=prop.output_tokens,
+            latency_ms=prop.latency_ms,
+            raw_output_preview=prop.raw_output_preview,
+            raw_output_hash=prop.raw_output_hash,
+            parsed_proposal=prop.parsed_proposal,
+            parse_success=prop.parse_success,
+            repair_attempts=prop.repair_attempts,
+            repair_strategies_tried=prop.repair_strategies_tried,
+            repair_success=prop.repair_success,
+            validation_passed=prop.validation_passed,
+            validation_errors=prop.validation_errors,
+            validation_warnings=getattr(prop, 'validation_warnings', []),
+            rejected=prop.rejected,
+            rejection_reason=prop.rejection_reason,
+            fallback_used=prop.fallback_used,
+            fallback_reason=prop.fallback_reason,
+            fallback_strategy=prop.fallback_strategy,
+            confidence=prop.confidence,
+            perspective_check_passed=prop.perspective_check_passed,
+            forbidden_info_detected=getattr(prop, 'forbidden_info_detected', []),
+        ))
+
+    # Collect prompt templates used
+    prompt_templates: List[PromptTemplateUsageEntry] = []
+    for prop in proposal_audits:
+        if prop.prompt_template_id:
+            prompt_templates.append(PromptTemplateUsageEntry(
+                prompt_template_id=prop.prompt_template_id,
+                proposal_type=prop.proposal_type,
+                turn_no=prop.turn_no,
+                model_name=prop.model_name,
+                confidence=prop.confidence,
+            ))
+
+    # Collect validations for affected turns
+    validations: List[ValidationInspectorEntry] = []
+    all_validations = store.get_validations_by_session(session_id, limit=1000)
+    for val in all_validations:
+        if start_turn is not None and val.turn_no < start_turn:
+            continue
+        if end_turn is not None and val.turn_no > end_turn:
+            continue
+        validations.append(ValidationInspectorEntry(
+            validation_id=val.validation_id,
+            turn_no=val.turn_no,
+            validation_target=val.validation_target,
+            overall_status=val.overall_status.value,
+            checks=[
+                ValidationCheckResponse(
+                    check_id=c.check_id,
+                    check_type=c.check_type,
+                    status=c.status.value,
+                    message=c.message,
+                    details=c.details,
+                )
+                for c in val.checks
+            ],
+            error_count=val.error_count,
+            warning_count=val.warning_count,
+            errors=val.errors,
+            warnings=val.warnings,
+        ))
+
+    model_calls = model_calls[offset:offset + limit]
+    context_builds = context_builds[offset:offset + limit]
+    proposals = proposals[offset:offset + limit]
+    validations = validations[offset:offset + limit]
+    prompt_templates = prompt_templates[offset:offset + limit]
+
+    total_tokens = sum(call.input_tokens or 0 + call.output_tokens or 0 for call in model_calls)
+    total_cost = sum(call.cost_estimate or 0 for call in model_calls)
+    total_latency = sum(call.latency_ms or 0 for call in model_calls)
+    total_calls = len(model_calls)
+    successful_calls = sum(1 for call in model_calls if call.success)
+    call_success_rate = (successful_calls / total_calls * 100) if total_calls > 0 else 100.0
+    total_repairs = sum(p.repair_attempts for p in proposals)
+    successful_repairs = sum(1 for p in proposals if p.repair_attempts > 0 and p.repair_success)
+    repair_success_rate = (
+        (successful_repairs / total_repairs * 100) if total_repairs > 0 else 100.0
+    )
+
+    aggregates = PromptInspectorAggregates(
+        total_tokens_used=total_tokens,
+        total_cost=round(total_cost, 6),
+        total_latency_ms=total_latency,
+        total_model_calls=total_calls,
+        call_success_rate=round(call_success_rate, 2),
+        repair_success_rate=round(repair_success_rate, 2),
+    )
+
+    return PromptInspectorResponse(
+        session_id=session_id,
+        total_turns=len(affected_turns),
+        prompt_templates=prompt_templates,
+        model_calls=model_calls,
+        context_builds=context_builds,
+        proposals=proposals,
+        validations=validations,
+        aggregates=aggregates,
     )
 
 
@@ -1177,6 +1707,8 @@ def get_session_timeline(
     session_id: str,
     start_turn: int = Query(1, ge=1),
     end_turn: Optional[int] = Query(None, ge=1),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db)
 ):
@@ -1192,11 +1724,13 @@ def get_session_timeline(
         )
 
     viewer = TimelineViewer(db_session=db)
-    turns = viewer.get_timeline(session_id, start_turn, end_turn)
+    all_turns = viewer.get_timeline(session_id, start_turn, end_turn)
+    total_turns = len(all_turns)
+    turns = all_turns[offset:offset + limit]
 
     return TimelineResponse(
         session_id=session_id,
-        total_turns=len(turns),
+        total_turns=total_turns,
         turns=[
             TurnTimelineResponse(
                 turn_no=t.turn_no,
@@ -1264,7 +1798,8 @@ def get_turn_timeline(
     fallback_reasons = []
 
     event_log_repo = EventLogRepository(db)
-    event_log = event_log_repo.get_by_session_and_turn(session_id, turn_no)
+    event_logs = event_log_repo.get_by_turn(session_id, turn_no)
+    event_log = event_logs[0] if event_logs else None
 
     if event_log and event_log.result_json:
         result_json = event_log.result_json

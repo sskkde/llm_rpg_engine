@@ -83,7 +83,7 @@ class MemoryWriter:
         from ..storage.models import generate_uuid
         
         self._memory_summary_repo.create({
-            "id": summary.summary_id,
+            "id": generate_uuid(),
             "session_id": self._session_id,
             "scope_type": scope_type,
             "scope_ref_id": scope_ref_id,

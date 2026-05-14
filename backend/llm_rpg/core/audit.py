@@ -389,9 +389,9 @@ class ProposalAuditEntry(BaseModel):
 
 
 class AuditStore:
-    """In-memory storage for audit logs."""
+    """In-memory storage for audit logs with optional DB persistence for model calls."""
     
-    def __init__(self):
+    def __init__(self, db_session=None):
         self._model_calls: Dict[str, ModelCallLog] = {}
         self._context_builds: Dict[str, ContextBuildAudit] = {}
         self._validations: Dict[str, ValidationResultAudit] = {}
@@ -409,6 +409,9 @@ class AuditStore:
         
         self._turn_audits_by_turn: Dict[tuple, str] = {}  # (session_id, turn_no) -> audit_id
         self._proposal_audits_by_turn: Dict[tuple, List[str]] = {}  # (session_id, turn_no) -> [audit_ids]
+        
+        # DB session for model call persistence
+        self._db_session = db_session
     
     def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
         """Store a proposal audit entry."""
@@ -466,7 +469,37 @@ class AuditStore:
             self._model_calls_by_session[log.session_id] = []
         self._model_calls_by_session[log.session_id].append(log.call_id)
         
+        if self._db_session is not None:
+            self._persist_model_call_to_db(log)
+        
         return log.call_id
+    
+    def _persist_model_call_to_db(self, log: ModelCallLog) -> None:
+        """Persist a model call log to the database."""
+        from llm_rpg.storage.models import ModelCallAuditLogModel
+        try:
+            db_log = ModelCallAuditLogModel(
+                call_id=log.call_id,
+                session_id=log.session_id,
+                turn_no=log.turn_no,
+                provider=log.provider,
+                model_name=log.model_name,
+                prompt_type=log.prompt_type,
+                input_tokens=log.input_tokens,
+                output_tokens=log.output_tokens,
+                total_tokens=log.total_tokens,
+                cost_estimate=log.cost_estimate,
+                latency_ms=log.latency_ms,
+                success=log.success,
+                error_message=log.error_message,
+                context_build_id=log.context_build_id,
+                created_at=log.created_at,
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
     
     def store_context_build(self, audit: ContextBuildAudit) -> str:
         """Store a context build audit."""
@@ -567,6 +600,78 @@ class AuditStore:
         calls.sort(key=lambda c: c.created_at, reverse=True)
         return calls[:limit]
     
+    def get_model_calls_all(
+        self,
+        limit: int = 100
+    ) -> List[ModelCallLog]:
+        """Get all model calls, preferring DB query when available."""
+        if self._db_session is not None:
+            from llm_rpg.storage.models import ModelCallAuditLogModel
+            from sqlalchemy import desc
+            db_results = self._db_session.query(ModelCallAuditLogModel).order_by(
+                desc(ModelCallAuditLogModel.created_at)
+            ).limit(limit).all()
+            return [
+                ModelCallLog(
+                    call_id=r.call_id,
+                    session_id=r.session_id,
+                    turn_no=r.turn_no,
+                    provider=r.provider or "",
+                    model_name=r.model_name or "",
+                    prompt_type=r.prompt_type or "",
+                    input_tokens=r.input_tokens or 0,
+                    output_tokens=r.output_tokens or 0,
+                    total_tokens=r.total_tokens or 0,
+                    cost_estimate=r.cost_estimate,
+                    latency_ms=r.latency_ms or 0,
+                    success=r.success if r.success is not None else True,
+                    error_message=r.error_message,
+                    context_build_id=r.context_build_id,
+                    created_at=r.created_at,
+                )
+                for r in db_results
+            ]
+        # Fallback to in-memory
+        calls = list(self._model_calls.values())
+        calls.sort(key=lambda c: c.created_at, reverse=True)
+        return calls[:limit]
+    
+    def get_model_calls_from_db(
+        self,
+        session_id: str,
+        limit: int = 100
+    ) -> List[ModelCallLog]:
+        """Get model calls for a session from the database."""
+        if self._db_session is None:
+            return self.get_model_calls_by_session(session_id, limit)
+        from llm_rpg.storage.models import ModelCallAuditLogModel
+        from sqlalchemy import desc
+        db_results = self._db_session.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.session_id == session_id
+        ).order_by(
+            desc(ModelCallAuditLogModel.created_at)
+        ).limit(limit).all()
+        return [
+            ModelCallLog(
+                call_id=r.call_id,
+                session_id=r.session_id,
+                turn_no=r.turn_no,
+                provider=r.provider or "",
+                model_name=r.model_name or "",
+                prompt_type=r.prompt_type or "",
+                input_tokens=r.input_tokens or 0,
+                output_tokens=r.output_tokens or 0,
+                total_tokens=r.total_tokens or 0,
+                cost_estimate=r.cost_estimate,
+                latency_ms=r.latency_ms or 0,
+                success=r.success if r.success is not None else True,
+                error_message=r.error_message,
+                context_build_id=r.context_build_id,
+                created_at=r.created_at,
+            )
+            for r in db_results
+        ]
+    
     def get_context_builds_by_session(
         self,
         session_id: str,
@@ -659,13 +764,25 @@ class AuditStore:
         for eid in self._errors_by_session.get(session_id, []):
             self._errors.pop(eid, None)
         self._errors_by_session.pop(session_id, None)
+        
+        # Clear model calls from DB
+        if self._db_session is not None:
+            from llm_rpg.storage.models import ModelCallAuditLogModel
+            try:
+                self._db_session.query(ModelCallAuditLogModel).filter(
+                    ModelCallAuditLogModel.session_id == session_id
+                ).delete()
+                self._db_session.commit()
+            except Exception:
+                self._db_session.rollback()
+                raise
 
 
 class AuditLogger:
     """Main audit logging interface."""
     
-    def __init__(self, store: Optional[AuditStore] = None):
-        self._store = store or AuditStore()
+    def __init__(self, store: Optional[AuditStore] = None, db_session=None):
+        self._store = store or AuditStore(db_session=db_session)
     
     def log_model_call(
         self,

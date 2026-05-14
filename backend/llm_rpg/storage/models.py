@@ -432,6 +432,31 @@ class ModelCallLogModel(Base):
     __table_args__ = (Index("idx_model_calls_lookup", "session_id", "turn_no", "prompt_type"),)
 
 
+class ModelCallAuditLogModel(Base):
+    __tablename__ = "model_call_audit_logs"
+
+    call_id = Column(String, primary_key=True)
+    session_id = Column(String, nullable=False, index=True)
+    turn_no = Column(Integer, nullable=False)
+    provider = Column(String, nullable=True)
+    model_name = Column(String, nullable=True)
+    prompt_type = Column(String, nullable=True)
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    cost_estimate = Column(Float, nullable=True)
+    latency_ms = Column(Integer, default=0)
+    success = Column(Boolean, default=True)
+    error_message = Column(Text, nullable=True)
+    context_build_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_audit_logs_session", "session_id"),
+        Index("idx_audit_logs_session_turn", "session_id", "turn_no"),
+    )
+
+
 class CombatSessionModel(Base):
     __tablename__ = "combat_sessions"
 

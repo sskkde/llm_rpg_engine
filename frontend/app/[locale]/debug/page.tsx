@@ -17,6 +17,7 @@ import { NPCMindInspector } from '@/components/debug/NPCMindInspector';
 import { TurnDebugViewer } from '@/components/debug/TurnDebugViewer';
 import { ContextBuildAudit } from '@/components/debug/ContextBuildAudit';
 import { ValidationAuditViewer } from '@/components/debug/ValidationAuditViewer';
+import { AssetDebugViewer } from '@/components/debug/AssetDebugViewer';
 import { getDebugSessionLogs, getDebugSessionState, getDebugModelCalls, getDebugErrors } from '@/lib/api';
 import type { DebugSessionLogsResponse, DebugSessionStateResponse, DebugModelCallsResponse, DebugErrorsResponse } from '@/types/api';
 
@@ -118,6 +119,7 @@ function DebugContent() {
           <Tab value="turnDebug">{t('turnDebug')}</Tab>
           <Tab value="validationAudit">{t('validationAudit')}</Tab>
           <Tab value="promptInspector">{t('promptInspector')}</Tab>
+          <Tab value="assets">{t('assets')}</Tab>
         </TabList>
 
         <TabPanel value="logs">
@@ -247,6 +249,16 @@ function DebugContent() {
           <DebugErrorBoundary>
             {hasSession ? (
               <PromptInspector sessionId={sessionId} />
+            ) : (
+              <DebugEmptyState message={t('emptyState.noSession')} />
+            )}
+          </DebugErrorBoundary>
+        </TabPanel>
+
+        <TabPanel value="assets">
+          <DebugErrorBoundary>
+            {hasSession ? (
+              <AssetDebugViewer sessionId={sessionId} />
             ) : (
               <DebugEmptyState message={t('emptyState.noSession')} />
             )}

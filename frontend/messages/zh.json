@@ -409,12 +409,11 @@
       "defaultMessage": "加载调试数据时发生意外错误",
       "retry": "重试"
     },
-    "emptyState": {
-      "noData": "无数据",
-      "noSession": "未加载会话",
-      "noValidationId": "请输入验证ID",
-      "noContextBuildId": "请输入构建ID"
-    },
+    "assetId": "资源ID",
+    "assets": "资源",
+    "provider": "提供商",
+    "error": "错误",
+    "created": "创建时间",
     "timestamp": "时间戳",
     "eventType": "事件类型",
     "playerAction": "玩家行动",
@@ -567,7 +566,10 @@
       "noSession": "未加载会话",
       "noContextBuild": "未加载上下文构建",
       "noValidation": "未加载验证",
-      "noTurn": "未加载回合"
+      "noTurn": "未加载回合",
+      "noValidationId": "请输入验证ID",
+      "noContextBuildId": "请输入构建ID",
+      "noAssets": "该会话暂无资源"
     }
   },
   "Errors": {

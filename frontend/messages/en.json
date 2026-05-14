@@ -409,12 +409,11 @@
       "defaultMessage": "An unexpected error occurred while loading debug data",
       "retry": "Retry"
     },
-    "emptyState": {
-      "noData": "No data",
-      "noSession": "No session loaded",
-      "noValidationId": "Please enter a validation ID",
-      "noContextBuildId": "Please enter a build ID"
-    },
+    "assetId": "Asset ID",
+    "assets": "Assets",
+    "provider": "Provider",
+    "error": "Error",
+    "created": "Created",
     "timestamp": "Timestamp",
     "eventType": "Event Type",
     "playerAction": "Player Action",
@@ -566,7 +565,10 @@
       "noData": "No data",
       "noSession": "No session loaded",
       "noContextBuild": "No context build loaded",
-      "noValidation": "No validation loaded"
+      "noValidation": "No validation loaded",
+      "noValidationId": "Please enter a validation ID",
+      "noContextBuildId": "Please enter a build ID",
+      "noAssets": "No assets for this session"
     }
   },
   "Errors": {

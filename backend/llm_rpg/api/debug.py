@@ -2136,3 +2136,104 @@ def get_replay_report(
         warnings=report.warnings,
         created_at=report.created_at,
     )
+
+
+# =============================================================================
+# Asset Debug Endpoints
+# =============================================================================
+
+class AssetDebugResponse(BaseModel):
+    """Debug response for asset information."""
+    asset_id: str
+    asset_type: str
+    generation_status: str
+    result_url: Optional[str] = None
+    error_message: Optional[str] = None
+    provider: Optional[str] = None
+    cache_hit: bool = False
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+@router.get(
+    "/sessions/{session_id}/assets",
+    response_model=List[AssetDebugResponse],
+    summary="List session assets (admin)",
+)
+def list_session_assets_debug(
+    session_id: str,
+    asset_type: Optional[str] = Query(None, description="Filter by asset type"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """List all assets for a session. Admin only."""
+    require_admin_role(current_user)
+
+    # Verify session exists
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    from llm_rpg.storage.repositories import AssetRepository
+    from llm_rpg.services.asset_generation_service import AssetGenerationService
+
+    service = AssetGenerationService(AssetRepository(db))
+    assets = service.list_session_assets(session_id, asset_type=asset_type)
+
+    return [
+        AssetDebugResponse(
+            asset_id=a.asset_id,
+            asset_type=a.asset_type.value if hasattr(a.asset_type, 'value') else a.asset_type,
+            generation_status=a.generation_status.value if hasattr(a.generation_status, 'value') else a.generation_status,
+            result_url=a.result_url,
+            error_message=a.error_message,
+            provider=a.provider,
+            cache_hit=a.cache_hit,
+            created_at=a.created_at.isoformat() if hasattr(a.created_at, 'isoformat') else str(a.created_at),
+        )
+        for a in assets
+    ]
+
+
+@router.get(
+    "/assets/{asset_id}",
+    response_model=AssetDebugResponse,
+    summary="Get asset detail (admin)",
+)
+def get_asset_debug(
+    asset_id: str,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """Get detailed asset info. Admin only."""
+    require_admin_role(current_user)
+
+    from llm_rpg.storage.repositories import AssetRepository
+    from llm_rpg.services.asset_generation_service import AssetGenerationService
+
+    service = AssetGenerationService(AssetRepository(db))
+    asset = service.get_asset(asset_id)
+
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Asset {asset_id} not found"
+        )
+
+    return AssetDebugResponse(
+        asset_id=asset.asset_id,
+        asset_type=asset.asset_type.value if hasattr(asset.asset_type, 'value') else asset.asset_type,
+        generation_status=asset.generation_status.value if hasattr(asset.generation_status, 'value') else asset.generation_status,
+        result_url=asset.result_url,
+        error_message=asset.error_message,
+        provider=asset.provider,
+        cache_hit=asset.cache_hit,
+        created_at=asset.created_at.isoformat() if hasattr(asset.created_at, 'isoformat') else str(asset.created_at),
+    )

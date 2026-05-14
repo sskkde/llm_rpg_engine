@@ -174,3 +174,21 @@ jobs:
 
       - name: Run frontend admin tests
         run: make test-frontend-admin
+
+  # ── P5 Debug Replay Infrastructure Jobs ────────────────────────
+
+  p5-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run P5 quality gate (test-p5)
+        run: make test-p5

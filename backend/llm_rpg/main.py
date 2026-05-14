@@ -114,6 +114,19 @@ app.include_router(debug.router)
 app.include_router(media.router)
 
 
+@app.on_event("startup")
+def wire_audit_db():
+    try:
+        from .storage.database import get_db
+        from .core.audit import get_audit_logger
+        db_gen = get_db()
+        db = next(db_gen)
+        logger = get_audit_logger()
+        logger._store._db_session = db
+    except Exception:
+        pass
+
+
 
 class GameState:
     def __init__(self):

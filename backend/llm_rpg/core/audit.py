@@ -428,6 +428,84 @@ class AuditStore:
         except Exception:
             self._db_session.rollback()
             raise
+
+    def _persist_proposal_to_db(self, audit: ProposalAuditEntry) -> None:
+        from llm_rpg.storage.models import ProposalAuditLogModel
+        try:
+            db_log = ProposalAuditLogModel(
+                audit_id=audit.audit_id,
+                session_id=audit.session_id,
+                turn_no=audit.turn_no,
+                proposal_type=audit.proposal_type,
+                payload_json=audit.model_dump(mode='json'),
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
+
+    def _persist_context_build_to_db(self, audit: ContextBuildAudit) -> None:
+        from llm_rpg.storage.models import ContextBuildAuditLogModel
+        try:
+            db_log = ContextBuildAuditLogModel(
+                build_id=audit.build_id,
+                session_id=audit.session_id,
+                turn_no=audit.turn_no,
+                perspective_type=audit.perspective_type,
+                payload_json=audit.model_dump(mode='json'),
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
+
+    def _persist_validation_to_db(self, audit: ValidationResultAudit) -> None:
+        from llm_rpg.storage.models import ValidationAuditLogModel
+        try:
+            db_log = ValidationAuditLogModel(
+                validation_id=audit.validation_id,
+                session_id=audit.session_id,
+                turn_no=audit.turn_no,
+                validation_type=audit.validation_target,
+                payload_json=audit.model_dump(mode='json'),
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
+
+    def _persist_turn_audit_to_db(self, audit: TurnAuditLog) -> None:
+        from llm_rpg.storage.models import TurnAuditLogModel
+        try:
+            db_log = TurnAuditLogModel(
+                audit_id=audit.audit_id,
+                session_id=audit.session_id,
+                turn_no=audit.turn_no,
+                payload_json=audit.model_dump(mode='json'),
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
+
+    def _persist_error_to_db(self, error: ErrorLogEntry) -> None:
+        from llm_rpg.storage.models import ErrorAuditLogModel
+        try:
+            db_log = ErrorAuditLogModel(
+                error_id=error.error_id,
+                session_id=error.session_id,
+                error_type=error.error_type,
+                payload_json=error.model_dump(mode='json'),
+            )
+            self._db_session.add(db_log)
+            self._db_session.commit()
+        except Exception:
+            self._db_session.rollback()
+            raise
     
     def store_context_build(self, audit: ContextBuildAudit) -> str:
         """Store a context build audit."""
@@ -436,6 +514,9 @@ class AuditStore:
         if audit.session_id not in self._context_builds_by_session:
             self._context_builds_by_session[audit.session_id] = []
         self._context_builds_by_session[audit.session_id].append(audit.build_id)
+        
+        if self._db_session is not None:
+            self._persist_context_build_to_db(audit)
         
         return audit.build_id
     
@@ -446,6 +527,9 @@ class AuditStore:
         if audit.session_id not in self._validations_by_session:
             self._validations_by_session[audit.session_id] = []
         self._validations_by_session[audit.session_id].append(audit.validation_id)
+        
+        if self._db_session is not None:
+            self._persist_validation_to_db(audit)
         
         return audit.validation_id
     
@@ -461,6 +545,9 @@ class AuditStore:
         key = (audit.session_id, audit.turn_no)
         self._turn_audits_by_turn[key] = audit.audit_id
         
+        if self._db_session is not None:
+            self._persist_turn_audit_to_db(audit)
+        
         return audit.audit_id
     
     def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
@@ -468,6 +555,8 @@ class AuditStore:
         self._proposal_audits[audit.audit_id] = audit
         
         if audit.session_id is None:
+            if self._db_session is not None:
+                self._persist_proposal_to_db(audit)
             return audit.audit_id
         
         if audit.session_id not in self._proposal_audits_by_session:
@@ -479,6 +568,9 @@ class AuditStore:
             self._proposal_audits_by_turn[key] = []
         self._proposal_audits_by_turn[key].append(audit.audit_id)
         
+        if self._db_session is not None:
+            self._persist_proposal_to_db(audit)
+        
         return audit.audit_id
     
     def store_error(self, error: ErrorLogEntry) -> str:
@@ -489,6 +581,9 @@ class AuditStore:
             if error.session_id not in self._errors_by_session:
                 self._errors_by_session[error.session_id] = []
             self._errors_by_session[error.session_id].append(error.error_id)
+        
+        if self._db_session is not None:
+            self._persist_error_to_db(error)
         
         return error.error_id
     

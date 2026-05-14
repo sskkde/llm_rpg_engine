@@ -646,6 +646,115 @@ The following features are explicitly out of scope for P4 and deferred to future
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P4_EXECUTION_STATUS.md`, and `P4_COMPLETION_REPORT.md`.
 
+## P5 Debug/Test/Replay Productization
+
+This phase adds complete frontend UIs for all 14 debug endpoints, P2 memory and perspective module strengthening, and expanded scenario testing with 12 scenario types.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P5 quality gate components
+make test-scenario-p5
+make test-prompt-inspector
+
+# Run P2 strengthening tests
+cd backend
+python3 -m pytest tests/unit/test_audit_db_persistence.py tests/unit/test_context_builder_p2.py tests/unit/test_narration_leak_hardening.py -q
+```
+
+### Debug Panel UI
+
+The debug panel provides a comprehensive view of game session internals:
+
+**Location**: `/zh/debug` or `/en/debug`
+
+**Tabs**:
+- **Logs**: Session event logs with filtering
+- **State**: Complete session state snapshot
+- **Timeline**: Turn-by-turn event timeline
+- **NPC Mind**: NPC beliefs, memories, secrets, and goals
+- **Turn Debug**: Per-turn debug information
+- **Prompt Inspector**: LLM request/response details with tokens, cost, latency
+
+### Replay Tool UI
+
+The replay tool enables session replay with perspective filtering:
+
+**Location**: `/zh/replay` or `/en/replay`
+
+**Features**:
+- Session ID input with load
+- Turn range selection (start turn, end turn)
+- Perspective selector (admin / player / auditor)
+- State diff viewer (before/after comparison)
+- Replay report generation
+
+### Prompt Inspector API
+
+New debug endpoints for LLM call inspection:
+
+- `GET /debug/sessions/{id}/prompt-inspector` - Aggregated prompt data for a session
+- `GET /debug/sessions/{id}/turns/{turn_no}` - Enhanced with prompt template info
+
+**Query Parameters**:
+- `start_turn`, `end_turn` - Turn range filter
+- `prompt_type` - Filter by prompt type (narration, npc_decision, etc.)
+
+### Scenario Types
+
+12 scenario types for comprehensive testing:
+
+**Existing (P4)**:
+- `SECRET_LEAK_PREVENTION` - NPC secret leak verification
+- `IMPORTANT_NPC_ATTACK` - Important NPC attack handling
+- `SEAL_COUNTDOWN` - Seal countdown mechanics
+- `FORBIDDEN_KNOWLEDGE` - Forbidden knowledge access
+
+**New (P5)**:
+- `COMBAT_RULE_ENFORCEMENT` - Combat rule verification
+- `QUEST_FLOW_VALIDATION` - Quest stage transition validation
+- `SAVE_CONSISTENCY` - Save/load state consistency
+- `REPRODUCIBILITY` - Same seed same result
+- `WORLD_TIME_PROGRESSION` - World time advancement
+- `AREA_SUMMARY_GENERATION` - Area summary updates
+- `NPC_RELATIONSHIP_CHANGE` - Relationship tracking
+- `INTEGRATION_FULL_TURN` - Full turn pipeline
+
+### P2 Strengthening
+
+P5 strengthens existing P2 modules:
+
+**AuditStore DB Persistence**:
+- LLM model calls now persist to PostgreSQL
+- Survives backend restart
+- Migration: `011_add_model_call_audit_logs.py`
+
+**NPCContextBuilder**:
+- `build_npc_decision_context()` - Complete NPC decision context
+- `get_npc_perspective_facts()` - Perspective-filtered facts
+- `get_npc_available_actions()` - NPC action availability
+
+**NarrationLeakValidator**:
+- Edge case handling (empty, None, long strings, special characters)
+- Severity levels (EXACT_MATCH, PARTIAL_MATCH, SUSPICIOUS)
+- Forbidden pattern support
+
+### P6 Deferred Items
+
+The following features are explicitly out of scope for P5 and deferred to future phases:
+
+- **Media generation**: Portrait, scene, and BGM async generation (`/media/*` endpoints remain 501)
+- **Async job infrastructure**: Celery, RQ, Temporal, or similar
+- **Full AuditStore persistence**: Only model_calls persisted; context_builds, validations, etc. remain in-memory
+- **ForgetCurve background decay**: Memory decay background job
+- **Semantic leak detection**: Embedding-based leak detection
+- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites
+
+For detailed status, see `IMPLEMENTATION_STATUS.md`, `P5_COMPLETION_REPORT.md`, and `P5_READINESS.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

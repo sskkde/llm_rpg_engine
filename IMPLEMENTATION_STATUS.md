@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-12
-**Current Phase**: P4 (Content Productization)
+**Last Updated**: 2026-05-14
+**Current Phase**: P5 (Debug/Test/Replay Productization)
 
 ---
 
@@ -113,13 +113,42 @@ P4 adds content productization infrastructure. For detailed status, see `P4_EXEC
 
 ---
 
+## P5 Debug/Test/Replay Productization
+
+P5 adds debug/test/replay productization with complete frontend UIs for all 14 debug endpoints, P2 memory and perspective module strengthening, and expanded scenario testing. For detailed status, see `P5_COMPLETION_REPORT.md`.
+
+| Deliverable | Status |
+|-------------|--------|
+| Frontend Debug Components (13 files) | Completed |
+| Frontend Debug Page (6 tabs) | Completed |
+| Frontend Replay Page | Completed |
+| Backend AuditStore DB Persistence | Completed |
+| NPCContextBuilder Strengthening | Completed |
+| NarrationLeakValidator Hardening | Completed |
+| New Scenario Types (8 types) | Completed |
+| Prompt Inspector API | Completed |
+| P5 Makefile targets + CI | Completed |
+| P5_COMPLETION_REPORT.md | Completed |
+| Frontend Debug Tests (105/105) | Completed (unskipped + fixed) |
+| Backend Memory Writer Fix | Completed (UUID for summary_id) |
+
+**P5 Gates**: `make test-p5`, `make test-scenario-p5`, `make test-prompt-inspector`
+
+**Frontend Debug UI**: Available at `/zh/debug` and `/en/debug`
+
+**Frontend Replay UI**: Available at `/zh/replay` and `/en/replay`
+
+**Scenario Types**: 12 total (4 existing + 8 new)
+
+---
+
 ## Known Risks
 
-### 1. Frontend Unit Tests (Pre-existing - Deferred)
-- **Status**: 89/113 tests failing
-- **Cause**: Test environment / JSDOM issues, not application bugs
-- **Impact**: Build/lint/tsc all pass; these failures existed before P3-QG
-- **Mitigation**: Not in P3-QG scope; deferred to P4+. P3 uses static checks (lint + tsc) and stable combat test subset as blocking gates.
+### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
+- **Status**: Debug tests (105) now passing; ~118 non-debug tests still skipped
+- **Cause**: React 19 production build + jsdom incompatibility (error #299); `NODE_ENV=development` workaround applied for debug tests
+- **Impact**: Build/lint/tsc/build all pass; debug components have full test coverage
+- **Mitigation**: Non-debug test skips remain as P6+ debt
 
 ### 2. pgvector Tests Require PostgreSQL
 - **Status**: 8 tests skipped in default SQLite path
@@ -135,24 +164,29 @@ P4 adds content productization infrastructure. For detailed status, see `P4_EXEC
 
 ---
 
-## P5+ Deferred Items
+## P6+ Deferred Items
 
-The following items are explicitly out of scope for P3-QG and P4 and deferred to future phases:
+The following items are explicitly out of scope for P5 and deferred to future phases:
 
-### Media Generation (P5 Priority)
+### Media Generation (P6 Priority)
 - Portrait generation (`/media/portraits/generate`)
 - Scene image generation (`/media/scenes/generate`)
 - Background music generation (`/media/bgm/generate`)
 - Async job infrastructure (Celery/RQ/Temporal)
 
-### Engine Refactoring (P5+ Priority)
+### Engine Refactoring (P6+ Priority)
 - ReplayEngine rewrite
 - Turn Orchestrator major refactoring
 
-### Test Infrastructure (P5+ Priority)
+### Test Infrastructure (P6+ Priority)
 - Real OpenAI/LLM integration for tests
 - New API routes or frontend routing changes
 - E2E as required CI job (currently optional)
+
+### Advanced Features (P6+ Priority)
+- ForgetCurve background decay job
+- Semantic/embedding-based leak detection
+- Full AuditStore persistence (context_builds, validations, etc.)
 
 ---
 
@@ -170,6 +204,11 @@ make test-frontend-unit      # full unit tests (deferred, known failures)
 make test-scenario-smoke
 make test-pgvector
 
+# P5 specific targets
+make test-p5                 # P5 quality gate
+make test-scenario-p5        # P5 scenario tests
+make test-prompt-inspector   # Prompt Inspector API tests
+
 # Full backend regression
 cd backend && python3 -m pytest -q
 ```
@@ -181,4 +220,6 @@ cd backend && python3 -m pytest -q
 - Plan: `.sisyphus/plans/p3-engineering-quality-gate.md`
 - Evidence: `.sisyphus/evidence/p3-engineering-quality-gate/`
 - Learnings: `.sisyphus/notepads/p3-engineering-quality-gate/learnings.md`
+- P4 Plan: `.sisyphus/plans/p4-content-productization.md`
+- P5 Plan: `.sisyphus/plans/p5-debug-test-replay.md`
 - AGENTS.md: Project commands and conventions

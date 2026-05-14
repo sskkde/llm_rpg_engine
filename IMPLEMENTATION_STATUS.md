@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-14
-**Current Phase**: P5 (Debug/Test/Replay Productization)
+**Last Updated**: 2026-05-15
+**Current Phase**: P6 (Media Asset Infrastructure)
 
 ---
 
@@ -143,6 +143,34 @@ P5 adds debug/test/replay productization with complete frontend UIs for all 14 d
 
 ---
 
+## P6 Media Asset Infrastructure
+
+P6 adds Media API v1 infrastructure for asset generation, caching, and retrieval. For detailed status, see `P6_COMPLETION_REPORT.md`.
+
+| Deliverable | Status |
+|-------------|--------|
+| AssetModel + migration 013 + AssetRepository | Completed |
+| Asset Pydantic schemas (AssetType, AssetGenerationStatus) | Completed |
+| Cache key resolver (SHA-256) | Completed |
+| Provider factory + mock providers | Completed |
+| AssetGenerationService (generate, cache, error isolation) | Completed |
+| Media API v1 (5 endpoints, no more 501s) | Completed |
+| Frontend asset types + API client (5 functions) | Completed |
+| Frontend asset display components (4 components) | Completed |
+| Asset debug/admin observability (2 endpoints + viewer) | Completed |
+| P6 Makefile targets + CI job | Completed |
+| P5_CLOSEOUT_REPORT.md | Completed |
+| P6_COMPLETION_REPORT.md | Completed |
+| P6_READINESS.md | Completed |
+
+**P6 Gates**: `make test-p6-fast`, `make test-p6`
+
+**Test Coverage**: 106 tests (41 backend unit + 21 integration + 44 frontend)
+
+**Mock Provider**: All generation uses `MockAssetProvider` returning placeholder URLs; real providers deferred to P7.
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -165,29 +193,40 @@ P5 adds debug/test/replay productization with complete frontend UIs for all 14 d
 
 ---
 
-## P6+ Deferred Items
+## P7+ Deferred Items
 
-The following items are explicitly out of scope for P5 and deferred to future phases:
+The following items are explicitly out of scope for P6 and deferred to future phases:
 
-### Media Generation (P6 Priority)
-- Portrait generation (`/media/portraits/generate`)
-- Scene image generation (`/media/scenes/generate`)
-- Background music generation (`/media/bgm/generate`)
-- Async job infrastructure (Celery/RQ/Temporal)
+### Real External Providers (P7 Priority)
+- DALL-E / Stable Diffusion integration for images
+- Audio synthesis for BGM
+- API key management and cost tracking
 
-### Engine Refactoring (P6+ Priority)
+### Async Job Infrastructure (P7 Priority)
+- Celery, RQ, Temporal, or similar
+- Background task queue
+- Job status tracking
+- Retry logic
+
+### Game Integration (P7 Priority)
+- Wire NPCPortrait to game session NPCs
+- Wire SceneBackground to location display
+- Wire BGMControl to scene transitions
+
+### Engine Refactoring (P7+ Priority)
 - ReplayEngine rewrite
 - Turn Orchestrator major refactoring
 
-### Test Infrastructure (P6+ Priority)
+### Test Infrastructure (P7+ Priority)
 - Real OpenAI/LLM integration for tests
-- New API routes or frontend routing changes
 - E2E as required CI job (currently optional)
+- Non-debug frontend unit test fixes
 
-### Advanced Features (P6+ Priority)
+### Advanced Features (P7+ Priority)
 - ForgetCurve background decay job
 - Semantic/embedding-based leak detection
-- Full AuditStore persistence (context_builds, validations, etc.)
+- Full AuditStore read APIs (phase 2)
+- CDN caching for assets
 
 ---
 
@@ -207,8 +246,16 @@ make test-pgvector
 
 # P5 specific targets
 make test-p5                 # P5 quality gate
+make test-p5-fast            # P5 fast gate
 make test-scenario-p5        # P5 scenario tests
 make test-prompt-inspector   # Prompt Inspector API tests
+
+# P6 specific targets
+make test-p6                 # P6 quality gate (full)
+make test-p6-fast            # P6 fast gate
+
+# Frontend asset tests
+cd frontend && npm test -- __tests__/assets
 
 # Full backend regression
 cd backend && python3 -m pytest -q
@@ -223,4 +270,8 @@ cd backend && python3 -m pytest -q
 - Learnings: `.sisyphus/notepads/p3-engineering-quality-gate/learnings.md`
 - P4 Plan: `.sisyphus/plans/p4-content-productization.md`
 - P5 Plan: `.sisyphus/plans/p5-debug-test-replay.md`
+- P6 Plan: `.sisyphus/plans/p5-closeout-p6-assets.md`
+- P5 Closeout: `P5_CLOSEOUT_REPORT.md`
+- P6 Completion: `P6_COMPLETION_REPORT.md`
+- P6 Readiness: `P6_READINESS.md`
 - AGENTS.md: Project commands and conventions

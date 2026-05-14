@@ -270,15 +270,23 @@ The legacy `/dev/*` endpoints are marked as DEPRECATED and use in-memory state t
 - `POST /debug/sessions/{id}/replay` - Replay with perspective filtering
 - `POST /debug/sessions/{id}/snapshots` - Create state snapshots
 
-### Reserved Media Endpoints
+### Media API v1 (P6)
 
-The following endpoints are reserved for future implementation and currently return HTTP 501 Not Implemented:
+The Media API provides asset generation, caching, and retrieval for game content:
 
-- `POST /media/portraits/generate` - Character portrait generation
-- `POST /media/scenes/generate` - Scene image generation
-- `POST /media/bgm/generate` - Background music generation
+- `POST /media/portraits/generate` - Generate NPC portrait (returns AssetResponse)
+- `POST /media/scenes/generate` - Generate scene background image (returns AssetResponse)
+- `POST /media/bgm/generate` - Generate background music (returns AssetResponse)
+- `GET /media/assets/{asset_id}` - Retrieve generated asset by ID
+- `GET /media/sessions/{session_id}/assets` - List all assets for a session
 
-These endpoints will support AI-generated media content in future releases.
+**Asset Types**: `portrait`, `scene`, `bgm`
+
+**Generation Status**: `pending`, `processing`, `completed`, `failed`
+
+**Mock Provider**: Development and testing use `MockAssetProvider` which returns deterministic placeholder URLs. Set `ASSET_PROVIDER=mock` explicitly, or leave unset for automatic mock selection. Real external providers (DALL-E, Stable Diffusion) are deferred to P7.
+
+**Caching**: Assets are deduplicated by cache key (SHA-256 hash of type + prompt + optional metadata). Identical requests return cached results.
 
 ## LLM Provider Configuration
 
@@ -634,15 +642,15 @@ Plot beat conditions and effects use a whitelist approach (no arbitrary code exe
 
 **Effects**: `add_known_fact`, `advance_quest`, `set_state`, `emit_event`, `change_relationship`, `add_memory`
 
-### P5 Deferred Items
+### P4 Deferred Items
 
-The following features are explicitly out of scope for P4 and deferred to future phases:
+The following features were explicitly out of scope for P4:
 
-- **Media generation**: Portrait, scene, and BGM async generation (`/media/*` endpoints remain 501)
-- **Async job infrastructure**: Celery, RQ, Temporal, or similar
-- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites
-- **Real LLM in tests**: Default tests must not require real OpenAI API
-- **Arbitrary expressions**: Plot beat conditions must use whitelist only
+- **Media generation**: ~~Portrait, scene, and BGM async generation~~ → **Implemented in P6** (Media API v1)
+- **Async job infrastructure**: Celery, RQ, Temporal, or similar → Deferred to P7
+- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites → Deferred to P7+
+- **Real LLM in tests**: Default tests must not require real OpenAI API → Deferred to P7+
+- **Arbitrary expressions**: Plot beat conditions must use whitelist only → Completed
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P4_EXECUTION_STATUS.md`, and `P4_COMPLETION_REPORT.md`.
 
@@ -742,18 +750,81 @@ P5 strengthens existing P2 modules:
 - Severity levels (EXACT_MATCH, PARTIAL_MATCH, SUSPICIOUS)
 - Forbidden pattern support
 
-### P6 Deferred Items
+### P5 Deferred Items
 
-The following features are explicitly out of scope for P5 and deferred to future phases:
+The following features were explicitly out of scope for P5:
 
-- **Media generation**: Portrait, scene, and BGM async generation (`/media/*` endpoints remain 501)
-- **Async job infrastructure**: Celery, RQ, Temporal, or similar
-- **Full AuditStore persistence**: Only model_calls persisted; context_builds, validations, etc. remain in-memory
-- **ForgetCurve background decay**: Memory decay background job
-- **Semantic leak detection**: Embedding-based leak detection
-- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites
+- **Media generation**: ~~Portrait, scene, and BGM async generation~~ → **Implemented in P6** (Media API v1)
+- **Async job infrastructure**: Celery, RQ, Temporal, or similar → Deferred to P7
+- **Full AuditStore persistence**: Only model_calls persisted; context_builds, validations, etc. remain in-memory → Phase 1 completed in P5
+- **ForgetCurve background decay**: Memory decay background job → Deferred to P7+
+- **Semantic leak detection**: Embedding-based leak detection → Deferred to P7+
+- **Engine refactoring**: ReplayEngine or Turn Orchestrator major rewrites → Deferred to P7+
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P5_COMPLETION_REPORT.md`, and `P5_READINESS.md`.
+
+## P6 Media Asset Infrastructure
+
+This phase adds the Media API v1 infrastructure for asset generation, caching, and retrieval, replacing the 501 placeholder endpoints.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P6 quality gate (fast)
+make test-p6-fast
+
+# Run P6 quality gate (full)
+make test-p6
+
+# Run frontend asset component tests
+cd frontend
+npm test -- __tests__/assets
+```
+
+### Media API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/media/portraits/generate` | POST | Generate NPC portrait |
+| `/media/scenes/generate` | POST | Generate scene background |
+| `/media/bgm/generate` | POST | Generate background music |
+| `/media/assets/{asset_id}` | GET | Retrieve asset by ID |
+| `/media/sessions/{session_id}/assets` | GET | List session assets |
+
+### Mock Asset Provider
+
+Development and testing use `MockAssetProvider` which returns deterministic placeholder URLs. The mock provider:
+
+- Returns consistent results for identical inputs
+- Does not require external API keys
+- Enables fast test execution
+- Can be swapped for real providers (DALL-E, Stable Diffusion) in P7
+
+Set `ASSET_PROVIDER=mock` explicitly, or leave unset for automatic mock selection.
+
+### Asset Components
+
+Frontend components for displaying generated assets:
+
+- `NPCPortrait` - Displays NPC portrait with emoji placeholder
+- `SceneBackground` - Displays scene background with gradient placeholder
+- `BGMControl` - BGM play/pause control
+- `AssetFallback` - Unified loading/error/empty state
+
+### P7 Deferred Items
+
+The following features are explicitly out of scope for P6 and deferred to future phases:
+
+- **Real external providers**: DALL-E, Stable Diffusion, audio synthesis
+- **Async job infrastructure**: Celery, RQ, Temporal, or similar
+- **Real rendering**: Currently placeholder URLs only
+- **Game page integration**: Asset components not yet wired to game session
+- **ForgetCurve background decay**: Memory decay background job
+
+For detailed status, see `IMPLEMENTATION_STATUS.md`, `P6_COMPLETION_REPORT.md`, and `P6_READINESS.md`.
 
 ## References
 

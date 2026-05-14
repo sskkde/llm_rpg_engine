@@ -702,3 +702,427 @@ export interface ContentPackImportResponse {
   pack_id?: string;
   pack_name?: string;
 }
+
+// =============================================================================
+// Replay Types
+// =============================================================================
+
+export type ReplayPerspective = 'admin' | 'player' | 'auditor';
+
+export interface ReplayEventResponse {
+  event_id: string;
+  event_type: string;
+  turn_no: number;
+  timestamp: string;
+  actor_id: string;
+  summary: string;
+  visible_to_player: boolean;
+  data: Record<string, unknown>;
+}
+
+export interface ReplayStepResponse {
+  step_no: number;
+  turn_no: number;
+  player_input?: string | null;
+  state_before: Record<string, unknown>;
+  state_after: Record<string, unknown>;
+  events: ReplayEventResponse[];
+  state_deltas: Record<string, unknown>[];
+  duration_ms?: number | null;
+  timestamp: string;
+}
+
+export interface ReplayResultResponse {
+  replay_id: string;
+  session_id: string;
+  start_turn: number;
+  end_turn: number;
+  perspective: string;
+  steps: ReplayStepResponse[];
+  final_state: Record<string, unknown>;
+  total_steps: number;
+  total_events: number;
+  total_state_deltas: number;
+  success: boolean;
+  error_message?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+  replay_duration_ms?: number | null;
+}
+
+export interface SnapshotResponse {
+  snapshot_id: string;
+  session_id: string;
+  turn_no: number;
+  world_state: Record<string, unknown>;
+  player_state: Record<string, unknown>;
+  npc_states: Record<string, Record<string, unknown>>;
+  location_states: Record<string, Record<string, unknown>>;
+  quest_states: Record<string, Record<string, unknown>>;
+  faction_states: Record<string, Record<string, unknown>>;
+  created_at: string;
+  snapshot_type: string;
+}
+
+export interface StateDiffEntryResponse {
+  path: string;
+  operation: string;
+  old_value: unknown;
+  new_value: unknown;
+}
+
+export interface StateDiffResponse {
+  entries: StateDiffEntryResponse[];
+  added_keys: string[];
+  removed_keys: string[];
+  changed_keys: string[];
+}
+
+export interface ReplayReportResponse {
+  session_id: string;
+  snapshot_id?: string | null;
+  from_turn: number;
+  to_turn: number;
+  replayed_event_count: number;
+  deterministic: boolean;
+  llm_calls_made: number;
+  state_diff: StateDiffResponse;
+  warnings: string[];
+  created_at: string;
+}
+
+// =============================================================================
+// Prompt Inspector Types
+// =============================================================================
+
+export interface PromptTemplateUsageEntry {
+  prompt_template_id: string;
+  proposal_type: string;
+  turn_no: number;
+  model_name?: string;
+  confidence?: number;
+}
+
+export interface PromptInspectorModelCallEntry {
+  call_id: string;
+  turn_no: number;
+  prompt_type?: string;
+  model_name?: string;
+  provider?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_estimate?: number;
+  latency_ms?: number;
+  success: boolean;
+  created_at: string;
+}
+
+export interface MemoryAuditResponse {
+  memory_id: string;
+  memory_type: string;
+  owner_id: string;
+  included: boolean;
+  reason: string;
+  relevance_score?: number;
+  importance_score?: number;
+  recency_score?: number;
+  perspective_filter_applied: boolean;
+  forbidden_knowledge_flag: boolean;
+  notes?: string;
+}
+
+export interface PromptInspectorContextBuildEntry {
+  build_id: string;
+  turn_no: number;
+  perspective_type: string;
+  perspective_id: string;
+  included_memories: MemoryAuditResponse[];
+  excluded_memories: MemoryAuditResponse[];
+  total_candidates: number;
+  included_count: number;
+  excluded_count: number;
+  context_token_count: number;
+  build_duration_ms: number;
+}
+
+export interface ValidationCheckResponse {
+  check_id: string;
+  check_type: string;
+  status: string;
+  message?: string;
+  details: Record<string, unknown>;
+}
+
+export interface ProposalInspectorEntry {
+  audit_id: string;
+  turn_no: number;
+  proposal_type: string;
+  prompt_template_id?: string;
+  model_name?: string;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  raw_output_preview: string;
+  raw_output_hash?: string;
+  parsed_proposal?: Record<string, unknown>;
+  parse_success: boolean;
+  repair_attempts: number;
+  repair_strategies_tried: string[];
+  repair_success: boolean;
+  validation_passed: boolean;
+  validation_errors: string[];
+  validation_warnings: string[];
+  rejected: boolean;
+  rejection_reason?: string;
+  fallback_used: boolean;
+  fallback_reason?: string;
+  fallback_strategy?: string;
+  confidence: number;
+  perspective_check_passed: boolean;
+  forbidden_info_detected: string[];
+}
+
+export interface ValidationInspectorEntry {
+  validation_id: string;
+  turn_no: number;
+  validation_target: string;
+  overall_status: string;
+  checks: ValidationCheckResponse[];
+  error_count: number;
+  warning_count: number;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface PromptInspectorAggregates {
+  total_tokens_used: number;
+  total_cost: number;
+  total_latency_ms: number;
+  total_model_calls: number;
+  call_success_rate: number;
+  repair_success_rate: number;
+}
+
+export interface PromptInspectorResponse {
+  session_id: string;
+  total_turns: number;
+  prompt_templates: PromptTemplateUsageEntry[];
+  model_calls: PromptInspectorModelCallEntry[];
+  context_builds: PromptInspectorContextBuildEntry[];
+  proposals: ProposalInspectorEntry[];
+  validations: ValidationInspectorEntry[];
+  aggregates: PromptInspectorAggregates;
+}
+
+// =============================================================================
+// Timeline and NPC Mind Debug Types
+// =============================================================================
+
+export interface TimelineTurn {
+  turn_no: number;
+  timestamp: string;
+  event_type: string;
+  npc_actions?: string[];
+  narration_excerpt?: string;
+}
+
+export interface TimelineResponse {
+  session_id: string;
+  turns: TimelineTurn[];
+  total_turns: number;
+  has_more: boolean;
+}
+
+export interface TurnTimelineDetail {
+  turn_no: number;
+  timestamp: string;
+  event_type: string;
+  player_action?: string;
+  narration: string;
+  npc_actions: string[];
+  events_committed: number;
+  world_time?: {
+    calendar?: string;
+    season?: string;
+    day?: number;
+    period?: string;
+  };
+}
+
+export interface SessionNPC {
+  npc_id: string;
+  name: string;
+  location_id?: string;
+}
+
+export interface SessionNPCsResponse {
+  session_id: string;
+  npcs: SessionNPC[];
+}
+
+export interface NPCBelief {
+  belief_id: string;
+  content: string;
+  confidence: number;
+  source_turn?: number;
+}
+
+export interface NPCMemory {
+  memory_id: string;
+  content: string;
+  strength: number;
+  memory_type: string;
+  created_turn: number;
+}
+
+export interface NPCSecret {
+  secret_id: string;
+  content: string;
+  reveal_willingness: number;
+  known_by: string[];
+}
+
+export interface NPCGoal {
+  goal_id: string;
+  description: string;
+  priority: number;
+  status: string;
+}
+
+export interface NPCForbiddenKnowledge {
+  knowledge_id: string;
+  content: string;
+  source: string;
+}
+
+export interface NPCRelationshipMemory {
+  target_entity_id: string;
+  target_name: string;
+  relationship_type: string;
+  memories: string[];
+  trust_score?: number;
+}
+
+export interface NPCMindResponse {
+  session_id: string;
+  npc_id: string;
+  npc_name: string;
+  viewer_role: 'admin' | 'auditor';
+  beliefs: NPCBelief[];
+  private_memories: NPCMemory[];
+  secrets: NPCSecret[];
+  goals: NPCGoal[];
+  forbidden_knowledge: NPCForbiddenKnowledge[];
+  relationship_memories: NPCRelationshipMemory[];
+}
+
+// =============================================================================
+// Turn Debug and Context Build Audit Types
+// =============================================================================
+
+export interface TurnEventAuditEntry {
+  event_id: string;
+  event_type: string;
+  actor_id?: string;
+  summary?: string;
+}
+
+export interface StateDeltaAuditEntry {
+  delta_id: string;
+  path: string;
+  old_value: unknown;
+  new_value: unknown;
+  operation: string;
+  validated: boolean;
+}
+
+export interface LLMStageEvidence {
+  stage_name: string;
+  enabled: boolean;
+  timeout: number;
+  accepted: boolean;
+  fallback_reason?: string;
+  validation_errors: string[];
+  model_call_id?: string;
+}
+
+export interface ContextHashEntry {
+  build_id: string;
+  context_hash: string;
+}
+
+export interface ModelCallReference {
+  call_id: string;
+  prompt_type?: string;
+  model_name?: string;
+  provider?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_estimate?: number;
+  latency_ms?: number;
+}
+
+export interface TurnDebugResponse {
+  audit_id: string;
+  session_id: string;
+  turn_no: number;
+  transaction_id: string;
+  player_input: string;
+  parsed_intent?: Record<string, unknown>;
+  world_time_before: Record<string, unknown>;
+  world_time_after?: Record<string, unknown>;
+  events: TurnEventAuditEntry[];
+  state_deltas: StateDeltaAuditEntry[];
+  context_build_ids: string[];
+  model_call_ids: string[];
+  validation_ids: string[];
+  status: string;
+  narration_generated: boolean;
+  narration_length: number;
+  turn_duration_ms?: number;
+  started_at: string;
+  completed_at?: string;
+  llm_stages: LLMStageEvidence[];
+  fallback_reasons: string[];
+  prompt_template_ids: string[];
+  context_hashes: ContextHashEntry[];
+  model_call_references: ModelCallReference[];
+}
+
+export interface ContextBuildAuditResponse {
+  build_id: string;
+  session_id: string;
+  turn_no: number;
+  perspective_type: string;
+  perspective_id: string;
+  owner_id?: string;
+  included_memories: MemoryAuditResponse[];
+  excluded_memories: MemoryAuditResponse[];
+  total_candidates: number;
+  included_count: number;
+  excluded_count: number;
+  context_token_count: number;
+  context_char_count: number;
+  build_duration_ms: number;
+  created_at: string;
+}
+
+// =============================================================================
+// Validation Audit Types
+// =============================================================================
+
+export interface ValidationResultAuditResponse {
+  validation_id: string;
+  session_id: string;
+  turn_no: number;
+  validation_target: string;
+  target_id?: string;
+  overall_status: 'passed' | 'failed' | 'warning';
+  checks: ValidationCheckResponse[];
+  error_count: number;
+  warning_count: number;
+  errors: string[];
+  warnings: string[];
+  transaction_id?: string;
+  created_at: string;
+}

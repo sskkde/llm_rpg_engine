@@ -11,6 +11,10 @@ import type {
   AdminItemTemplate, AdminQuestTemplate, AdminEventTemplate, AdminPromptTemplate,
   DebugSessionLogsResponse, DebugSessionStateResponse, DebugModelCallsResponse, DebugErrorsResponse,
   SystemSettings, SystemSettingsUpdateRequest,
+  ReplayResultResponse, SnapshotResponse, ReplayReportResponse, ReplayPerspective,
+  PromptInspectorResponse,
+  TimelineResponse, TurnTimelineDetail, SessionNPCsResponse, NPCMindResponse,
+  TurnDebugResponse, ContextBuildAuditResponse, ValidationResultAuditResponse,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -507,6 +511,136 @@ export async function getDebugModelCalls(): Promise<DebugModelCallsResponse> {
 
 export async function getDebugErrors(): Promise<DebugErrorsResponse> {
   return fetchWithAuth<DebugErrorsResponse>('/debug/errors');
+}
+
+export async function getPromptInspector(
+  sessionId: string,
+  startTurn?: number,
+  endTurn?: number,
+  promptType?: string,
+): Promise<PromptInspectorResponse> {
+  const params = new URLSearchParams();
+  if (startTurn !== undefined) params.append('start_turn', String(startTurn));
+  if (endTurn !== undefined) params.append('end_turn', String(endTurn));
+  if (promptType) params.append('prompt_type', promptType);
+
+  const queryString = params.toString();
+  const url = `/debug/sessions/${sessionId}/prompt-inspector${queryString ? `?${queryString}` : ''}`;
+
+  return fetchWithAuth<PromptInspectorResponse>(url);
+}
+
+// =============================================================================
+// Replay
+// =============================================================================
+
+export interface ReplayRequest {
+  start_turn: number;
+  end_turn: number;
+  perspective: ReplayPerspective;
+  snapshot_id?: string;
+}
+
+export async function replaySession(
+  sessionId: string,
+  params: ReplayRequest
+): Promise<ReplayResultResponse> {
+  const queryParams = new URLSearchParams({
+    start_turn: params.start_turn.toString(),
+    end_turn: params.end_turn.toString(),
+    perspective: params.perspective,
+  });
+  if (params.snapshot_id) {
+    queryParams.append('snapshot_id', params.snapshot_id);
+  }
+  return fetchWithAuth<ReplayResultResponse>(
+    `/debug/sessions/${sessionId}/replay?${queryParams.toString()}`,
+    { method: 'POST' }
+  );
+}
+
+export interface CreateSnapshotRequest {
+  turn_no: number;
+}
+
+export async function createSnapshot(
+  sessionId: string,
+  data: CreateSnapshotRequest
+): Promise<SnapshotResponse> {
+  const queryParams = new URLSearchParams({
+    turn_no: data.turn_no.toString(),
+  });
+  return fetchWithAuth<SnapshotResponse>(
+    `/debug/sessions/${sessionId}/snapshots?${queryParams.toString()}`,
+    { method: 'POST' }
+  );
+}
+
+export interface ReplayReportRequest {
+  start_turn: number;
+  end_turn: number;
+  perspective: ReplayPerspective;
+  snapshot_id?: string;
+}
+
+export async function getReplayReport(
+  sessionId: string,
+  params: ReplayReportRequest
+): Promise<ReplayReportResponse> {
+  const queryParams = new URLSearchParams({
+    start_turn: params.start_turn.toString(),
+    end_turn: params.end_turn.toString(),
+    perspective: params.perspective,
+  });
+  if (params.snapshot_id) {
+    queryParams.append('snapshot_id', params.snapshot_id);
+  }
+  return fetchWithAuth<ReplayReportResponse>(
+    `/debug/sessions/${sessionId}/replay-report?${queryParams.toString()}`,
+    { method: 'POST' }
+  );
+}
+
+export async function getSessionTimeline(
+  sessionId: string,
+  startTurn?: number,
+  endTurn?: number,
+  limit?: number,
+  offset?: number,
+): Promise<TimelineResponse> {
+  const params = new URLSearchParams();
+  if (startTurn !== undefined) params.append('start_turn', String(startTurn));
+  if (endTurn !== undefined) params.append('end_turn', String(endTurn));
+  if (limit !== undefined) params.append('limit', String(limit));
+  if (offset !== undefined) params.append('offset', String(offset));
+  const query = params.toString();
+  return fetchWithAuth<TimelineResponse>(
+    `/debug/sessions/${sessionId}/timeline${query ? `?${query}` : ''}`,
+  );
+}
+
+export async function getTurnTimeline(sessionId: string, turnNo: number): Promise<TurnTimelineDetail> {
+  return fetchWithAuth<TurnTimelineDetail>(`/debug/sessions/${sessionId}/timeline/${turnNo}`);
+}
+
+export async function listSessionNpcs(sessionId: string): Promise<SessionNPCsResponse> {
+  return fetchWithAuth<SessionNPCsResponse>(`/debug/sessions/${sessionId}/npcs`);
+}
+
+export async function getNpcMind(sessionId: string, npcId: string): Promise<NPCMindResponse> {
+  return fetchWithAuth<NPCMindResponse>(`/debug/sessions/${sessionId}/npcs/${npcId}/mind`);
+}
+
+export async function getTurnDebug(sessionId: string, turnNo: number): Promise<TurnDebugResponse> {
+  return fetchWithAuth<TurnDebugResponse>(`/debug/sessions/${sessionId}/turns/${turnNo}`);
+}
+
+export async function getContextBuildAudit(sessionId: string, buildId: string): Promise<ContextBuildAuditResponse> {
+  return fetchWithAuth<ContextBuildAuditResponse>(`/debug/sessions/${sessionId}/context-builds/${buildId}`);
+}
+
+export async function getValidationAudit(sessionId: string, validationId: string): Promise<ValidationResultAuditResponse> {
+  return fetchWithAuth<ValidationResultAuditResponse>(`/debug/sessions/${sessionId}/validations/${validationId}`);
 }
 
 export { APIError };

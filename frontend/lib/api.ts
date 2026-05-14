@@ -15,6 +15,7 @@ import type {
   PromptInspectorResponse,
   TimelineResponse, TurnTimelineDetail, SessionNPCsResponse, NPCMindResponse,
   TurnDebugResponse, ContextBuildAuditResponse, ValidationResultAuditResponse,
+  AssetResponse, PortraitGenerateRequest, SceneGenerateRequest, BGMGenerateRequest,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -657,6 +658,47 @@ export async function getContextBuildAudit(sessionId: string, buildId: string): 
 
 export async function getValidationAudit(sessionId: string, validationId: string): Promise<ValidationResultAuditResponse> {
   return fetchWithAuth<ValidationResultAuditResponse>(`/debug/sessions/${sessionId}/validations/${validationId}`);
+}
+
+// ── Media / Asset API ──────────────────────────────────────
+
+export async function generatePortrait(request: PortraitGenerateRequest): Promise<AssetResponse> {
+  return fetchWithAuth<AssetResponse>('/media/portraits/generate', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function generateSceneAsset(request: SceneGenerateRequest): Promise<AssetResponse> {
+  return fetchWithAuth<AssetResponse>('/media/scenes/generate', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function generateBGM(request: BGMGenerateRequest): Promise<AssetResponse> {
+  return fetchWithAuth<AssetResponse>('/media/bgm/generate', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function getAsset(assetId: string): Promise<AssetResponse> {
+  return fetchWithAuth<AssetResponse>(`/media/assets/${assetId}`);
+}
+
+export async function listSessionAssets(sessionId: string, assetType?: string): Promise<AssetResponse[]> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  return fetchWithAuth<AssetResponse[]>(`/media/sessions/${sessionId}/assets${params}`);
+}
+
+export async function listDebugSessionAssets(sessionId: string, assetType?: string): Promise<AssetResponse[]> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  return fetchWithAuth<AssetResponse[]>(`/debug/sessions/${sessionId}/assets${params}`);
+}
+
+export async function getDebugAsset(assetId: string): Promise<AssetResponse> {
+  return fetchWithAuth<AssetResponse>(`/debug/assets/${assetId}`);
 }
 
 export { APIError };

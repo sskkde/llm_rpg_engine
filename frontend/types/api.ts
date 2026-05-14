@@ -452,6 +452,60 @@ export interface AdminPromptTemplate {
 }
 
 // =============================================================================
+// Media / Asset Types
+// =============================================================================
+
+export enum AssetType {
+  PORTRAIT = 'portrait',
+  SCENE = 'scene',
+  BGM = 'bgm',
+}
+
+export enum AssetGenerationStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  CANCELLED = 'cancelled',
+}
+
+export interface AssetResponse {
+  asset_id: string;
+  asset_type: AssetType;
+  generation_status: AssetGenerationStatus;
+  result_url?: string;
+  error_message?: string;
+  provider?: string;
+  cache_hit: boolean;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PortraitGenerateRequest {
+  npc_id: string;
+  style?: string;
+  expression?: string;
+  session_id?: string;
+  world_id?: string;
+}
+
+export interface SceneGenerateRequest {
+  location_id: string;
+  time_of_day?: string;
+  weather?: string;
+  session_id?: string;
+  world_id?: string;
+}
+
+export interface BGMGenerateRequest {
+  location_id?: string;
+  mood: string;
+  duration_seconds?: number;
+  session_id?: string;
+  world_id?: string;
+}
+
+// =============================================================================
 // Debug Types
 // =============================================================================
 

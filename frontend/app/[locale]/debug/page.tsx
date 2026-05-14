@@ -127,8 +127,8 @@ function DebugContent() {
                 <h3 className="text-lg font-semibold mb-4">{t('sessionLogs')}</h3>
                 <div className="space-y-2 max-h-[400px] overflow-y-auto">
                   {logs.logs.map(log => (
-                    <div key={log.log_id} className="text-sm p-2 bg-slate-50 dark:bg-slate-800 rounded">
-                      <span className="text-slate-500">{log.log_type}</span>: {log.message}
+                    <div key={log.id} className="text-sm p-2 bg-slate-50 dark:bg-slate-800 rounded">
+                      <span className="text-slate-500">{log.event_type}</span>: {log.narrative_text}
                     </div>
                   ))}
                   {logs.logs.length === 0 && <p className="text-slate-500">{t('noLogs')}</p>}
@@ -260,9 +260,9 @@ function DebugContent() {
           <p className="text-sm text-slate-500 mb-2">{t('totalCost', { cost: modelCalls.total_cost.toFixed(4) })}</p>
           <div className="space-y-2 max-h-[300px] overflow-y-auto">
             {modelCalls.calls.map(call => (
-              <div key={call.call_id} className="text-sm p-2 bg-slate-50 dark:bg-slate-800 rounded">
+              <div key={call.id} className="text-sm p-2 bg-slate-50 dark:bg-slate-800 rounded">
                 <p>{call.model_name} - {call.latency_ms}ms</p>
-                <p className="text-slate-500">Tokens: {call.token_usage_input}+{call.token_usage_output}</p>
+                <p className="text-slate-500">Tokens: {call.input_tokens}+{call.output_tokens}</p>
               </div>
             ))}
           </div>
@@ -273,8 +273,8 @@ function DebugContent() {
         <Card className="p-6 mt-6">
           <h3 className="text-lg font-semibold mb-4">{t('recentErrors')}</h3>
           <div className="space-y-2 max-h-[300px] overflow-y-auto">
-            {errors.errors.map(err => (
-              <div key={err.error_id} className="text-sm p-2 bg-red-50 dark:bg-red-900/20 rounded">
+            {errors.errors.map((err, index) => (
+              <div key={index} className="text-sm p-2 bg-red-50 dark:bg-red-900/20 rounded">
                 <p className="font-medium text-red-700 dark:text-red-300">{err.error_type}</p>
                 <p className="text-red-600 dark:text-red-400">{err.message}</p>
               </div>

@@ -456,15 +456,19 @@ export interface AdminPromptTemplate {
 // =============================================================================
 
 export interface DebugSessionLog {
-  log_id: string;
-  session_id: string;
-  timestamp: string;
-  log_type: string;
-  message: string;
+  id: string;
+  turn_no: number;
+  event_type: string;
+  input_text?: string;
+  structured_action?: Record<string, unknown>;
+  result_json?: Record<string, unknown>;
+  narrative_text?: string;
+  occurred_at: string;
 }
 
 export interface DebugSessionLogsResponse {
   session_id: string;
+  total_count: number;
   logs: DebugSessionLog[];
 }
 
@@ -477,30 +481,35 @@ export interface DebugSessionStateResponse {
 }
 
 export interface DebugModelCall {
-  call_id: string;
-  timestamp: string;
+  id: string;
+  session_id: string;
+  turn_no: number;
+  provider?: string;
+  model_name?: string;
+  prompt_type?: string;
   prompt_template_id?: string;
-  model_name: string;
-  latency_ms: number;
-  token_usage_input: number;
-  token_usage_output: number;
-  cost_estimate: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_estimate?: number;
+  latency_ms?: number;
+  created_at: string;
 }
 
 export interface DebugModelCallsResponse {
-  calls: DebugModelCall[];
+  total_count: number;
   total_cost: number;
+  calls: DebugModelCall[];
 }
 
 export interface DebugError {
-  error_id: string;
   timestamp: string;
   error_type: string;
   message: string;
-  session_id?: string;
+  details?: Record<string, unknown>;
 }
 
 export interface DebugErrorsResponse {
+  total_count: number;
   errors: DebugError[];
 }
 
@@ -804,7 +813,7 @@ export interface PromptTemplateUsageEntry {
 }
 
 export interface PromptInspectorModelCallEntry {
-  call_id: string;
+  id: string;
   turn_no: number;
   prompt_type?: string;
   model_name?: string;
@@ -1052,7 +1061,7 @@ export interface ContextHashEntry {
 }
 
 export interface ModelCallReference {
-  call_id: string;
+  id: string;
   prompt_type?: string;
   model_name?: string;
   provider?: string;

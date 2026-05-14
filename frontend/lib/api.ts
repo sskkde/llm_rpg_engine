@@ -513,6 +513,22 @@ export async function getDebugErrors(): Promise<DebugErrorsResponse> {
   return fetchWithAuth<DebugErrorsResponse>('/debug/errors');
 }
 
+// =============================================================================
+// Debug Response Adapters
+// =============================================================================
+
+export function normalizeDebugSessionLogs(response: DebugSessionLogsResponse): DebugSessionLogsResponse {
+  return response;
+}
+
+export function normalizeDebugModelCalls(response: DebugModelCallsResponse): DebugModelCallsResponse {
+  return response;
+}
+
+export function normalizeDebugErrors(response: DebugErrorsResponse): DebugErrorsResponse {
+  return response;
+}
+
 export async function getPromptInspector(
   sessionId: string,
   startTurn?: number,

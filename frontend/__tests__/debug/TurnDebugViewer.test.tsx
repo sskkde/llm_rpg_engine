@@ -39,7 +39,7 @@ const mockTurnDebugResponse = {
   prompt_template_ids: ['prompt-1'],
   context_hashes: [{build_id: 'ctx-1', context_hash: 'abc123'}],
   model_call_references: [
-    {call_id: 'call-1', prompt_type: 'world', model_name: 'gpt-4', provider: 'openai', input_tokens: 100, output_tokens: 50, cost_estimate: 0.001, latency_ms: 1500},
+    {id: 'call-1', prompt_type: 'world', model_name: 'gpt-4', provider: 'openai', input_tokens: 100, output_tokens: 50, cost_estimate: 0.001, latency_ms: 1500},
   ],
 };
 

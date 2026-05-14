@@ -238,10 +238,10 @@ export function PromptInspector({ sessionId }: PromptInspectorProps) {
             <tbody>
               {data.model_calls.map((call) => (
                 <ModelCallRow
-                  key={call.call_id}
+                  key={call.id}
                   call={call}
-                  isExpanded={expandedCall === call.call_id}
-                  onToggle={() => handleRowClick(call.call_id)}
+                  isExpanded={expandedCall === call.id}
+                  onToggle={() => handleRowClick(call.id)}
                   contextBuilds={data.context_builds.filter((cb) => cb.turn_no === call.turn_no)}
                   validations={data.validations.filter((v) => v.turn_no === call.turn_no)}
                   proposals={data.proposals.filter((p) => p.turn_no === call.turn_no)}

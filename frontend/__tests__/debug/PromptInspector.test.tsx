@@ -21,7 +21,7 @@ const mockPromptInspectorResponse = {
   ],
   model_calls: [
     {
-      call_id: 'mc-1',
+      id: 'mc-1',
       turn_no: 1,
       prompt_type: 'narration',
       model_name: 'gpt-4',
@@ -34,7 +34,7 @@ const mockPromptInspectorResponse = {
       created_at: '2024-01-01T00:00:00Z',
     },
     {
-      call_id: 'mc-2',
+      id: 'mc-2',
       turn_no: 2,
       prompt_type: 'npc_decision',
       model_name: 'gpt-4',

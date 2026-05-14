@@ -227,60 +227,6 @@ class TurnAuditLog(BaseModel):
     completed_at: Optional[datetime] = Field(None)
 
 
-class ProposalAuditEntry(BaseModel):
-    """Audit entry for a single LLM proposal (for replay without re-calling LLM)."""
-    audit_id: str = Field(..., description="Unique audit identifier")
-    session_id: str = Field(..., description="Game session ID")
-    turn_no: int = Field(..., description="Turn number")
-    
-    # Proposal identification
-    proposal_type: str = Field(..., description="Proposal type (input_intent, world_tick, scene_event, npc_action, narration)")
-    prompt_template_id: Optional[str] = Field(None, description="Prompt template ID used")
-    model_name: Optional[str] = Field(None, description="Model name used")
-    
-    # LLM call info
-    input_tokens: int = Field(default=0, description="Input tokens")
-    output_tokens: int = Field(default=0, description="Output tokens")
-    latency_ms: int = Field(default=0, description="LLM call latency in ms")
-    
-    # Raw output reference (for replay without LLM)
-    raw_output_preview: str = Field(default="", description="Raw LLM output preview (first 500 chars)")
-    
-    # Parsed proposal (structured data for replay)
-    parsed_proposal: Optional[Dict[str, Any]] = Field(None, description="Parsed proposal data")
-    
-    # Repair trace
-    parse_success: bool = Field(default=True, description="Whether initial parse succeeded")
-    repair_attempts: int = Field(default=0, description="Number of repair attempts")
-    repair_strategies_tried: List[str] = Field(default_factory=list, description="Repair strategies attempted")
-    repair_success: Optional[bool] = Field(None, description="Whether repair succeeded")
-    
-    # Validation
-    validation_passed: bool = Field(default=True, description="Whether validation passed")
-    validation_errors: List[str] = Field(default_factory=list, description="Validation errors")
-    
-    # Rejection
-    rejected: bool = Field(default=False, description="Whether proposal was rejected")
-    rejection_reason: Optional[str] = Field(None, description="Rejection reason")
-    
-    # Fallback
-    fallback_used: bool = Field(default=False, description="Whether fallback was used")
-    fallback_reason: Optional[str] = Field(None, description="Fallback reason")
-    fallback_strategy: Optional[str] = Field(None, description="Fallback strategy used")
-    
-    # Perspective safety
-    perspective_check_passed: bool = Field(default=True, description="Whether perspective check passed")
-    forbidden_info_detected: List[str] = Field(default_factory=list, description="Forbidden info detected")
-    
-    # Confidence
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Proposal confidence")
-    
-    # Committed event IDs (for replay)
-    committed_event_ids: List[str] = Field(default_factory=list, description="Event IDs committed from this proposal")
-    
-    created_at: datetime = Field(default_factory=datetime.now)
-
-
 class ErrorSeverity(str, Enum):
     """Error severity levels."""
     CRITICAL = "critical"
@@ -413,24 +359,6 @@ class AuditStore:
         # DB session for model call persistence
         self._db_session = db_session
     
-    def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
-        """Store a proposal audit entry."""
-        self._proposal_audits[audit.audit_id] = audit
-        
-        if audit.session_id:
-            if audit.session_id not in self._proposal_audits_by_session:
-                self._proposal_audits_by_session[audit.session_id] = []
-            self._proposal_audits_by_session[audit.session_id].append(audit.audit_id)
-        
-        # Index by (session_id, turn_no)
-        if audit.session_id:
-            key = (audit.session_id, audit.turn_no)
-            if key not in self._proposal_audits_by_turn:
-                self._proposal_audits_by_turn[key] = []
-            self._proposal_audits_by_turn[key].append(audit.audit_id)
-        
-        return audit.audit_id
-    
     def get_proposal_audit(self, audit_id: str) -> Optional[ProposalAuditEntry]:
         """Get a proposal audit entry by ID."""
         return self._proposal_audits.get(audit_id)
@@ -538,6 +466,9 @@ class AuditStore:
     def store_proposal_audit(self, audit: ProposalAuditEntry) -> str:
         """Store a proposal audit entry."""
         self._proposal_audits[audit.audit_id] = audit
+        
+        if audit.session_id is None:
+            return audit.audit_id
         
         if audit.session_id not in self._proposal_audits_by_session:
             self._proposal_audits_by_session[audit.session_id] = []

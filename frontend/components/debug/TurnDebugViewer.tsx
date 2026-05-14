@@ -173,7 +173,7 @@ export function TurnDebugViewer({ sessionId, turnNo }: TurnDebugViewerProps) {
       <div key={index} className="p-2 bg-slate-50 dark:bg-slate-700/50 rounded text-sm">
         <div className="flex items-center justify-between mb-1">
           <span className="font-mono text-xs text-slate-600 dark:text-slate-400">
-            {call.call_id}
+            {call.id}
           </span>
           {call.prompt_type && (
             <span className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded text-xs">

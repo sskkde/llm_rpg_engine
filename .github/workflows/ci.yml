@@ -22,9 +22,13 @@ jobs:
 
       - name: Run backend tests
         run: make test-backend
+        env:
+          APP_ENV: testing
 
       - name: Run scenario smoke tests
         run: make test-scenario-smoke
+        env:
+          APP_ENV: testing
 
   frontend-tests:
     runs-on: ubuntu-latest
@@ -97,11 +101,13 @@ jobs:
       - name: Run database migrations
         run: cd backend && alembic upgrade head
         env:
+          APP_ENV: development
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/llm_rpg
 
       - name: Run pgvector tests
         run: make test-pgvector
         env:
+          APP_ENV: development
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/llm_rpg
 
   # ── P4 Content Productization Jobs ───────────────────────────
@@ -121,6 +127,8 @@ jobs:
 
       - name: Run content validation
         run: make test-content
+        env:
+          APP_ENV: testing
 
   admin-content-tests:
     runs-on: ubuntu-latest
@@ -137,6 +145,8 @@ jobs:
 
       - name: Run admin content API tests
         run: make test-admin-content
+        env:
+          APP_ENV: testing
 
   scenario-regression:
     runs-on: ubuntu-latest
@@ -153,6 +163,8 @@ jobs:
 
       - name: Run scenario regression tests
         run: make test-scenario-regression
+        env:
+          APP_ENV: testing
 
   frontend-admin-tests:
     runs-on: ubuntu-latest
@@ -192,3 +204,5 @@ jobs:
 
       - name: Run P5 quality gate (test-p5)
         run: make test-p5
+        env:
+          APP_ENV: testing

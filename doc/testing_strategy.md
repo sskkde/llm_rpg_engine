@@ -108,6 +108,23 @@ These targets will be added in P6 when media generation endpoints are implemente
 
 ---
 
+## P7: Async Asset Generation
+
+### Scope
+- AssetGenerationJobModel, AssetJobRepository, AssetJobService
+- AssetJobRunner, RetryPolicy
+- Provider Factory v2 with env-gated openai_image adapter
+- Media Job API endpoints (7 new) + P6 compat mode (sync/async)
+- Debug Asset Job API endpoints (5 new)
+- Frontend: useAssetJob polling hook, SceneBackground fix, game page integration
+
+### Gates
+- `make test-p7-fast` — Backend job unit + integration tests, frontend asset tests
+- `make test-p7` — test-p7-fast + scenario tests
+- `make test-p6-fast` — Must still pass (no regression)
+
+---
+
 ## Mock Provider Principles
 
 ### MockLLMProvider

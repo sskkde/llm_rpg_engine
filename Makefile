@@ -7,6 +7,7 @@
         test-frontend-static test-frontend-unit test-frontend-combat test-frontend-admin \
         test-prompt-inspector test-replay-report \
         test-assets-unit test-media-api test-asset-debug-api test-frontend-assets test-p6-fast test-p6 \
+        test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs test-scenario-p7 test-p7-fast test-p7 \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -91,6 +92,24 @@ test-p6-fast: ## P6 fast gate: p5-fast + asset unit + media API + asset debug AP
 test-p6: ## P6 quality gate: p6-fast + p4 (full regression)
 	@$(MAKE) test-p6-fast
 	@$(MAKE) test-p4
+
+# === P7: Asset Job Infrastructure ===
+
+test-asset-job-model-unit: ## Run P7 unit tests
+	cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_asset_job_service.py tests/unit/test_asset_job_repository.py tests/unit/test_asset_job_runner.py tests/unit/test_asset_retry_policy.py tests/unit/test_asset_provider_registry.py -q --tb=short
+
+test-asset-jobs-api: ## Run P7 integration tests
+	cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_asset_jobs_api.py tests/integration/test_asset_debug_jobs_api.py tests/integration/test_game_asset_integration_api.py -q --tb=short
+
+test-frontend-asset-jobs: ## Run P7 frontend tests
+	cd frontend && npm test -- __tests__/assets/useAssetJob.test.tsx __tests__/assets/SceneBackground.p7.test.tsx --runInBand --passWithNoTests
+
+test-scenario-p7: ## Run P7 scenario tests
+	cd backend && APP_ENV=testing python3 -m pytest tests/scenario/test_asset_generation_workflow.py -q --tb=short
+
+test-p7-fast: test-p6-fast test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs ## Run P7 fast gate
+
+test-p7: test-p7-fast test-scenario-p7 ## Run P7 full gate
 
 test-scenario-p5: ## Run P5 scenario tests (new scenario types)
 	@cd backend && python3 -m pytest tests/scenario/ -q -m "p5_scenario" --tb=short

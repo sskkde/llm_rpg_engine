@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslations } from 'next-intl';
 import { Card } from '@/components/ui/Card';
 import { Loading } from '@/components/ui/Loading';
@@ -19,7 +19,46 @@ export function AssetDebugViewer({ sessionId }: AssetDebugViewerProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadAssets = useCallback(async () => {
+  useEffect(() => {
+    if (!sessionId.trim()) {
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    async function fetchAssets() {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const result = await listDebugSessionAssets(sessionId);
+        if (!cancelled) {
+          setAssets(result);
+        }
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const status = (err as { status?: number })?.status;
+        if (status === 401 || status === 403) {
+          setError(t('adminRequired'));
+        } else {
+          setError(t('failedToLoad'));
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    fetchAssets();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [sessionId, t]);
+
+  const handleRetry = async () => {
     if (!sessionId.trim()) return;
     setIsLoading(true);
     setError(null);
@@ -36,11 +75,7 @@ export function AssetDebugViewer({ sessionId }: AssetDebugViewerProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [sessionId, t]);
-
-  useEffect(() => {
-    loadAssets();
-  }, [loadAssets]);
+  };
 
   if (!sessionId.trim()) {
     return <DebugEmptyState message={t('emptyState.noSession')} />;
@@ -51,7 +86,7 @@ export function AssetDebugViewer({ sessionId }: AssetDebugViewerProps) {
   }
 
   if (error && assets.length === 0) {
-    return <ErrorMessage message={error} variant="card" onRetry={loadAssets} />;
+    return <ErrorMessage message={error} variant="card" onRetry={handleRetry} />;
   }
 
   if (assets.length === 0) {

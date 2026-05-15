@@ -34,6 +34,11 @@ describe('useAssetJob', () => {
 
     const { result } = renderHook(() => useAssetJob({ jobId: 'job-1' }));
 
+    // setIsPolling is wrapped in setTimeout, need to advance timers
+    act(() => {
+      jest.advanceTimersByTime(0);
+    });
+
     expect(result.current.isPolling).toBe(true);
 
     await waitFor(() => {

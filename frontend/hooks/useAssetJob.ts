@@ -32,8 +32,11 @@ export function useAssetJob({ jobId, pollInterval = POLL_INTERVAL_MS, onComplete
   const onCompletedRef = useRef(onCompleted);
   const onFailedRef = useRef(onFailed);
   
-  onCompletedRef.current = onCompleted;
-  onFailedRef.current = onFailed;
+  // Update refs when callbacks change — must be inside useEffect per React 19 strict mode
+  useEffect(() => {
+    onCompletedRef.current = onCompleted;
+    onFailedRef.current = onFailed;
+  });
 
   const fetchJob = useCallback(async () => {
     if (!jobId) return;
@@ -66,11 +69,13 @@ export function useAssetJob({ jobId, pollInterval = POLL_INTERVAL_MS, onComplete
       return;
     }
 
-    fetchJob();
-
+    const initialTimer = setTimeout(() => {
+      fetchJob();
+    }, 0);
     pollRef.current = setInterval(fetchJob, pollInterval);
 
     return () => {
+      clearTimeout(initialTimer);
       if (pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
@@ -80,11 +85,13 @@ export function useAssetJob({ jobId, pollInterval = POLL_INTERVAL_MS, onComplete
 
   useEffect(() => {
     if (jobId) {
-      setIsPolling(true);
+      const timer = setTimeout(() => setIsPolling(true), 0);
+      return () => {
+        clearTimeout(timer);
+        setIsPolling(false);
+      };
     }
-    return () => {
-      setIsPolling(false);
-    };
+    return () => setIsPolling(false);
   }, [jobId]);
 
   const retry = useCallback(async () => {

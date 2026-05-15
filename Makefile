@@ -6,7 +6,7 @@
         test-backend-unit test-backend-integration \
         test-frontend-static test-frontend-unit test-frontend-combat test-frontend-admin \
         test-prompt-inspector test-replay-report \
-        test-assets-unit test-media-api test-frontend-assets test-p6-fast test-p6 \
+        test-assets-unit test-media-api test-asset-debug-api test-frontend-assets test-p6-fast test-p6 \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -78,10 +78,14 @@ test-media-api: ## Run P6 media API integration tests
 test-frontend-assets: ## Run frontend asset component tests
 	@cd frontend && npm test -- __tests__/assets --runInBand
 
-test-p6-fast: ## P6 fast gate: p5-fast + asset unit + media API + frontend assets
+test-asset-debug-api: ## Run P6 asset debug API integration tests
+	@cd backend && python3 -m pytest tests/integration/test_asset_debug_api.py -q --tb=short
+
+test-p6-fast: ## P6 fast gate: p5-fast + asset unit + media API + asset debug API + frontend assets
 	@$(MAKE) test-p5-fast
 	@$(MAKE) test-assets-unit
 	@$(MAKE) test-media-api
+	@$(MAKE) test-asset-debug-api
 	@$(MAKE) test-frontend-assets
 
 test-p6: ## P6 quality gate: p6-fast + p4 (full regression)

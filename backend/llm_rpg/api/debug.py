@@ -2237,3 +2237,23 @@ def get_asset_debug(
         cache_hit=asset.cache_hit,
         created_at=asset.created_at.isoformat() if hasattr(asset.created_at, 'isoformat') else str(asset.created_at),
     )
+
+
+@router.get(
+    "/assets/session/{session_id}",
+    response_model=List[AssetDebugResponse],
+    summary="List session assets (admin, compatibility path)",
+)
+def list_session_assets_debug_compat(
+    session_id: str,
+    asset_type: Optional[str] = Query(None, description="Filter by asset type"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """List all assets for a session. Admin only. Compatibility path."""
+    return list_session_assets_debug(
+        session_id=session_id,
+        asset_type=asset_type,
+        current_user=current_user,
+        db=db,
+    )

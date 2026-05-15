@@ -24,6 +24,15 @@ class AssetGenerationStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class AssetJobStatus(str, Enum):
+    """Status of an asset generation job (async)."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class AssetGenerationRequest(BaseModel):
     """Request schema for generating a game asset."""
     asset_type: AssetType = Field(..., description="Type of asset to generate")
@@ -56,3 +65,19 @@ class AssetReference(BaseModel):
     asset_type: AssetType
     generation_status: AssetGenerationStatus
     result_url: Optional[str] = None
+
+
+class AssetJobResponse(BaseModel):
+    """Response schema for an asset generation job."""
+    job_id: str = Field(..., description="Public job identifier")
+    asset_id: Optional[str] = Field(None, description="Asset ID if generation completed")
+    asset_type: str = Field(..., description="Type of asset")
+    status: AssetJobStatus = Field(..., description="Job status")
+    provider_name: Optional[str] = Field(None, description="Provider being used")
+    attempt_count: int = Field(0, description="Current attempt count")
+    max_attempts: int = Field(3, description="Maximum attempt count")
+    error_message: Optional[str] = Field(None, description="Error message if failed")
+    last_error_type: Optional[str] = Field(None, description="Last error type")
+    cache_key: Optional[str] = Field(None, description="Cache key if known")
+    created_at: datetime = Field(..., description="When the job was created")
+    updated_at: datetime = Field(..., description="When the job was last updated")

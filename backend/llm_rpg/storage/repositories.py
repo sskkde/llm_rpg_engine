@@ -45,6 +45,7 @@ from .models import (
     FactionModel,
     PlotBeatModel,
     AssetModel,
+    AssetGenerationJobModel,
 )
 
 T = TypeVar("T")
@@ -1231,3 +1232,146 @@ class AssetRepository(BaseRepository):
             self.db.commit()
             self.db.refresh(asset)
         return asset
+
+
+class AssetJobRepository(BaseRepository):
+    """Repository for AssetGenerationJobModel operations."""
+
+    def __init__(self, db: Session):
+        super().__init__(db, AssetGenerationJobModel)
+
+    def create_job(self, data: Dict[str, Any]) -> AssetGenerationJobModel:
+        """Create a new job record."""
+        return self.create(data)
+
+    def get_by_job_id(self, job_id: str) -> Optional[AssetGenerationJobModel]:
+        """Get job by public job_id."""
+        return self.db.query(AssetGenerationJobModel).filter(
+            AssetGenerationJobModel.job_id == job_id
+        ).first()
+
+    def list_by_session(
+        self, session_id: str, asset_type: Optional[str] = None, limit: int = 50
+    ) -> List[AssetGenerationJobModel]:
+        """List jobs for session, filtered by optional asset_type, ordered by created_at desc."""
+        query = self.db.query(AssetGenerationJobModel).filter(
+            AssetGenerationJobModel.session_id == session_id
+        )
+        if asset_type:
+            query = query.filter(AssetGenerationJobModel.asset_type == asset_type)
+        return query.order_by(desc(AssetGenerationJobModel.created_at)).limit(limit).all()
+
+    def claim_next_pending(
+        self, provider_name: Optional[str] = None
+    ) -> Optional[AssetGenerationJobModel]:
+        """Atomic claim: find next pending job (ordered by priority asc, created_at asc),
+        optionally filtered by provider_name. Update status to 'processing'.
+        """
+        query = self.db.query(AssetGenerationJobModel).filter(
+            AssetGenerationJobModel.status == "pending"
+        )
+        if provider_name:
+            query = query.filter(AssetGenerationJobModel.provider_name == provider_name)
+        job = query.order_by(
+            AssetGenerationJobModel.priority.asc(),
+            AssetGenerationJobModel.created_at.asc()
+        ).with_for_update(skip_locked=True).first()
+
+        if job:
+            job.status = "processing"
+            job.started_at = datetime.now()
+            job.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def update_status(
+        self, job_id: str, status: str, **extra_fields
+    ) -> Optional[AssetGenerationJobModel]:
+        """Update job status + optional extra fields (error_message, etc).
+        Sets updated_at automatically.
+        """
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.status = status
+            job.updated_at = datetime.now()
+            for key, value in extra_fields.items():
+                if hasattr(job, key):
+                    setattr(job, key, value)
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def mark_processing(self, job_id: str) -> Optional[AssetGenerationJobModel]:
+        """Set status='processing', started_at=now."""
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.status = "processing"
+            job.started_at = datetime.now()
+            job.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def mark_completed(
+        self, job_id: str, asset_id: str
+    ) -> Optional[AssetGenerationJobModel]:
+        """Set status='completed', completed_at=now, asset_id."""
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.status = "completed"
+            job.asset_id = asset_id
+            job.completed_at = datetime.now()
+            job.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def mark_failed(
+        self,
+        job_id: str,
+        error_message: str,
+        error_type: Optional[str] = None,
+        retry_at: Optional[datetime] = None
+    ) -> Optional[AssetGenerationJobModel]:
+        """Set status='failed' or schedule retry by setting next_retry_at and status='pending'."""
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.error_message = error_message
+            job.last_error_type = error_type
+            job.updated_at = datetime.now()
+
+            if retry_at:
+                job.next_retry_at = retry_at
+                job.status = "pending"
+            else:
+                job.status = "failed"
+
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def schedule_retry(
+        self, job_id: str, next_retry_at: datetime
+    ) -> Optional[AssetGenerationJobModel]:
+        """Increment attempt_count, set next_retry_at, set status back to 'pending'."""
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.attempt_count = (job.attempt_count or 0) + 1
+            job.next_retry_at = next_retry_at
+            job.status = "pending"
+            job.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(job)
+        return job
+
+    def cancel_job(self, job_id: str) -> Optional[AssetGenerationJobModel]:
+        """Set status='cancelled', cancelled_at=now."""
+        job = self.get_by_job_id(job_id)
+        if job:
+            job.status = "cancelled"
+            job.cancelled_at = datetime.now()
+            job.updated_at = datetime.now()
+            self.db.commit()
+            self.db.refresh(job)
+        return job

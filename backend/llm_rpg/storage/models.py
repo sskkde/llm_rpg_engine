@@ -922,3 +922,39 @@ class AssetModel(Base):
         Index("idx_assets_session_type", "session_id", "asset_type"),
         Index("idx_assets_owner", "owner_entity_id", "owner_entity_type"),
     )
+
+
+class AssetGenerationJobModel(Base):
+    """Job queue model for async asset generation.
+
+    Uses STRING IDs only - NO foreign key constraints to game entity tables.
+    This allows jobs to reference entities that may not exist yet or may have been deleted.
+    """
+    __tablename__ = "asset_generation_jobs"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    job_id = Column(String, unique=True, nullable=False, index=True)
+    asset_id = Column(String, nullable=True, index=True)
+    session_id = Column(String, nullable=True, index=True)
+    asset_type = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, index=True, default="pending")
+    provider_name = Column(String, nullable=True, index=True)
+    request_json = Column(JSON, default=dict)
+    cache_key = Column(String, nullable=True, index=True)
+    attempt_count = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=3)
+    priority = Column(Integer, default=100)
+    error_message = Column(Text, nullable=True)
+    last_error_type = Column(String, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index("idx_jobs_cache_key", "cache_key"),
+        Index("idx_jobs_session_status", "session_id", "status"),
+        Index("idx_jobs_status_priority", "status", "priority"),
+    )

@@ -873,7 +873,7 @@ Existing P6 endpoints now support `?mode=sync|async`:
 Frontend polling hook for async job tracking:
 
 ```typescript
-const { job, isPolling, startPolling, stopPolling } = useAssetJob({
+const { job, isLoading, error, isPolling, retry, cancel, refetch } = useAssetJob({
   jobId: "job-123",
   pollInterval: 2000,
   onCompleted: (job) => console.log("Done:", job),

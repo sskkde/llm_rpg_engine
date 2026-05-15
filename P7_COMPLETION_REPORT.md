@@ -237,11 +237,11 @@ Existing P6 endpoints now support `?mode=sync|async`:
 - Polling with configurable interval (default: 2s)
 - Automatic stop on terminal states (completed, failed, cancelled)
 - Callbacks for `onCompleted`, `onFailed`, `onProgress`
-- Manual control: `startPolling()`, `stopPolling()`
+- Manual control: `retry()`, `cancel()`, `refetch()`
 - Stale closure prevention via callback refs
 
 ```typescript
-const { job, isPolling, startPolling, stopPolling } = useAssetJob({
+const { job, isLoading, error, isPolling, retry, cancel, refetch } = useAssetJob({
   jobId: "job-123",
   pollInterval: 2000,
   onCompleted: (job) => console.log("Done:", job),

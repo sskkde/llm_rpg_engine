@@ -16,6 +16,7 @@ import type {
   TimelineResponse, TurnTimelineDetail, SessionNPCsResponse, NPCMindResponse,
   TurnDebugResponse, ContextBuildAuditResponse, ValidationResultAuditResponse,
   AssetResponse, AssetJobResponse, PortraitGenerateRequest, SceneGenerateRequest, BGMGenerateRequest,
+  PortraitJobRequest, SceneJobRequest, BGMJobRequest,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -690,6 +691,44 @@ export async function getAsset(assetId: string): Promise<AssetResponse> {
 export async function listSessionAssets(sessionId: string, assetType?: string): Promise<AssetResponse[]> {
   const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
   return fetchWithAuth<AssetResponse[]>(`/media/sessions/${sessionId}/assets${params}`);
+}
+
+export async function createPortraitJob(request: PortraitJobRequest): Promise<AssetResponse | AssetJobResponse> {
+  return fetchWithAuth<AssetResponse | AssetJobResponse>('/media/jobs/portraits', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function createSceneJob(request: SceneJobRequest): Promise<AssetResponse | AssetJobResponse> {
+  return fetchWithAuth<AssetResponse | AssetJobResponse>('/media/jobs/scenes', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function createBGMJob(request: BGMJobRequest): Promise<AssetResponse | AssetJobResponse> {
+  return fetchWithAuth<AssetResponse | AssetJobResponse>('/media/jobs/bgm', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function getAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/media/jobs/${jobId}`);
+}
+
+export async function listSessionAssetJobs(sessionId: string, assetType?: string): Promise<AssetJobResponse[]> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  return fetchWithAuth<AssetJobResponse[]>(`/media/sessions/${sessionId}/jobs${params}`);
+}
+
+export async function retryAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/media/jobs/${jobId}/retry`, { method: 'POST' });
+}
+
+export async function cancelAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/media/jobs/${jobId}/cancel`, { method: 'POST' });
 }
 
 export async function listDebugSessionAssets(sessionId: string, assetType?: string): Promise<AssetResponse[]> {

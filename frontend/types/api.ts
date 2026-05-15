@@ -469,6 +469,14 @@ export enum AssetGenerationStatus {
   CANCELLED = 'cancelled',
 }
 
+export enum AssetJobStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  CANCELLED = 'cancelled',
+}
+
 export interface AssetResponse {
   asset_id: string;
   asset_type: AssetType;
@@ -494,6 +502,30 @@ export interface AssetJobResponse {
   cache_key?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface PortraitJobRequest {
+  npc_id: string;
+  style?: string;
+  expression?: string;
+  session_id?: string | null;
+  world_id?: string | null;
+}
+
+export interface SceneJobRequest {
+  location_id: string;
+  time_of_day?: string;
+  weather?: string | null;
+  session_id?: string | null;
+  world_id?: string | null;
+}
+
+export interface BGMJobRequest {
+  location_id?: string | null;
+  mood: string;
+  duration_seconds?: number;
+  session_id?: string | null;
+  world_id?: string | null;
 }
 
 export interface PortraitGenerateRequest {

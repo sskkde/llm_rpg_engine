@@ -248,12 +248,13 @@ Added to `messages/en.json` and `messages/zh.json`:
 
 ### Debug Endpoints
 
-**File**: `backend/llm_rpg/api/debug_assets.py`
+**File**: `backend/llm_rpg/api/debug.py`
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/debug/assets/session/{session_id}` | GET | List assets for debug |
-| `/debug/assets/{asset_id}` | GET | Get asset debug info |
+| `/debug/sessions/{session_id}/assets` | GET | List assets for a session (admin) |
+| `/debug/assets/{asset_id}` | GET | Get asset debug info (admin) |
+| `/debug/assets/session/{session_id}` | GET | List assets for a session (compat path) |
 
 ### Frontend Debug Viewer
 
@@ -275,11 +276,19 @@ Added to `messages/en.json` and `messages/zh.json`:
 ### Makefile Targets
 
 ```makefile
+test-asset-debug-api:
+	cd backend && python3 -m pytest tests/integration/test_asset_debug_api.py -q
+
 test-p6-fast:
-	cd backend && python3 -m pytest tests/unit/test_asset_*.py tests/unit/test_cache_key.py -q
+	$(MAKE) test-p5-fast
+	$(MAKE) test-assets-unit
+	$(MAKE) test-media-api
+	$(MAKE) test-asset-debug-api
+	$(MAKE) test-frontend-assets
 
 test-p6:
-	cd backend && python3 -m pytest tests/unit/test_asset_*.py tests/unit/test_cache_key.py tests/integration/test_media_api.py -q
+	$(MAKE) test-p6-fast
+	$(MAKE) test-p4
 ```
 
 ### CI Job
@@ -371,7 +380,7 @@ Added `p6-tests` job to `.github/workflows/ci.yml`:
 - `llm_rpg/core/assets/cache_key.py`
 - `llm_rpg/assets/provider_factory.py`
 - `llm_rpg/services/asset_generation_service.py`
-- `llm_rpg/api/debug_assets.py`
+- `llm_rpg/api/debug.py` (asset debug endpoints)
 - `alembic/versions/013_add_assets.py`
 
 ### Backend (Modified)

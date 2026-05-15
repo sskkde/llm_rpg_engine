@@ -202,16 +202,16 @@ P7 will focus on:
 
 Before declaring P6 complete:
 
-- [ ] `make test-p6-fast` passes
-- [ ] `make test-p5-fast` passes  
-- [ ] `cd frontend && npm run build` passes
-- [ ] `cd frontend && npm run lint` passes
-- [ ] `cd frontend && npx tsc --noEmit` passes
-- [ ] `cd frontend && npm test -- __tests__/assets` passes
-- [ ] P6_COMPLETION_REPORT.md exists
-- [ ] P6_READINESS.md exists
-- [ ] README.md updated with Media API v1 section
-- [ ] IMPLEMENTATION_STATUS.md updated with P6 deliverables
+- [x] `make test-p6-fast` passes
+- [x] `make test-p5-fast` passes  
+- [x] `cd frontend && npm run build` passes
+- [x] `cd frontend && npm run lint` passes
+- [x] `cd frontend && npx tsc --noEmit` passes
+- [x] `cd frontend && npm test -- __tests__/assets` passes
+- [x] P6_COMPLETION_REPORT.md exists
+- [x] P6_READINESS.md exists
+- [x] README.md updated with Media API v1 section
+- [x] IMPLEMENTATION_STATUS.md updated with P6 deliverables
 
 ---
 

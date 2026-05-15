@@ -1,7 +1,7 @@
 """add assets table
 
 Revision ID: 013
-Revises: 011
+Revises: 012
 Create Date: 2026-05-15 10:00:00.000000
 
 """

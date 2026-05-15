@@ -18,6 +18,7 @@ from .interfaces import (
     AssetStatus,
     MockAssetProvider,
 )
+from .openai_image import OpenAIImageProvider
 from .portrait import (
     PortraitGenerator,
     PortraitRequest,
@@ -74,6 +75,7 @@ __all__ = [
     "SFXType",
     # Mock providers
     "MockAssetProvider",
+    "OpenAIImageProvider",
     "MockPortraitGenerator",
     "MockSceneGenerator",
     "MockAudioGenerator",

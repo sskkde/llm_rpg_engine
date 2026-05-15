@@ -18,6 +18,7 @@ export function SceneBackground({ locationId, sessionId, weather, timeOfDay }: S
   const [asset, setAsset] = useState<AssetResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [imageError, setImageError] = useState(false);
 
   useEffect(() => {
     if (!locationId) return;
@@ -28,6 +29,7 @@ export function SceneBackground({ locationId, sessionId, weather, timeOfDay }: S
       setIsLoading(true);
       setError(null);
       setAsset(null);
+      setImageError(false);
       try {
         const result = await generateSceneAsset({
           location_id: locationId,
@@ -70,14 +72,39 @@ export function SceneBackground({ locationId, sessionId, weather, timeOfDay }: S
 
   return (
     <div
-      className={`w-full h-32 rounded-lg bg-gradient-to-br ${gradientClass} flex items-center justify-center`}
+      className={`w-full h-32 rounded-lg bg-gradient-to-br ${gradientClass} flex items-center justify-center relative overflow-hidden`}
       data-location-id={locationId}
       data-session-id={sessionId}
     >
+      {showAsset && !imageError && (
+        <>
+          <div
+            className="absolute inset-0 rounded-lg"
+            style={{
+              backgroundImage: `url(${asset.result_url})`,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+            }}
+          />
+          <img
+            src={asset.result_url}
+            alt=""
+            className="hidden"
+            onError={() => setImageError(true)}
+            onLoad={() => setImageError(false)}
+          />
+        </>
+      )}
+      
       {showLoading && <AssetFallback variant="loading" />}
-      {showError && <span className="text-white/60 text-sm">{t('scenePlaceholder')}</span>}
-      {showAsset && <span className="text-white/60 text-sm">{t('scenePlaceholder')}</span>}
-      {!showLoading && !showError && !showAsset && <span className="text-white/60 text-sm">{t('scenePlaceholder')}</span>}
+      
+      {(showError || (showAsset && imageError)) && (
+        <span className="text-white/60 text-sm relative z-10">{t('scenePlaceholder')}</span>
+      )}
+      
+      {!showLoading && !showError && !showAsset && (
+        <span className="text-white/60 text-sm relative z-10">{t('scenePlaceholder')}</span>
+      )}
     </div>
   );
 }

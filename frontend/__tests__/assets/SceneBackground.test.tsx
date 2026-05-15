@@ -32,7 +32,7 @@ describe('SceneBackground', () => {
     expect(screen.getByText('加载中...')).toBeInTheDocument();
   });
 
-  it('shows gradient fallback when API succeeds', async () => {
+  it('shows background image when API succeeds with completed asset', async () => {
     (api.generateSceneAsset as jest.Mock).mockResolvedValue({
       asset_id: 'asset-1',
       asset_type: 'scene',
@@ -41,9 +41,15 @@ describe('SceneBackground', () => {
       cache_hit: false,
       created_at: '2024-01-01T00:00:00Z',
     });
-    renderWithIntl(<SceneBackground locationId="loc-1" />);
+    const { container } = renderWithIntl(<SceneBackground locationId="loc-1" />);
     await waitFor(() => {
-      expect(screen.getByText('场景背景')).toBeInTheDocument();
+      const backgroundDiv = container.querySelector('[style*="background-image"]');
+      expect(backgroundDiv).toBeInTheDocument();
+      expect(backgroundDiv).toHaveStyle({
+        backgroundImage: 'url(https://example.com/scene.png)',
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+      });
     });
   });
 

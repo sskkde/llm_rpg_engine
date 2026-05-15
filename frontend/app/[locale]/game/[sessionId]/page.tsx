@@ -12,9 +12,24 @@ import { StatePanel } from '@/components/game/StatePanel';
 import { LogPanel } from '@/components/game/LogPanel';
 import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
+import { SceneBackground } from '@/components/assets/SceneBackground';
+import { BGMControl } from '@/components/assets/BGMControl';
 import { useTurnStream } from '@/hooks/useTurnStream';
 import { getSessionSnapshot, getAdventureLog } from '@/lib/api';
 import type { SessionSnapshot, AdventureLogEntry } from '@/types/api';
+
+/**
+ * Extracts time of day from a time string.
+ * Used to determine scene background gradient and lighting.
+ */
+function extractTimeOfDay(currentTime?: string): string | undefined {
+  if (!currentTime) return undefined;
+  const lower = currentTime.toLowerCase();
+  if (lower.includes('night') || lower.includes('evening')) return 'night';
+  if (lower.includes('morning') || lower.includes('dawn')) return 'morning';
+  if (lower.includes('afternoon')) return 'afternoon';
+  return undefined;
+}
 
 export default function GameSessionPage({ params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = use(params);
@@ -113,14 +128,28 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
     );
   }
 
+  const currentLocationId = snapshot?.session_state?.current_location_id;
+  const timeOfDay = extractTimeOfDay(snapshot?.session_state?.current_time);
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
           {t('adventure')}
         </h1>
-        <ConnectionStatus isStreaming={isStreaming} usedFallback={usedFallback} />
+        <div className="flex items-center gap-4">
+          <BGMControl locationId={currentLocationId} sessionId={sessionId} />
+          <ConnectionStatus isStreaming={isStreaming} usedFallback={usedFallback} />
+        </div>
       </div>
+
+      {currentLocationId && (
+        <SceneBackground
+          locationId={currentLocationId}
+          sessionId={sessionId}
+          timeOfDay={timeOfDay}
+        />
+      )}
 
       <TurnErrorPanel error={error} usedFallback={usedFallback} onDismiss={clearError} />
 

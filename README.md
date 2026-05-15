@@ -826,6 +826,91 @@ The following features are explicitly out of scope for P6 and deferred to future
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P6_COMPLETION_REPORT.md`, and `P6_READINESS.md`.
 
+## P7 Media Productization + Async Runtime
+
+This phase extends P6 infrastructure to production-ready async runtime with job tracking, polling hooks, and game page integration.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P7 quality gate (fast)
+make test-p7-fast
+
+# Run P7 quality gate (full)
+make test-p7
+
+# Run P7 scenario tests
+make test-scenario-p7
+
+# Run frontend asset job tests
+cd frontend
+npm test -- __tests__/assets/useAssetJob.test.tsx
+```
+
+### Async Job Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/media/jobs/portraits` | POST | Create portrait generation job |
+| `/media/jobs/scenes` | POST | Create scene generation job |
+| `/media/jobs/bgm` | POST | Create BGM generation job |
+| `/media/jobs/{job_id}` | GET | Get job status |
+| `/media/sessions/{session_id}/jobs` | GET | List session jobs |
+| `/media/jobs/{job_id}/retry` | POST | Retry failed job |
+| `/media/jobs/{job_id}/cancel` | POST | Cancel pending job |
+
+### P6 Compat Mode
+
+Existing P6 endpoints now support `?mode=sync|async`:
+- `POST /media/portraits/generate?mode=async` → Returns `AssetJobResponse` for polling
+- `POST /media/portraits/generate?mode=sync` → Returns `AssetResponse` immediately (default)
+
+### useAssetJob Hook
+
+Frontend polling hook for async job tracking:
+
+```typescript
+const { job, isPolling, startPolling, stopPolling } = useAssetJob({
+  jobId: "job-123",
+  pollInterval: 2000,
+  onCompleted: (job) => console.log("Done:", job),
+  onFailed: (job) => console.log("Failed:", job),
+});
+```
+
+### Game Page Integration
+
+Asset components are now integrated into the game session page:
+- **SceneBackground**: Displays scene background based on current location
+- **BGMControl**: BGM control in game header
+
+### Debug Asset Job Endpoints
+
+Admin-only endpoints for job management:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/debug/assets/jobs` | GET | List all jobs (paginated) |
+| `/debug/assets/jobs/{job_id}` | GET | Get job debug info |
+| `/debug/sessions/{session_id}/asset-jobs` | GET | List session jobs |
+| `/debug/assets/jobs/{job_id}/retry` | POST | Retry failed job |
+| `/debug/assets/jobs/{job_id}/cancel` | POST | Cancel pending job |
+
+### P8 Deferred Items
+
+The following features are explicitly out of scope for P7 and deferred to future phases:
+
+- **Real external providers**: DALL-E/Stable Diffusion with real API calls
+- **Production queue**: Celery/RQ/Temporal with worker processes
+- **NPCPortrait integration**: Game page NPC portrait display
+- **Cost tracking**: Per-session and per-user cost metrics
+- **Rate limiting**: API rate limits for generation endpoints
+
+For detailed status, see `IMPLEMENTATION_STATUS.md`, `P7_COMPLETION_REPORT.md`, and `P7_READINESS.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

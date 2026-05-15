@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-15
-**Current Phase**: P6 Complete — Ready for P7 Planning
+**Last Updated**: 2026-05-16
+**Current Phase**: P7 Complete — Ready for P8 Planning
 
 ---
 
@@ -170,6 +170,39 @@ P6 adds Media API v1 infrastructure for asset generation, caching, and retrieval
 
 ---
 
+## P7 Media Productization + Async Runtime
+
+P7 extends P6 sync/mock infrastructure to production-ready async runtime. For detailed status, see `P7_COMPLETION_REPORT.md`.
+
+| Deliverable | Status |
+|-------------|--------|
+| AssetGenerationJobModel + migration 014 | Completed |
+| AssetJobRepository (10 methods) | Completed |
+| AssetJobService (5 methods, cache-first) | Completed |
+| AssetJobRunner + RetryPolicy | Completed |
+| Provider Factory v2 (openai_image stub) | Completed |
+| Media Job API (7 endpoints + P6 compat) | Completed |
+| Debug Asset Job API (5 endpoints) | Completed |
+| useAssetJob polling hook | Completed |
+| SceneBackground bug fix (line 79) | Completed |
+| Game page asset integration | Completed |
+| P7 Makefile targets + CI job | Completed |
+| P7 scenario tests (16 tests) | Completed |
+| Frontend asset job tests (12 tests) | Completed |
+| Testing strategy documentation | Completed |
+| P7_COMPLETION_REPORT.md | Completed |
+| P7_READINESS.md | Completed |
+
+**P7 Gates**: `make test-p7-fast`, `make test-p7`
+
+**Test Coverage**: 153 tests (79 unit + 46 integration + 16 scenario + 12 frontend)
+
+**Game Integration**: SceneBackground + BGMControl integrated into game session page.
+
+**OpenAI Stub**: Provider factory v2 includes environment-gated `openai_image` adapter; full implementation deferred to P8 (requires production queue).
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -192,40 +225,40 @@ P6 adds Media API v1 infrastructure for asset generation, caching, and retrieval
 
 ---
 
-## P7+ Deferred Items
+## P8+ Deferred Items
 
-The following items are explicitly out of scope for P6 and deferred to future phases:
+The following items are explicitly out of scope for P7 and deferred to future phases:
 
-### Real External Providers (P7 Priority)
-- DALL-E / Stable Diffusion integration for images
-- Audio synthesis for BGM
+### Real External Providers (P8 Priority)
+- DALL-E / Stable Diffusion integration for images with real API calls
+- Audio synthesis for BGM with real generation
 - API key management and cost tracking
 
-### Async Job Infrastructure (P7 Priority)
+### Production Queue Infrastructure (P8 Priority)
 - Celery, RQ, Temporal, or similar
-- Background task queue
-- Job status tracking
-- Retry logic
+- Background worker processes
+- Job monitoring and dead letter queue
 
-### Game Integration (P7 Priority)
+### Game Integration (P8 Priority)
+- ~~Wire SceneBackground to location display~~ — Completed in P7
+- ~~Wire BGMControl to scene transitions~~ — Completed in P7
 - Wire NPCPortrait to game session NPCs
-- Wire SceneBackground to location display
-- Wire BGMControl to scene transitions
 
-### Engine Refactoring (P7+ Priority)
+### Engine Refactoring (P8+ Priority)
 - ReplayEngine rewrite
 - Turn Orchestrator major refactoring
 
-### Test Infrastructure (P7+ Priority)
+### Test Infrastructure (P8+ Priority)
 - Real OpenAI/LLM integration for tests
 - E2E as required CI job (currently optional)
 - Non-debug frontend unit test fixes
 
-### Advanced Features (P7+ Priority)
+### Advanced Features (P8+ Priority)
 - ForgetCurve background decay job
 - Semantic/embedding-based leak detection
 - Full AuditStore read APIs (phase 2)
 - CDN caching for assets
+- Cost tracking and rate limiting
 
 ---
 
@@ -253,6 +286,11 @@ make test-prompt-inspector   # Prompt Inspector API tests
 make test-p6                 # P6 quality gate (full)
 make test-p6-fast            # P6 fast gate
 
+# P7 specific targets
+make test-p7                 # P7 quality gate (full)
+make test-p7-fast            # P7 fast gate
+make test-scenario-p7        # P7 scenario tests
+
 # Frontend asset tests
 cd frontend && npm test -- __tests__/assets
 
@@ -273,4 +311,6 @@ cd backend && python3 -m pytest -q
 - P5 Closeout: `P5_CLOSEOUT_REPORT.md`
 - P6 Completion: `P6_COMPLETION_REPORT.md`
 - P6 Readiness: `P6_READINESS.md`
+- P7 Completion: `P7_COMPLETION_REPORT.md`
+- P7 Readiness: `P7_READINESS.md`
 - AGENTS.md: Project commands and conventions

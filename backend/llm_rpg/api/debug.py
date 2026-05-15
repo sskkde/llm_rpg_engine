@@ -26,7 +26,8 @@ from ..storage.models import (
 from ..storage.repositories import (
     SessionRepository, EventLogRepository, ModelCallLogRepository,
     SessionStateRepository, SessionPlayerStateRepository, SessionNPCStateRepository,
-    SessionInventoryItemRepository, SessionQuestStateRepository
+    SessionInventoryItemRepository, SessionQuestStateRepository,
+    AssetJobRepository, AssetRepository
 )
 from ..core.audit import (
     get_audit_logger, AuditLogger, ContextBuildAudit, ValidationResultAudit,
@@ -2157,6 +2158,31 @@ class AssetDebugResponse(BaseModel):
         from_attributes = True
 
 
+class AssetJobDebugResponse(BaseModel):
+    """Debug response for asset job information."""
+    job_id: str
+    asset_id: Optional[str] = None
+    asset_type: str
+    status: str
+    provider_name: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 3
+    error_message: Optional[str] = None
+    last_error_type: Optional[str] = None
+    cache_key: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class AssetJobDebugListResponse(BaseModel):
+    """Paginated list of asset jobs for debug."""
+    total: int
+    jobs: List[AssetJobDebugResponse]
+
+
 @router.get(
     "/sessions/{session_id}/assets",
     response_model=List[AssetDebugResponse],
@@ -2200,6 +2226,122 @@ def list_session_assets_debug(
         )
         for a in assets
     ]
+
+
+# =============================================================================
+# Asset Job Debug Endpoints
+# =============================================================================
+
+def _get_debug_asset_job_service(db: DBSession):
+    from ..services.asset_job_service import AssetJobService
+    job_repo = AssetJobRepository(db)
+    asset_repo = AssetRepository(db)
+    return AssetJobService(job_repository=job_repo, asset_repository=asset_repo)
+
+
+def _map_job_to_debug_response(job) -> AssetJobDebugResponse:
+    return AssetJobDebugResponse(
+        job_id=job.job_id,
+        asset_id=job.asset_id,
+        asset_type=job.asset_type,
+        status=job.status if isinstance(job.status, str) else job.status.value,
+        provider_name=job.provider_name,
+        attempt_count=job.attempt_count or 0,
+        max_attempts=job.max_attempts or 3,
+        error_message=job.error_message,
+        last_error_type=job.last_error_type,
+        cache_key=job.cache_key,
+        created_at=job.created_at.isoformat() if hasattr(job.created_at, 'isoformat') else str(job.created_at),
+        updated_at=job.updated_at.isoformat() if hasattr(job.updated_at, 'isoformat') else str(job.updated_at),
+    )
+
+
+@router.get(
+    "/assets/jobs",
+    response_model=AssetJobDebugListResponse,
+    summary="List all asset jobs (admin)",
+)
+def list_all_asset_jobs(
+    skip: int = Query(0, ge=0, description="Number of jobs to skip"),
+    limit: int = Query(50, ge=1, le=200, description="Max number of jobs to return"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    job_repo = AssetJobRepository(db)
+    jobs = job_repo.list_all(skip=skip, limit=limit)
+    total = job_repo.count_all()
+    return AssetJobDebugListResponse(
+        total=total,
+        jobs=[_map_job_to_debug_response(j) for j in jobs],
+    )
+
+
+@router.get(
+    "/assets/jobs/{job_id}",
+    response_model=AssetJobDebugResponse,
+    summary="Get asset job detail (admin)",
+)
+def get_asset_job_debug(
+    job_id: str,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    job_repo = AssetJobRepository(db)
+    job = job_repo.get_by_job_id(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found"
+        )
+    return _map_job_to_debug_response(job)
+
+
+@router.post(
+    "/assets/jobs/{job_id}/retry",
+    response_model=AssetJobDebugResponse,
+    summary="Retry failed asset job (admin)",
+)
+def retry_asset_job_debug(
+    job_id: str,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    service = _get_debug_asset_job_service(db)
+    result = service.retry_job(job_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found or not retryable"
+        )
+    job_repo = AssetJobRepository(db)
+    job = job_repo.get_by_job_id(job_id)
+    return _map_job_to_debug_response(job)
+
+
+@router.post(
+    "/assets/jobs/{job_id}/cancel",
+    response_model=AssetJobDebugResponse,
+    summary="Cancel pending asset job (admin)",
+)
+def cancel_asset_job_debug(
+    job_id: str,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    service = _get_debug_asset_job_service(db)
+    result = service.cancel_job(job_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job {job_id} not found or not cancellable"
+        )
+    job_repo = AssetJobRepository(db)
+    job = job_repo.get_by_job_id(job_id)
+    return _map_job_to_debug_response(job)
 
 
 @router.get(
@@ -2250,10 +2392,38 @@ def list_session_assets_debug_compat(
     current_user: UserModel = Depends(require_debug_admin),
     db: DBSession = Depends(get_db),
 ):
-    """List all assets for a session. Admin only. Compatibility path."""
     return list_session_assets_debug(
         session_id=session_id,
         asset_type=asset_type,
         current_user=current_user,
         db=db,
     )
+
+
+@router.get(
+    "/sessions/{session_id}/asset-jobs",
+    response_model=List[AssetJobDebugResponse],
+    summary="List session asset jobs (admin)",
+)
+def list_session_asset_jobs_debug(
+    session_id: str,
+    asset_type: Optional[str] = Query(None, description="Filter by asset type"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    service = _get_debug_asset_job_service(db)
+    jobs = service.list_session_jobs(session_id, asset_type=asset_type)
+    job_repo = AssetJobRepository(db)
+    return [
+        _map_job_to_debug_response(job_repo.get_by_job_id(j.job_id))
+        for j in jobs
+        if job_repo.get_by_job_id(j.job_id) is not None
+    ]

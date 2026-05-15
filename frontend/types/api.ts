@@ -481,6 +481,21 @@ export interface AssetResponse {
   metadata?: Record<string, unknown>;
 }
 
+export interface AssetJobResponse {
+  job_id: string;
+  asset_id?: string | null;
+  asset_type: string;
+  status: string;
+  provider_name?: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  error_message?: string | null;
+  last_error_type?: string | null;
+  cache_key?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PortraitGenerateRequest {
   npc_id: string;
   style?: string;

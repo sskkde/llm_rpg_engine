@@ -411,6 +411,11 @@
     },
     "assetId": "资源ID",
     "assets": "资源",
+    "assetJobs": "资源任务",
+    "jobId": "任务ID",
+    "attempts": "尝试次数",
+    "retry": "重试",
+    "cancel": "取消",
     "provider": "提供商",
     "error": "错误",
     "created": "创建时间",
@@ -569,7 +574,8 @@
       "noTurn": "未加载回合",
       "noValidationId": "请输入验证ID",
       "noContextBuildId": "请输入构建ID",
-      "noAssets": "该会话暂无资源"
+      "noAssets": "该会话暂无资源",
+      "noJobs": "暂无资源任务"
     }
   },
   "Errors": {

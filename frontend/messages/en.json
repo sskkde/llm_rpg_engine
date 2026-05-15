@@ -411,6 +411,11 @@
     },
     "assetId": "Asset ID",
     "assets": "Assets",
+    "assetJobs": "Asset Jobs",
+    "jobId": "Job ID",
+    "attempts": "Attempts",
+    "retry": "Retry",
+    "cancel": "Cancel",
     "provider": "Provider",
     "error": "Error",
     "created": "Created",
@@ -566,9 +571,11 @@
       "noSession": "No session loaded",
       "noContextBuild": "No context build loaded",
       "noValidation": "No validation loaded",
+      "noTurn": "No turn loaded",
       "noValidationId": "Please enter a validation ID",
       "noContextBuildId": "Please enter a build ID",
-      "noAssets": "No assets for this session"
+      "noAssets": "No assets for this session",
+      "noJobs": "No asset jobs"
     }
   },
   "Errors": {

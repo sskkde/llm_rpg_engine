@@ -15,7 +15,7 @@ import type {
   PromptInspectorResponse,
   TimelineResponse, TurnTimelineDetail, SessionNPCsResponse, NPCMindResponse,
   TurnDebugResponse, ContextBuildAuditResponse, ValidationResultAuditResponse,
-  AssetResponse, PortraitGenerateRequest, SceneGenerateRequest, BGMGenerateRequest,
+  AssetResponse, AssetJobResponse, PortraitGenerateRequest, SceneGenerateRequest, BGMGenerateRequest,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -699,6 +699,31 @@ export async function listDebugSessionAssets(sessionId: string, assetType?: stri
 
 export async function getDebugAsset(assetId: string): Promise<AssetResponse> {
   return fetchWithAuth<AssetResponse>(`/debug/assets/${assetId}`);
+}
+
+export async function listDebugAssetJobs(skip?: number, limit?: number): Promise<{ total: number; jobs: AssetJobResponse[] }> {
+  const params = new URLSearchParams();
+  if (skip !== undefined) params.append('skip', String(skip));
+  if (limit !== undefined) params.append('limit', String(limit));
+  const query = params.toString();
+  return fetchWithAuth<{ total: number; jobs: AssetJobResponse[] }>(`/debug/assets/jobs${query ? `?${query}` : ''}`);
+}
+
+export async function getDebugAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/debug/assets/jobs/${jobId}`);
+}
+
+export async function listDebugSessionAssetJobs(sessionId: string, assetType?: string): Promise<AssetJobResponse[]> {
+  const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
+  return fetchWithAuth<AssetJobResponse[]>(`/debug/sessions/${sessionId}/asset-jobs${params}`);
+}
+
+export async function retryDebugAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/debug/assets/jobs/${jobId}/retry`, { method: 'POST' });
+}
+
+export async function cancelDebugAssetJob(jobId: string): Promise<AssetJobResponse> {
+  return fetchWithAuth<AssetJobResponse>(`/debug/assets/jobs/${jobId}/cancel`, { method: 'POST' });
 }
 
 export { APIError };

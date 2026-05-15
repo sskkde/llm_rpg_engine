@@ -562,41 +562,34 @@ class TestDebugEndpoints:
 
 
 class TestMediaEndpoints:
-    """Test media API contract - all should return 501."""
+    """Test media API contract - P6 implements real endpoints requiring auth."""
 
-    def test_media_portraits_generate_returns_501(self, client):
-        """POST /media/portraits/generate should return 501."""
+    def test_media_portraits_generate_requires_auth(self, client):
+        """POST /media/portraits/generate requires authentication."""
         response = client.post("/media/portraits/generate", json={
             "npc_id": "npc_001",
             "style": "anime"
         })
 
-        assert response.status_code == 501
-        data = response.json()
-        assert "detail" in data
-        assert "reserved" in data["detail"].lower() or "not implemented" in data["detail"].lower()
+        assert response.status_code == 401
 
-    def test_media_scenes_generate_returns_501(self, client):
-        """POST /media/scenes/generate should return 501."""
+    def test_media_scenes_generate_requires_auth(self, client):
+        """POST /media/scenes/generate requires authentication."""
         response = client.post("/media/scenes/generate", json={
             "location_id": "loc_001",
             "time_of_day": "day"
         })
 
-        assert response.status_code == 501
-        data = response.json()
-        assert "detail" in data
+        assert response.status_code == 401
 
-    def test_media_bgm_generate_returns_501(self, client):
-        """POST /media/bgm/generate should return 501."""
+    def test_media_bgm_generate_requires_auth(self, client):
+        """POST /media/bgm/generate requires authentication."""
         response = client.post("/media/bgm/generate", json={
             "mood": "peaceful",
             "duration_seconds": 60
         })
 
-        assert response.status_code == 501
-        data = response.json()
-        assert "detail" in data
+        assert response.status_code == 401
 
 
 class TestOpenAPISchema:

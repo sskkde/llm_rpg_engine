@@ -614,6 +614,8 @@ class TestTimelineAPITests:
     def setup_method(self):
         """Reset audit logger before each test."""
         reset_audit_logger()
+        from llm_rpg.storage.database import init_db
+        init_db()
         self.audit_logger = get_audit_logger()
 
     def test_api_get_timeline_endpoint(self, client: TestClient, db_session: Session):

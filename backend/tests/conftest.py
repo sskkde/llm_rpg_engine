@@ -110,6 +110,7 @@ def engine():
     )
 
     from llm_rpg.storage.database import Base
+    import llm_rpg.storage.models  # noqa: F401 — ensure all models register with Base.metadata
     Base.metadata.create_all(bind=engine)
 
     yield engine

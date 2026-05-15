@@ -550,20 +550,22 @@ class TestMediaAPIIntegration:
     def test_media_response_models(self):
         """Test that media API response models are defined."""
         from llm_rpg.api.media import (
-            PortraitGenerateResponse,
-            SceneGenerateResponse,
-            BGMGenerateResponse,
+            PortraitGenerateRequest,
+            SceneGenerateRequest,
+            BGMGenerateRequest,
         )
-        
-        portrait_resp = PortraitGenerateResponse(
-            portrait_id="portrait_001",
-            npc_id="npc_001",
-            image_url="https://example.com/portrait.png",
-            style="anime",
-            status="completed",
+        from llm_rpg.models.assets import AssetResponse, AssetType, AssetGenerationStatus
+
+        portrait_resp = AssetResponse(
+            asset_id="portrait_001",
+            asset_type=AssetType.PORTRAIT,
+            generation_status=AssetGenerationStatus.COMPLETED,
+            result_url="https://example.com/portrait.png",
+            cache_hit=False,
+            created_at="2024-01-01T00:00:00Z",
         )
-        
-        assert portrait_resp.portrait_id == "portrait_001"
+
+        assert portrait_resp.asset_id == "portrait_001"
 
 
 if __name__ == "__main__":

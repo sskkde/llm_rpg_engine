@@ -1375,3 +1375,15 @@ class AssetJobRepository(BaseRepository):
             self.db.commit()
             self.db.refresh(job)
         return job
+
+    def list_all(self, skip: int = 0, limit: int = 50) -> List[AssetGenerationJobModel]:
+        return (
+            self.db.query(AssetGenerationJobModel)
+            .order_by(desc(AssetGenerationJobModel.created_at))
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
+
+    def count_all(self) -> int:
+        return self.db.query(AssetGenerationJobModel).count()

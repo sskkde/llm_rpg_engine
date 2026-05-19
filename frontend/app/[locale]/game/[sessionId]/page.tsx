@@ -14,9 +14,10 @@ import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
 import { SceneBackground } from '@/components/assets/SceneBackground';
 import { BGMControl } from '@/components/assets/BGMControl';
+import { NPCPortrait } from '@/components/assets/NPCPortrait';
 import { useTurnStream } from '@/hooks/useTurnStream';
-import { getSessionSnapshot, getAdventureLog } from '@/lib/api';
-import type { SessionSnapshot, AdventureLogEntry } from '@/types/api';
+import { getSessionSnapshot, getAdventureLog, listSessionNpcs } from '@/lib/api';
+import type { SessionSnapshot, AdventureLogEntry, SessionNPC } from '@/types/api';
 
 /**
  * Extracts time of day from a time string.
@@ -43,6 +44,7 @@ export default function GameSessionPage({ params }: { params: Promise<{ sessionI
 function GameSessionContent({ sessionId }: { sessionId: string }) {
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [npcs, setNpcs] = useState<SessionNPC[]>([]);
   const [logEntries, setLogEntries] = useState<AdventureLogEntry[]>([]);
   const [selectedLogEntryId, setSelectedLogEntryId] = useState<string | null>(null);
   const [recommendedActions, setRecommendedActions] = useState<string[]>([]);
@@ -74,6 +76,12 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
     const load = async () => {
       setIsLoading(true);
       await refreshSnapshot();
+      try {
+        const npcData = await listSessionNpcs(sessionId);
+        setNpcs(npcData.npcs);
+      } catch {
+        // NPC list load failed; empty state handles this gracefully
+      }
       try {
         const entries = await getAdventureLog(sessionId);
         setLogEntries(entries);
@@ -130,6 +138,9 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
 
   const currentLocationId = snapshot?.session_state?.current_location_id;
   const timeOfDay = extractTimeOfDay(snapshot?.session_state?.current_time);
+  const npcsAtLocation = currentLocationId
+    ? npcs.filter((npc) => npc.location_id === currentLocationId)
+    : [];
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -149,6 +160,18 @@ function GameSessionContent({ sessionId }: { sessionId: string }) {
           sessionId={sessionId}
           timeOfDay={timeOfDay}
         />
+      )}
+
+      {npcsAtLocation.length > 0 && (
+        <div data-testid="npc-portraits" className="flex gap-3 mt-3">
+          {npcsAtLocation.map((npc) => (
+            <NPCPortrait
+              key={npc.npc_id}
+              npcId={npc.npc_id}
+              sessionId={sessionId}
+            />
+          ))}
+        </div>
       )}
 
       <TurnErrorPanel error={error} usedFallback={usedFallback} onDismiss={clearError} />

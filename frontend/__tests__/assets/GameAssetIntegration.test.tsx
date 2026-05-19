@@ -6,12 +6,16 @@ const mockGetSessionSnapshot = jest.fn();
 const mockGetAdventureLog = jest.fn();
 const mockGenerateSceneAsset = jest.fn();
 const mockGenerateBGM = jest.fn();
+const mockListSessionNpcs = jest.fn();
+const mockGeneratePortrait = jest.fn();
 
 jest.mock('@/lib/api', () => ({
   getSessionSnapshot: (...args: unknown[]) => mockGetSessionSnapshot(...args),
   getAdventureLog: (...args: unknown[]) => mockGetAdventureLog(...args),
   generateSceneAsset: (...args: unknown[]) => mockGenerateSceneAsset(...args),
   generateBGM: (...args: unknown[]) => mockGenerateBGM(...args),
+  listSessionNpcs: (...args: unknown[]) => mockListSessionNpcs(...args),
+  generatePortrait: (...args: unknown[]) => mockGeneratePortrait(...args),
 }));
 
 jest.mock('@/hooks/useTurnStream', () => ({
@@ -68,14 +72,20 @@ const mockLogEntries = [
   },
 ];
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> due to unknown rendering issue in test environment
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('GameAssetIntegration', () => {
+const mockNpcsAtLocation = [
+  { npc_id: 'npc-elder', name: '长老', location_id: 'loc-mountain-gate' },
+  { npc_id: 'npc-guard', name: '守卫', location_id: 'loc-mountain-gate' },
+];
+
+const mockNpcsEmpty: { npc_id: string; name: string; location_id: string }[] = [];
+
+describe('GameAssetIntegration', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGenerateSceneAsset.mockReturnValue(new Promise(() => {}));
     mockGenerateBGM.mockReturnValue(new Promise(() => {}));
+    mockGeneratePortrait.mockReturnValue(new Promise(() => {}));
+    mockListSessionNpcs.mockResolvedValue({ session_id: 'test-session', npcs: mockNpcsAtLocation });
   });
 
   describe('test_renders_scene_background', () => {
@@ -195,7 +205,7 @@ describe.skip('GameAssetIntegration', () => {
         ...mockSnapshot,
         session_state: {
           ...mockSnapshot.session_state,
-          current_time: '深夜',
+          current_time: 'night',
         },
       });
       mockGetAdventureLog.mockResolvedValue(mockLogEntries);
@@ -216,7 +226,7 @@ describe.skip('GameAssetIntegration', () => {
         ...mockSnapshot,
         session_state: {
           ...mockSnapshot.session_state,
-          current_time: '早晨',
+          current_time: 'morning',
         },
       });
       mockGetAdventureLog.mockResolvedValue(mockLogEntries);
@@ -230,6 +240,49 @@ describe.skip('GameAssetIntegration', () => {
           })
         );
       });
+    });
+  });
+
+  describe('test_npc_portrait_integration', () => {
+    it('renders NPCPortrait for NPCs at current location', async () => {
+      mockGetSessionSnapshot.mockResolvedValue(mockSnapshot);
+      mockGetAdventureLog.mockResolvedValue(mockLogEntries);
+      mockListSessionNpcs.mockResolvedValue({ session_id: 'test-session', npcs: mockNpcsAtLocation });
+
+      const { container } = renderPage();
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="npc-portraits"]')).toBeInTheDocument();
+      });
+
+      await waitFor(() => {
+        expect(mockGeneratePortrait).toHaveBeenCalledWith(
+          expect.objectContaining({
+            npc_id: 'npc-elder',
+            session_id: 'test-session',
+          })
+        );
+        expect(mockGeneratePortrait).toHaveBeenCalledWith(
+          expect.objectContaining({
+            npc_id: 'npc-guard',
+            session_id: 'test-session',
+          })
+        );
+      });
+    });
+
+    it('does not render NPCPortrait when no NPCs at current location', async () => {
+      mockGetSessionSnapshot.mockResolvedValue(mockSnapshot);
+      mockGetAdventureLog.mockResolvedValue(mockLogEntries);
+      mockListSessionNpcs.mockResolvedValue({ session_id: 'test-session', npcs: mockNpcsEmpty });
+
+      const { container } = renderPage();
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-location-id="loc-mountain-gate"]')).toBeInTheDocument();
+      });
+
+      expect(container.querySelector('[data-testid="npc-portraits"]')).not.toBeInTheDocument();
     });
   });
 });

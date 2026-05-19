@@ -11,10 +11,10 @@ describe('SceneBackground P7 - Background Image Rendering', () => {
     jest.clearAllMocks();
   });
 
-  it('test_renders_gradient_on_loading', () => {
+  it('test_renders_gradient_on_loading', async () => {
     (api.generateSceneAsset as jest.Mock).mockReturnValue(new Promise(() => {}));
     renderWithIntl(<SceneBackground locationId="loc-1" />);
-    expect(screen.getByText('加载中...')).toBeInTheDocument();
+    expect(await screen.findByText('加载中...')).toBeInTheDocument();
   });
 
   it('test_renders_placeholder_on_error', async () => {
@@ -48,9 +48,11 @@ describe('SceneBackground P7 - Background Image Rendering', () => {
       });
     });
     
-    const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
-    expect(hiddenImg).toBeInTheDocument();
-    expect(hiddenImg.src).toBe('https://example.com/scene.png');
+    await waitFor(() => {
+      const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
+      expect(hiddenImg).toBeInTheDocument();
+      expect(hiddenImg.src).toBe('https://example.com/scene.png');
+    });
   });
 
   it('test_falls_back_to_gradient_on_image_error', async () => {
@@ -66,20 +68,19 @@ describe('SceneBackground P7 - Background Image Rendering', () => {
     
     const { container } = renderWithIntl(<SceneBackground locationId="loc-1" />);
     
+    let hiddenImg!: HTMLImageElement;
     await waitFor(() => {
-      const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
+      hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
       expect(hiddenImg).toBeInTheDocument();
     });
     
-    const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
     fireEvent.error(hiddenImg);
     
     await waitFor(() => {
       expect(screen.getByText('场景背景')).toBeInTheDocument();
+      const backgroundDiv = container.querySelector('[style*="background-image"]');
+      expect(backgroundDiv).not.toBeInTheDocument();
     });
-    
-    const backgroundDiv = container.querySelector('[style*="background-image"]');
-    expect(backgroundDiv).not.toBeInTheDocument();
   });
 
   it('test_renders_gradient_when_no_asset', async () => {
@@ -95,10 +96,9 @@ describe('SceneBackground P7 - Background Image Rendering', () => {
     
     await waitFor(() => {
       expect(screen.getByText('场景背景')).toBeInTheDocument();
+      const backgroundDiv = container.querySelector('[style*="background-image"]');
+      expect(backgroundDiv).not.toBeInTheDocument();
     });
-    
-    const backgroundDiv = container.querySelector('[style*="background-image"]');
-    expect(backgroundDiv).not.toBeInTheDocument();
   });
 
   it('test_resets_image_error_on_location_change', async () => {
@@ -126,12 +126,12 @@ describe('SceneBackground P7 - Background Image Rendering', () => {
     
     const { container, rerender } = renderWithIntl(<SceneBackground locationId="loc-1" />);
     
+    let hiddenImg!: HTMLImageElement;
     await waitFor(() => {
-      const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
+      hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
       expect(hiddenImg).toBeInTheDocument();
     });
     
-    const hiddenImg = container.querySelector('img.hidden') as HTMLImageElement;
     fireEvent.error(hiddenImg);
     
     await waitFor(() => {

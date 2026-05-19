@@ -9,10 +9,13 @@ jest.mock('@/lib/api', () => ({ generatePortrait: jest.fn() }));
 describe('NPCPortrait', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  it('renders loading state initially', () => {
+  it('renders loading state initially', async () => {
     (api.generatePortrait as jest.Mock).mockReturnValue(new Promise(() => {}));
     renderWithIntl(<NPCPortrait npcId="npc-1" />);
-    expect(screen.getByText('生成中...')).toBeInTheDocument();
+    // isLoading starts false; useEffect sets it true after async render
+    await waitFor(() => {
+      expect(screen.getByText('生成中...')).toBeInTheDocument();
+    });
   });
 
   it('renders fallback on error', async () => {

@@ -22,11 +22,6 @@ const mockJob: AssetJobResponse = {
 describe('useAssetJob', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    jest.useFakeTimers();
-  });
-
-  afterEach(() => {
-    jest.useRealTimers();
   });
 
   it('starts polling when jobId is provided', async () => {
@@ -34,12 +29,9 @@ describe('useAssetJob', () => {
 
     const { result } = renderHook(() => useAssetJob({ jobId: 'job-1' }));
 
-    // setIsPolling is wrapped in setTimeout, need to advance timers
-    act(() => {
-      jest.advanceTimersByTime(0);
+    await waitFor(() => {
+      expect(result.current.isPolling).toBe(true);
     });
-
-    expect(result.current.isPolling).toBe(true);
 
     await waitFor(() => {
       expect(api.getAssetJob).toHaveBeenCalledWith('job-1');
@@ -131,7 +123,9 @@ describe('useAssetJob', () => {
     });
 
     expect(api.cancelAssetJob).toHaveBeenCalledWith('job-1');
-    expect(result.current.isPolling).toBe(false);
+    await waitFor(() => {
+      expect(result.current.isPolling).toBe(false);
+    });
   });
 
   it('stops polling when component unmounts', async () => {
@@ -147,8 +141,8 @@ describe('useAssetJob', () => {
 
     unmount();
 
-    act(() => {
-      jest.advanceTimersByTime(5000);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
     });
 
     expect((api.getAssetJob as jest.Mock).mock.calls.length).toBe(callCountBeforeUnmount);
@@ -157,11 +151,13 @@ describe('useAssetJob', () => {
   it('does not poll when jobId is null', async () => {
     const { result } = renderHook(() => useAssetJob({ jobId: null }));
 
-    expect(result.current.isPolling).toBe(false);
+    await waitFor(() => {
+      expect(result.current.isPolling).toBe(false);
+    });
     expect(api.getAssetJob).not.toHaveBeenCalled();
 
-    act(() => {
-      jest.advanceTimersByTime(5000);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     expect(api.getAssetJob).not.toHaveBeenCalled();
@@ -198,26 +194,18 @@ describe('useAssetJob', () => {
   it('polls at specified interval', async () => {
     (api.getAssetJob as jest.Mock).mockResolvedValue({ ...mockJob, status: 'processing' });
 
-    renderHook(() => useAssetJob({ jobId: 'job-1', pollInterval: 1000 }));
+    renderHook(() => useAssetJob({ jobId: 'job-1', pollInterval: 100 }));
 
     await waitFor(() => {
       expect(api.getAssetJob).toHaveBeenCalledTimes(1);
     });
 
-    act(() => {
-      jest.advanceTimersByTime(1000);
-    });
-
     await waitFor(() => {
       expect(api.getAssetJob).toHaveBeenCalledTimes(2);
-    });
-
-    act(() => {
-      jest.advanceTimersByTime(1000);
-    });
+    }, { timeout: 2000 });
 
     await waitFor(() => {
       expect(api.getAssetJob).toHaveBeenCalledTimes(3);
-    });
+    }, { timeout: 2000 });
   });
 });

@@ -9,15 +9,19 @@ jest.mock('@/lib/api', () => ({ generateBGM: jest.fn() }));
 describe('BGMControl', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  it('shows muted state', () => {
+  it('shows muted state', async () => {
     renderWithIntl(<BGMControl muted />);
-    expect(screen.getByText('已静音')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('已静音')).toBeInTheDocument();
+    });
   });
 
-  it('shows loading state', () => {
+  it('shows loading state', async () => {
     (api.generateBGM as jest.Mock).mockReturnValue(new Promise(() => {}));
     renderWithIntl(<BGMControl />);
-    expect(screen.getByText('生成中...')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('生成中...')).toBeInTheDocument();
+    });
   });
 
   it('shows BGM available when loaded', async () => {
@@ -32,8 +36,11 @@ describe('BGMControl', () => {
     });
   });
 
-  it('does not generate when muted', () => {
+  it('does not generate when muted', async () => {
     renderWithIntl(<BGMControl muted />);
+    await waitFor(() => {
+      expect(screen.getByText('已静音')).toBeInTheDocument();
+    });
     expect(api.generateBGM).not.toHaveBeenCalled();
   });
 
@@ -84,6 +91,8 @@ describe('BGMControl', () => {
     const playButton = screen.getByRole('button', { name: '播放' });
     fireEvent.click(playButton);
     
-    expect(screen.getByRole('button', { name: '暂停' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '暂停' })).toBeInTheDocument();
+    });
   });
 });

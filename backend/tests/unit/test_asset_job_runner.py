@@ -179,11 +179,12 @@ class TestRunNextJob:
             result = await runner.run_next_job()
 
         assert result is not None
-        assert result.status == AssetJobStatus.FAILED
+        assert result.status == AssetJobStatus.DEAD_LETTERED
 
         updated = job_repo.get_by_job_id("pub-1")
-        assert updated.status == "failed"
-        assert "Network down" in updated.error_message
+        assert updated.status == "dead_lettered"
+        assert updated.dead_lettered_at is not None
+        assert updated.dead_letter_reason is not None
 
     @pytest.mark.asyncio
     async def test_run_next_job_with_provider_filter(self, runner, job_repo):

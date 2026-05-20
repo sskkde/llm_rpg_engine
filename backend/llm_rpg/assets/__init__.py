@@ -18,7 +18,7 @@ from .interfaces import (
     AssetStatus,
     MockAssetProvider,
 )
-from .openai_image import OpenAIImageProvider
+from .openai_image import OpenAIImageProvider, OpenAIClientProtocol, RealOpenAIClient, FakeOpenAIClient, ImageResponse
 from .portrait import (
     PortraitGenerator,
     PortraitRequest,
@@ -76,6 +76,10 @@ __all__ = [
     # Mock providers
     "MockAssetProvider",
     "OpenAIImageProvider",
+    "OpenAIClientProtocol",
+    "RealOpenAIClient",
+    "FakeOpenAIClient",
+    "ImageResponse",
     "MockPortraitGenerator",
     "MockSceneGenerator",
     "MockAudioGenerator",

@@ -9,7 +9,7 @@ from llm_rpg.assets.interfaces import (
     AssetStatus,
     MockAssetProvider,
 )
-from llm_rpg.assets.openai_image import OpenAIImageProvider
+from llm_rpg.assets.openai_image import OpenAIImageProvider, FakeOpenAIClient
 
 
 class TestProviderFactory:
@@ -42,37 +42,38 @@ class TestProviderFactory:
 class TestOpenAIImageProvider:
     @pytest.mark.asyncio
     async def test_openai_image_no_key(self, monkeypatch):
-        """Without OPENAI_API_KEY, generate returns FAILED with descriptive error."""
+        """Without OPENAI_API_KEY, FakeOpenAIClient is used and returns COMPLETED."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        provider = OpenAIImageProvider()
+        provider = OpenAIImageProvider(client=FakeOpenAIClient())
         
         request = AssetGenerationRequest(
             asset_type=AssetType.PORTRAIT,
             request_id="test-123",
-        )
-        result = await provider.generate(request)
-        
-        assert result.status == AssetStatus.FAILED
-        assert result.error_message is not None
-        assert "OPENAI_API_KEY not configured" in result.error_message
-        assert result.asset_url is None
-    
-    @pytest.mark.asyncio
-    async def test_openai_image_with_key(self, monkeypatch):
-        """With OPENAI_API_KEY set, generate returns COMPLETED with mock URL."""
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key-12345")
-        provider = OpenAIImageProvider()
-        
-        request = AssetGenerationRequest(
-            asset_type=AssetType.PORTRAIT,
-            request_id="test-456",
+            metadata={"prompt": "test prompt"},
         )
         result = await provider.generate(request)
         
         assert result.status == AssetStatus.COMPLETED
         assert result.asset_url is not None
-        assert "stub" in result.asset_url
-        assert result.asset_id == "openai_test-456"
+        assert result.asset_url.startswith("https://fake-openai.local/")
+        assert result.metadata["api_key_configured"] is False
+    
+    @pytest.mark.asyncio
+    async def test_openai_image_with_key(self, monkeypatch):
+        """With OPENAI_API_KEY set, api_key_configured is True; use FakeClient for test."""
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key-12345")
+        provider = OpenAIImageProvider(client=FakeOpenAIClient())
+        
+        request = AssetGenerationRequest(
+            asset_type=AssetType.PORTRAIT,
+            request_id="test-456",
+            metadata={"prompt": "test prompt"},
+        )
+        result = await provider.generate(request)
+        
+        assert result.status == AssetStatus.COMPLETED
+        assert result.asset_url is not None
+        assert result.asset_id is not None
         assert result.metadata["api_key_configured"] is True
     
     def test_openai_image_supports_portrait(self):

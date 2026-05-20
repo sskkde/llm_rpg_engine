@@ -5,6 +5,7 @@ import os
 from .interfaces import AssetProvider
 from . import MockAssetProvider
 from .openai_image import OpenAIImageProvider
+from .audio_provider import AudioAssetProvider
 
 
 def get_asset_provider(
@@ -28,6 +29,7 @@ def get_asset_provider(
     providers = {
         "mock": MockAssetProvider,
         "openai_image": OpenAIImageProvider,
+        "audio_placeholder": AudioAssetProvider,
     }
     
     provider_class = providers.get(name)

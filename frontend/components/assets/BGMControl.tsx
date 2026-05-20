@@ -6,20 +6,31 @@ import { generateBGM } from '@/lib/api';
 import { AssetFallback } from '@/components/assets/AssetFallback';
 import type { AssetResponse } from '@/types/api';
 
+const BGM_MUTED_KEY = 'llm_rpg_bgm_muted';
+
 interface BGMControlProps {
   locationId?: string;
   sessionId?: string;
   muted?: boolean;
 }
 
-export function BGMControl({ locationId, sessionId, muted = false }: BGMControlProps) {
+export function BGMControl({ locationId, sessionId, muted: mutedProp = false }: BGMControlProps) {
   const t = useTranslations('Assets');
+  const [isMuted, setIsMuted] = useState(() => {
+    if (mutedProp) return true;
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(BGM_MUTED_KEY) === 'true';
+  });
   const [asset, setAsset] = useState<AssetResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(!muted);
+  const [isLoading, setIsLoading] = useState(!isMuted && !mutedProp);
   const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
-    if (muted) return;
+    localStorage.setItem(BGM_MUTED_KEY, String(isMuted));
+  }, [isMuted]);
+
+  useEffect(() => {
+    if (isMuted || mutedProp) return;
     let cancelled = false;
     generateBGM({
       location_id: locationId,
@@ -37,19 +48,39 @@ export function BGMControl({ locationId, sessionId, muted = false }: BGMControlP
     return () => {
       cancelled = true;
     };
-  }, [locationId, sessionId, muted]);
+  }, [locationId, sessionId, isMuted, mutedProp]);
 
-  if (muted) {
+  const toggleMute = () => setIsMuted(!isMuted);
+
+  if (isMuted || mutedProp) {
     return (
       <div className="inline-flex items-center gap-2 text-xs text-slate-400">
         <span>🔇</span>
         <span>{t('bgmMuted')}</span>
+        <button
+          onClick={toggleMute}
+          className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+          aria-label={t('play')}
+        >
+          🔊
+        </button>
       </div>
     );
   }
 
   if (isLoading) {
-    return <AssetFallback variant="loading" message={t('generating')} />;
+    return (
+      <div className="inline-flex items-center gap-2">
+        <AssetFallback variant="loading" message={t('generating')} />
+        <button
+          onClick={toggleMute}
+          className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+          aria-label={t('bgmMuted')}
+        >
+          🔇
+        </button>
+      </div>
+    );
   }
 
   if (asset && asset.generation_status === 'completed') {
@@ -63,6 +94,13 @@ export function BGMControl({ locationId, sessionId, muted = false }: BGMControlP
           {isPlaying ? '⏸' : '▶️'}
         </button>
         <span className="text-slate-600 dark:text-slate-400">{t('bgmAvailable')}</span>
+        <button
+          onClick={toggleMute}
+          className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+          aria-label={t('bgmMuted')}
+        >
+          🔇
+        </button>
       </div>
     );
   }
@@ -71,6 +109,13 @@ export function BGMControl({ locationId, sessionId, muted = false }: BGMControlP
     <div className="inline-flex items-center gap-2 text-xs text-slate-400">
       <span>🎵</span>
       <span>{t('bgmUnavailable')}</span>
+      <button
+        onClick={toggleMute}
+        className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+        aria-label={t('bgmMuted')}
+      >
+        🔇
+      </button>
     </div>
   );
 }

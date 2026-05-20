@@ -7,10 +7,14 @@ import { AssetGenerationStatus } from '@/types/api';
 jest.mock('@/lib/api', () => ({ generateBGM: jest.fn() }));
 
 describe('BGMControl', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    localStorage.clear();
+  });
 
-  it('shows muted state', async () => {
-    renderWithIntl(<BGMControl muted />);
+  it('shows muted state from localStorage', async () => {
+    localStorage.setItem('llm_rpg_bgm_muted', 'true');
+    renderWithIntl(<BGMControl />);
     await waitFor(() => {
       expect(screen.getByText('已静音')).toBeInTheDocument();
     });
@@ -36,12 +40,52 @@ describe('BGMControl', () => {
     });
   });
 
-  it('does not generate when muted', async () => {
-    renderWithIntl(<BGMControl muted />);
+  it('does not generate when muted from localStorage', async () => {
+    localStorage.setItem('llm_rpg_bgm_muted', 'true');
+    renderWithIntl(<BGMControl />);
     await waitFor(() => {
       expect(screen.getByText('已静音')).toBeInTheDocument();
     });
     expect(api.generateBGM).not.toHaveBeenCalled();
+  });
+
+  it('persists mute preference to localStorage', async () => {
+    (api.generateBGM as jest.Mock).mockReturnValue(new Promise(() => {}));
+    renderWithIntl(<BGMControl />);
+    await waitFor(() => {
+      expect(screen.getByText('生成中...')).toBeInTheDocument();
+    });
+
+    const muteButtons = screen.getAllByRole('button');
+    const muteButton = muteButtons.find(b => b.getAttribute('aria-label') === '已静音');
+    if (muteButton) fireEvent.click(muteButton);
+
+    await waitFor(() => {
+      expect(screen.getByText('已静音')).toBeInTheDocument();
+    });
+    expect(localStorage.getItem('llm_rpg_bgm_muted')).toBe('true');
+  });
+
+  it('resumes generation when unmuted', async () => {
+    localStorage.setItem('llm_rpg_bgm_muted', 'true');
+    (api.generateBGM as jest.Mock).mockResolvedValue({
+      asset_id: 'bgm-1', asset_type: 'bgm',
+      generation_status: AssetGenerationStatus.COMPLETED, cache_hit: false,
+      created_at: '2024-01-01T00:00:00Z',
+    });
+    renderWithIntl(<BGMControl />);
+
+    await waitFor(() => {
+      expect(screen.getByText('已静音')).toBeInTheDocument();
+    });
+
+    const unmuteButtons = screen.getAllByRole('button');
+    const unmuteButton = unmuteButtons.find(b => b.getAttribute('aria-label') === '播放');
+    if (unmuteButton) fireEvent.click(unmuteButton);
+
+    await waitFor(() => {
+      expect(api.generateBGM).toHaveBeenCalled();
+    });
   });
 
   it('shows play button when BGM is available', async () => {

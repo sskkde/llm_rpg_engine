@@ -93,18 +93,17 @@ npm test -- __tests__/assets
 
 ---
 
-### 3. NPCPortrait Not Integrated into Game Page
+### 3. NPCPortrait Basic Integration Complete
 
-**Status**: Component exists but not wired to game session
+**Status**: Basic integration complete in P7
 
-**Missing**:
-- Game API NPC endpoint with portrait data
-- NPC data in session snapshot
-- Portrait rendering tied to NPC mentions
+P7 renders `NPCPortrait` for NPCs returned by `listSessionNpcs(sessionId)` and filters them by `current_location_id` on the game session page.
 
-**Mitigation**: Component is testable and functional in isolation
-
-**P8 Scope**: Full NPC portrait integration on game page
+**Deferred to P8+**:
+- Rich portrait context based on NPC mood/state
+- Portrait rendering tied to NPC mentions in narration
+- Portrait pre-generation for major NPCs
+- More advanced asset placement and layout polish
 
 ---
 
@@ -190,7 +189,7 @@ npm test -- __tests__/assets
 
 - **Real external provider integration**: DALL-E, Stable Diffusion, audio synthesis with real API calls
 - **Production queue**: Celery/RQ/Temporal with worker processes
-- **NPCPortrait full integration**: Game page NPC portrait display
+- **NPCPortrait rich integration**: Mood/state-based portrait context, narration-tied rendering, pre-generation for major NPCs
 - **Audio generation (SFX)**: Sound effects beyond BGM
 - **Cost tracking**: Per-session and per-user cost metrics
 - **Rate limiting**: API rate limits for generation endpoints
@@ -217,10 +216,10 @@ P8 will focus on:
    - Job monitoring
    - Dead letter queue
 
-3. **NPCPortrait Game Integration**
-   - Game API NPC endpoint
-   - Portrait rendering in game session
-   - Portrait caching per NPC
+ 3. **NPCPortrait Rich Integration**
+    - Mood/state-based portrait context
+    - Narration-tied portrait rendering
+    - Portrait pre-generation for major NPCs
 
 4. **Cost Tracking and Rate Limiting**
    - Per-session cost metrics

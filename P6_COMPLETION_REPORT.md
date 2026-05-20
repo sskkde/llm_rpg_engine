@@ -358,10 +358,10 @@ Added `p6-tests` job to `.github/workflows/ci.yml`:
 
 **Scope**: Integrate asset components into game session page
 
-**Needed**:
-- Wire NPCPortrait to NPC mentions
-- Wire SceneBackground to location changes
-- Wire BGMControl to scene transitions
+**Needed (completed in P7)**:
+- ~~Wire NPCPortrait to NPC mentions~~ — Basic integration completed in P7
+- ~~Wire SceneBackground to location changes~~ — Completed in P7
+- ~~Wire BGMControl to scene transitions~~ — Completed in P7
 
 ---
 

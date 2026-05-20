@@ -186,10 +186,10 @@ P7 will focus on:
    - Retry logic
    - Dead letter queue
 
-3. **Game Page Asset Integration**
-   - Wire NPCPortrait to game session
-   - Wire SceneBackground to location
-   - Wire BGMControl to scene changes
+ 3. **Game Page Asset Integration**
+    - ~~Wire NPCPortrait to game session~~ — Completed in P7
+    - ~~Wire SceneBackground to location~~ — Completed in P7
+    - ~~Wire BGMControl to scene changes~~ — Completed in P7
 
 4. **Performance Optimization**
    - CDN caching

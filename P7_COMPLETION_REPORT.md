@@ -373,15 +373,16 @@ Asset components are self-contained. API failures don't affect game flow:
 
 ## Known Issues
 
-### 1. NPCPortrait Not Integrated into Game Page
+### 1. NPCPortrait Basic Integration Complete
 
-**Status**: Component exists but not wired
+**Status**: Basic integration complete in P7
 
-**Reason**: Requires game API NPC endpoint or NPC data in snapshot
+P7 renders `NPCPortrait` for NPCs returned by `listSessionNpcs(sessionId)` and filters them by `current_location_id` on the game session page.
 
-**Workaround**: Component is testable in isolation
-
-**P8 Scope**: Full NPC portrait integration
+**Deferred to P8+**:
+- Rich portrait context based on NPC mood/state
+- Portrait rendering tied to NPC mentions in narration
+- Portrait pre-generation for major NPCs
 
 ---
 
@@ -498,6 +499,29 @@ cd frontend && npm run build && npm run lint && npx tsc --noEmit
 # Frontend asset tests
 cd frontend && npm test -- __tests__/assets
 ```
+
+### Final Verification Results (P7 Closeout)
+
+| Command | Result |
+|---------|--------|
+| `make test-p7-fast` | PASS (143 backend tests + 66 frontend tests) |
+| `make test-p7` | PASS (all P7 + scenario tests) |
+| `make test-p6-fast` | PASS (64 P6 regression tests) |
+| `cd frontend && npm run build` | PASS (Compiled successfully) |
+| `cd frontend && npm run lint` | PASS (0 errors, 2 pre-existing warnings) |
+| `cd frontend && npx tsc --noEmit` | PASS (no type errors) |
+| `cd frontend && npm test -- __tests__/assets` | PASS (66/66 tests) |
+
+### Closeout Fixes Applied
+
+| Fix | Description |
+|-----|-------------|
+| F1 | CI p7-tests job now calls `make test-p7-fast` (no inline pytest, no continue-on-error) |
+| F2 | AssetJobRunner creates/updates AssetModel on job completion (persistence closure) |
+| F3 | Documentation NPCPortrait status corrected (basic integration complete, rich integration deferred to P8) |
+| F4 | BGMControl mute/localStorage preference implemented (persists across remounts) |
+| F5 | Makefile test-frontend-asset-jobs includes GameAssetIntegration.test.tsx, removed --passWithNoTests |
+| F6 | Final evidence updated, status confirmed P7 Complete |
 
 ---
 

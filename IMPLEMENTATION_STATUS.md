@@ -242,7 +242,8 @@ The following items are explicitly out of scope for P7 and deferred to future ph
 ### Game Integration (P8 Priority)
 - ~~Wire SceneBackground to location display~~ — Completed in P7
 - ~~Wire BGMControl to scene transitions~~ — Completed in P7
-- Wire NPCPortrait to game session NPCs
+- ~~Wire NPCPortrait to game session NPCs~~ — Basic integration completed in P7 (renders NPCPortrait for NPCs at current location)
+- NPCPortrait rich integration: mood/state context, narration-tied rendering, pre-generation for major NPCs
 
 ### Engine Refactoring (P8+ Priority)
 - ReplayEngine rewrite

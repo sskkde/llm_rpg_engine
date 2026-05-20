@@ -8,6 +8,7 @@
         test-prompt-inspector test-replay-report \
         test-assets-unit test-media-api test-asset-debug-api test-frontend-assets test-p6-fast test-p6 \
         test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs test-scenario-p7 test-p7-fast test-p7 \
+        test-asset-provider-p8 test-asset-queue-p8 test-asset-cost-rate-p8 test-admin-audit-p8 test-frontend-p8-assets test-scenario-p8 test-p8-fast test-p8 \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -110,6 +111,54 @@ test-scenario-p7: ## Run P7 scenario tests
 test-p7-fast: test-p6-fast test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs ## Run P7 fast gate
 
 test-p7: test-p7-fast test-scenario-p7 ## Run P7 full gate
+
+# === P8: Production Asset Runtime ===
+
+test-asset-provider-p8:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_asset_provider_registry_p8.py \
+		tests/unit/test_openai_image_provider_p8.py \
+		tests/unit/test_audio_provider_p8.py \
+		tests/unit/test_provider_errors.py \
+		-q --tb=short
+
+test-asset-queue-p8:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_asset_queue_backend.py \
+		tests/unit/test_asset_job_lease.py \
+		tests/unit/test_asset_worker_cli.py \
+		-q --tb=short
+
+test-asset-cost-rate-p8:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_asset_usage_service.py \
+		tests/unit/test_asset_rate_limit.py \
+		tests/integration/test_asset_rate_limit_api.py \
+		tests/integration/test_asset_usage_api.py \
+		-q --tb=short
+
+test-admin-audit-p8:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/integration/test_admin_audit_api.py \
+		-q --tb=short
+
+test-frontend-p8-assets:
+	cd frontend && npm test -- \
+		__tests__/assets/NPCPortrait.p8.test.tsx \
+		__tests__/debug/AssetQueueViewer.test.tsx \
+		__tests__/debug/AssetUsageViewer.test.tsx \
+		__tests__/debug/ProviderHealthViewer.test.tsx \
+		__tests__/debug/RateLimitViewer.test.tsx \
+		--runInBand
+
+test-scenario-p8:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/scenario/test_p8_asset_runtime.py \
+		-q --tb=short
+
+test-p8-fast: test-p7-fast test-asset-provider-p8 test-asset-queue-p8 test-asset-cost-rate-p8 test-admin-audit-p8 test-frontend-p8-assets ## Run P8 fast gate
+
+test-p8: test-p8-fast test-scenario-p8 ## Run P8 full gate
 
 test-scenario-p5: ## Run P5 scenario tests (new scenario types)
 	@cd backend && python3 -m pytest tests/scenario/ -q -m "p5_scenario" --tb=short

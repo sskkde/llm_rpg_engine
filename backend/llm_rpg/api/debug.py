@@ -2170,6 +2170,13 @@ class AssetJobDebugResponse(BaseModel):
     error_message: Optional[str] = None
     last_error_type: Optional[str] = None
     cache_key: Optional[str] = None
+    lease_owner: Optional[str] = None
+    lease_expires_at: Optional[str] = None
+    heartbeat_at: Optional[str] = None
+    dead_lettered_at: Optional[str] = None
+    dead_letter_reason: Optional[str] = None
+    estimated_cost_usd: Optional[float] = None
+    actual_cost_usd: Optional[float] = None
     created_at: str
     updated_at: str
 
@@ -2240,6 +2247,11 @@ def _get_debug_asset_job_service(db: DBSession):
 
 
 def _map_job_to_debug_response(job) -> AssetJobDebugResponse:
+    def _fmt(val):
+        if val is None:
+            return None
+        return val.isoformat() if hasattr(val, 'isoformat') else str(val)
+
     return AssetJobDebugResponse(
         job_id=job.job_id,
         asset_id=job.asset_id,
@@ -2251,6 +2263,13 @@ def _map_job_to_debug_response(job) -> AssetJobDebugResponse:
         error_message=job.error_message,
         last_error_type=job.last_error_type,
         cache_key=job.cache_key,
+        lease_owner=job.lease_owner,
+        lease_expires_at=_fmt(job.lease_expires_at),
+        heartbeat_at=_fmt(job.heartbeat_at),
+        dead_lettered_at=_fmt(job.dead_lettered_at),
+        dead_letter_reason=job.dead_letter_reason,
+        estimated_cost_usd=job.estimated_cost_usd,
+        actual_cost_usd=job.actual_cost_usd,
         created_at=job.created_at.isoformat() if hasattr(job.created_at, 'isoformat') else str(job.created_at),
         updated_at=job.updated_at.isoformat() if hasattr(job.updated_at, 'isoformat') else str(job.updated_at),
     )
@@ -2345,43 +2364,6 @@ def cancel_asset_job_debug(
 
 
 @router.get(
-    "/assets/{asset_id}",
-    response_model=AssetDebugResponse,
-    summary="Get asset detail (admin)",
-)
-def get_asset_debug(
-    asset_id: str,
-    current_user: UserModel = Depends(require_debug_admin),
-    db: DBSession = Depends(get_db),
-):
-    """Get detailed asset info. Admin only."""
-    require_admin_role(current_user)
-
-    from llm_rpg.storage.repositories import AssetRepository
-    from llm_rpg.services.asset_generation_service import AssetGenerationService
-
-    service = AssetGenerationService(AssetRepository(db))
-    asset = service.get_asset(asset_id)
-
-    if asset is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Asset {asset_id} not found"
-        )
-
-    return AssetDebugResponse(
-        asset_id=asset.asset_id,
-        asset_type=asset.asset_type.value if hasattr(asset.asset_type, 'value') else asset.asset_type,
-        generation_status=asset.generation_status.value if hasattr(asset.generation_status, 'value') else asset.generation_status,
-        result_url=asset.result_url,
-        error_message=asset.error_message,
-        provider=asset.provider,
-        cache_hit=asset.cache_hit,
-        created_at=asset.created_at.isoformat() if hasattr(asset.created_at, 'isoformat') else str(asset.created_at),
-    )
-
-
-@router.get(
     "/assets/session/{session_id}",
     response_model=List[AssetDebugResponse],
     summary="List session assets (admin, compatibility path)",
@@ -2427,3 +2409,375 @@ def list_session_asset_jobs_debug(
         for j in jobs
         if job_repo.get_by_job_id(j.job_id) is not None
     ]
+
+
+@router.get(
+    "/assets/jobs/dead-lettered",
+    response_model=AssetJobDebugListResponse,
+    summary="List dead-lettered asset jobs (admin)",
+)
+def list_dead_lettered_jobs(
+    skip: int = Query(0, ge=0, description="Number of jobs to skip"),
+    limit: int = Query(50, ge=1, le=200, description="Max number of jobs to return"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    job_repo = AssetJobRepository(db)
+    jobs = job_repo.list_dead_lettered(limit=limit, offset=skip)
+    from ..storage.models import AssetGenerationJobModel
+    total = job_repo.db.query(AssetGenerationJobModel).filter(
+        AssetGenerationJobModel.status == "dead_lettered"
+    ).count()
+    return AssetJobDebugListResponse(
+        total=total,
+        jobs=[_map_job_to_debug_response(j) for j in jobs],
+    )
+
+
+# =============================================================================
+# Asset Usage Tracking Endpoints
+# =============================================================================
+
+class UsageLogResponse(BaseModel):
+    """Response model for a single usage log entry."""
+    usage_id: str
+    job_id: Optional[str] = None
+    asset_id: Optional[str] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    asset_type: Optional[str] = None
+    operation: Optional[str] = None
+    input_units: Optional[float] = None
+    output_units: Optional[float] = None
+    estimated_cost_usd: Optional[float] = None
+    actual_cost_usd: Optional[float] = None
+    currency: str = "USD"
+    status: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class UsageListResponse(BaseModel):
+    """Paginated list of usage logs."""
+    total: int
+    items: List[UsageLogResponse]
+
+
+class UsageSummaryResponse(BaseModel):
+    """Aggregated cost summary."""
+    total_estimated: float
+    total_actual: float
+    count: int
+
+
+class ProviderCapabilityResponse(BaseModel):
+    """Provider capability info for API response."""
+    provider_name: str
+    supported_asset_types: List[str]
+    enabled: bool = True
+    requires_api_key: bool = False
+    configured: bool = False
+    supports_async: bool = True
+    supports_cancel: bool = False
+    supports_cost_estimate: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class ProviderListResponse(BaseModel):
+    """List of provider capabilities."""
+    providers: List[ProviderCapabilityResponse]
+
+
+class ProviderHealthResponse(BaseModel):
+    """Health check result for a provider."""
+    provider_name: str
+    configured: bool
+    enabled: bool
+    last_error: Optional[str] = None
+
+
+def _get_usage_service(db: DBSession):
+    from ..services.asset_usage_service import AssetUsageService
+    from ..storage.repositories import AssetUsageLogRepository
+    usage_repo = AssetUsageLogRepository(db)
+    job_repo = AssetJobRepository(db)
+    asset_repo = AssetRepository(db)
+    return AssetUsageService(
+        usage_log_repository=usage_repo,
+        asset_job_repository=job_repo,
+        asset_repository=asset_repo,
+    )
+
+
+def _get_provider_registry():
+    from ..assets.provider_registry import ProviderRegistry
+    return ProviderRegistry()
+
+
+@router.get(
+    "/assets/usage",
+    response_model=UsageListResponse,
+    summary="List asset usage logs (admin)",
+)
+def list_asset_usage(
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(50, ge=1, le=200, description="Max records to return"),
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    provider_name: Optional[str] = Query(None, description="Filter by provider name"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    service = _get_usage_service(db)
+    result = service.list_all_usage(
+        limit=limit,
+        offset=skip,
+        session_id=session_id,
+        user_id=user_id,
+        provider_name=provider_name,
+    )
+    return UsageListResponse(
+        total=result["total"],
+        items=[UsageLogResponse(**item) for item in result["items"]],
+    )
+
+
+@router.get(
+    "/assets/usage/summary",
+    response_model=UsageSummaryResponse,
+    summary="Get cost summary (admin)",
+)
+def get_usage_summary(
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    provider_name: Optional[str] = Query(None, description="Filter by provider name"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    service = _get_usage_service(db)
+    result = service.get_cost_summary(
+        session_id=session_id,
+        user_id=user_id,
+        provider_name=provider_name,
+    )
+    return UsageSummaryResponse(
+        total_estimated=result["total_estimated"],
+        total_actual=result["total_actual"],
+        count=result["count"],
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/asset-usage",
+    response_model=UsageListResponse,
+    summary="Get session asset usage (admin)",
+)
+def get_session_asset_usage(
+    session_id: str,
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(50, ge=1, le=200, description="Max records to return"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    service = _get_usage_service(db)
+    items = service.get_session_usage(session_id, limit=limit, offset=skip)
+    from ..storage.repositories import AssetUsageLogRepository
+    from ..storage.models import AssetUsageLogModel
+    usage_repo = AssetUsageLogRepository(db)
+    total = usage_repo.db.query(AssetUsageLogModel).filter(
+        AssetUsageLogModel.session_id == session_id
+    ).count()
+    return UsageListResponse(
+        total=total,
+        items=[UsageLogResponse(**item) for item in items],
+    )
+
+
+@router.get(
+    "/assets/providers",
+    response_model=ProviderListResponse,
+    summary="List asset providers (admin)",
+)
+def list_asset_providers(
+    current_user: UserModel = Depends(require_debug_admin),
+):
+    require_admin_role(current_user)
+    registry = _get_provider_registry()
+    providers = registry.list_providers()
+    return ProviderListResponse(
+        providers=[
+            ProviderCapabilityResponse(
+                provider_name=cap.provider_name,
+                supported_asset_types=cap.supported_asset_types,
+                enabled=cap.enabled,
+                requires_api_key=cap.requires_api_key,
+                configured=cap.configured,
+                supports_async=cap.supports_async,
+                supports_cancel=cap.supports_cancel,
+                supports_cost_estimate=cap.supports_cost_estimate,
+            )
+            for cap in providers
+        ]
+    )
+
+
+@router.get(
+    "/assets/providers/{provider_name}/health",
+    response_model=ProviderHealthResponse,
+    summary="Get provider health (admin)",
+)
+def get_provider_health(
+    provider_name: str,
+    current_user: UserModel = Depends(require_debug_admin),
+):
+    require_admin_role(current_user)
+    registry = _get_provider_registry()
+    health = registry.check_provider_health(provider_name)
+    return ProviderHealthResponse(
+        provider_name=provider_name,
+        configured=health.get("configured", False),
+        enabled=health.get("enabled", False),
+        last_error=health.get("last_error"),
+    )
+
+
+class RateLimitEventResponse(BaseModel):
+    """Response model for rate limit events."""
+    event_id: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    bucket_key: Optional[str] = None
+    limit_type: Optional[str] = None
+    allowed: Optional[bool] = None
+    limit_value: Optional[int] = None
+    current_value: Optional[int] = None
+    reset_at: Optional[str] = None
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+class RateLimitEventListResponse(BaseModel):
+    """Paginated list of rate limit events."""
+    total: int
+    events: List[RateLimitEventResponse]
+
+
+@router.get(
+    "/assets/rate-limit-events",
+    response_model=RateLimitEventListResponse,
+    summary="List rate limit events (admin)",
+)
+def list_rate_limit_events(
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    provider_name: Optional[str] = Query(None, description="Filter by provider name"),
+    limit: int = Query(50, ge=1, le=200, description="Max results"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """List rate limit events with pagination and filtering. Admin only."""
+    require_admin_role(current_user)
+    
+    from llm_rpg.storage.repositories import AssetRateLimitEventRepository
+    from llm_rpg.storage.models import AssetRateLimitEventModel
+    
+    repo = AssetRateLimitEventRepository(db)
+    query = db.query(AssetRateLimitEventModel)
+    
+    if user_id:
+        query = query.filter(AssetRateLimitEventModel.user_id == user_id)
+    if session_id:
+        query = query.filter(AssetRateLimitEventModel.session_id == session_id)
+    if provider_name:
+        query = query.filter(AssetRateLimitEventModel.provider_name == provider_name)
+    
+    total = query.count()
+    events = (
+        query
+        .order_by(desc(AssetRateLimitEventModel.created_at))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    
+    return RateLimitEventListResponse(
+        total=total,
+        events=[
+            RateLimitEventResponse(
+                event_id=e.event_id,
+                user_id=e.user_id,
+                session_id=e.session_id,
+                provider_name=e.provider_name,
+                bucket_key=e.bucket_key,
+                limit_type=e.limit_type,
+                allowed=e.allowed,
+                limit_value=e.limit_value,
+                current_value=e.current_value,
+                reset_at=e.reset_at.isoformat() if e.reset_at else None,
+                created_at=e.created_at.isoformat() if e.created_at else str(e.created_at),
+            )
+            for e in events
+        ],
+    )
+
+
+# =============================================================================
+# Asset Detail Route (must be last to avoid conflicting with static paths)
+# =============================================================================
+
+@router.get(
+    "/assets/{asset_id}",
+    response_model=AssetDebugResponse,
+    summary="Get asset detail (admin)",
+)
+def get_asset_debug(
+    asset_id: str,
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """Get detailed asset info. Admin only."""
+    require_admin_role(current_user)
+
+    from llm_rpg.storage.repositories import AssetRepository
+    from llm_rpg.services.asset_generation_service import AssetGenerationService
+
+    service = AssetGenerationService(AssetRepository(db))
+    asset = service.get_asset(asset_id)
+
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Asset {asset_id} not found"
+        )
+
+    return AssetDebugResponse(
+        asset_id=asset.asset_id,
+        asset_type=asset.asset_type.value if hasattr(asset.asset_type, 'value') else asset.asset_type,
+        generation_status=asset.generation_status.value if hasattr(asset.generation_status, 'value') else asset.generation_status,
+        result_url=asset.result_url,
+        error_message=asset.error_message,
+        provider=asset.provider,
+        cache_hit=asset.cache_hit,
+        created_at=asset.created_at.isoformat() if hasattr(asset.created_at, 'isoformat') else str(asset.created_at),
+    )

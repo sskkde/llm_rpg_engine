@@ -17,6 +17,8 @@ import type {
   TurnDebugResponse, ContextBuildAuditResponse, ValidationResultAuditResponse,
   AssetResponse, AssetJobResponse, PortraitGenerateRequest, SceneGenerateRequest, BGMGenerateRequest,
   PortraitJobRequest, SceneJobRequest, BGMJobRequest,
+  UsageLogResponse, CostSummaryResponse, ProviderCapabilityResponse, ProviderHealthResponse, RateLimitEventResponse,
+  PrewarmPortraitsResponse, PrewarmStatusResponse,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -731,6 +733,16 @@ export async function cancelAssetJob(jobId: string): Promise<AssetJobResponse> {
   return fetchWithAuth<AssetJobResponse>(`/media/jobs/${jobId}/cancel`, { method: 'POST' });
 }
 
+export async function prewarmPortraits(sessionId: string): Promise<PrewarmPortraitsResponse> {
+  return fetchWithAuth<PrewarmPortraitsResponse>(`/media/sessions/${sessionId}/prewarm-portraits`, {
+    method: 'POST',
+  });
+}
+
+export async function getPrewarmStatus(sessionId: string): Promise<PrewarmStatusResponse> {
+  return fetchWithAuth<PrewarmStatusResponse>(`/media/sessions/${sessionId}/prewarm-status`);
+}
+
 export async function listDebugSessionAssets(sessionId: string, assetType?: string): Promise<AssetResponse[]> {
   const params = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : '';
   return fetchWithAuth<AssetResponse[]>(`/debug/sessions/${sessionId}/assets${params}`);
@@ -763,6 +775,67 @@ export async function retryDebugAssetJob(jobId: string): Promise<AssetJobRespons
 
 export async function cancelDebugAssetJob(jobId: string): Promise<AssetJobResponse> {
   return fetchWithAuth<AssetJobResponse>(`/debug/assets/jobs/${jobId}/cancel`, { method: 'POST' });
+}
+
+// ── Debug Usage, Provider, Rate Limit API ──────────────────────────────────────
+
+export async function getDebugUsage(
+  skip?: number,
+  limit?: number,
+  sessionId?: string,
+): Promise<{ total: number; items: UsageLogResponse[] }> {
+  const params = new URLSearchParams();
+  if (skip !== undefined) params.append('skip', String(skip));
+  if (limit !== undefined) params.append('limit', String(limit));
+  if (sessionId) params.append('session_id', sessionId);
+  const query = params.toString();
+  return fetchWithAuth<{ total: number; items: UsageLogResponse[] }>(
+    `/debug/assets/usage${query ? `?${query}` : ''}`,
+  );
+}
+
+export async function getDebugUsageSummary(sessionId?: string): Promise<CostSummaryResponse> {
+  const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  return fetchWithAuth<CostSummaryResponse>(`/debug/assets/usage/summary${params}`);
+}
+
+export async function getDebugSessionUsage(
+  sessionId: string,
+  skip?: number,
+  limit?: number,
+): Promise<{ total: number; items: UsageLogResponse[] }> {
+  const params = new URLSearchParams();
+  if (skip !== undefined) params.append('skip', String(skip));
+  if (limit !== undefined) params.append('limit', String(limit));
+  const query = params.toString();
+  return fetchWithAuth<{ total: number; items: UsageLogResponse[] }>(
+    `/debug/sessions/${sessionId}/asset-usage${query ? `?${query}` : ''}`,
+  );
+}
+
+export async function getDebugProviders(): Promise<ProviderCapabilityResponse[]> {
+  const response = await fetchWithAuth<{ providers: ProviderCapabilityResponse[] }>('/debug/assets/providers');
+  return response.providers;
+}
+
+export async function getDebugProviderHealth(providerName: string): Promise<ProviderHealthResponse> {
+  return fetchWithAuth<ProviderHealthResponse>(`/debug/assets/providers/${encodeURIComponent(providerName)}/health`);
+}
+
+export async function getDebugRateLimitEvents(
+  skip?: number,
+  limit?: number,
+  userId?: string,
+): Promise<{ total: number; items: RateLimitEventResponse[] }> {
+  const params = new URLSearchParams();
+  if (skip !== undefined) params.append('skip', String(skip));
+  if (limit !== undefined) params.append('limit', String(limit));
+  if (userId) params.append('user_id', userId);
+  const query = params.toString();
+  const response = await fetchWithAuth<{ total: number; events: RateLimitEventResponse[] }>(
+    `/debug/assets/rate-limit-events${query ? `?${query}` : ''}`,
+  );
+  return { total: response.total, items: response.events };
 }
 
 export { APIError };

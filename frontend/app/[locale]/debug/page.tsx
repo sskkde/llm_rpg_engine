@@ -18,6 +18,10 @@ import { TurnDebugViewer } from '@/components/debug/TurnDebugViewer';
 import { ContextBuildAudit } from '@/components/debug/ContextBuildAudit';
 import { ValidationAuditViewer } from '@/components/debug/ValidationAuditViewer';
 import { AssetDebugViewer } from '@/components/debug/AssetDebugViewer';
+import { AssetUsageViewer } from '@/components/debug/AssetUsageViewer';
+import { AssetQueueViewer } from '@/components/debug/AssetQueueViewer';
+import { ProviderHealthViewer } from '@/components/debug/ProviderHealthViewer';
+import { RateLimitViewer } from '@/components/debug/RateLimitViewer';
 import { getDebugSessionLogs, getDebugSessionState, getDebugModelCalls, getDebugErrors } from '@/lib/api';
 import type { DebugSessionLogsResponse, DebugSessionStateResponse, DebugModelCallsResponse, DebugErrorsResponse } from '@/types/api';
 
@@ -255,13 +259,32 @@ function DebugContent() {
           </DebugErrorBoundary>
         </TabPanel>
 
-        <TabPanel value="assets">
+<TabPanel value="assets">
           <DebugErrorBoundary>
-            {hasSession ? (
-              <AssetDebugViewer sessionId={sessionId} />
-            ) : (
-              <DebugEmptyState message={t('emptyState.noSession')} />
-            )}
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">{t('queueSection')}</h3>
+                <AssetQueueViewer />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">{t('usageSection')}</h3>
+                <AssetUsageViewer sessionId={sessionId} />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">{t('providerHealthSection')}</h3>
+                <ProviderHealthViewer />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">{t('rateLimitSection')}</h3>
+                <RateLimitViewer />
+              </div>
+              {hasSession && (
+                <div>
+                  <h3 className="text-lg font-semibold mb-4 text-slate-800 dark:text-slate-200">{t('assetJobsSection')}</h3>
+                  <AssetDebugViewer sessionId={sessionId} />
+                </div>
+              )}
+            </div>
           </DebugErrorBoundary>
         </TabPanel>
       </Tabs>

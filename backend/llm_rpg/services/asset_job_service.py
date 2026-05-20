@@ -20,7 +20,8 @@ from llm_rpg.models.assets import (
     AssetType,
 )
 from llm_rpg.core.assets.cache_key import build_asset_cache_key
-from llm_rpg.storage.repositories import AssetJobRepository, AssetRepository
+from llm_rpg.storage.repositories import AssetJobRepository, AssetRepository, AssetUsageLogRepository
+from llm_rpg.services.asset_usage_service import AssetUsageService
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ class AssetJobService:
 
     Cache-first: checks AssetRepository for completed assets before creating
     a new pending job. Never raises exceptions to callers.
+
+    Note: Rate limiting is handled at the API layer (media.py), not in this service.
     """
 
     def __init__(
@@ -159,6 +162,23 @@ class AssetJobService:
 
         job = self._job_repo.get_by_job_id(job_id)
         if job is not None:
+            # Record estimated usage for the new job (non-blocking)
+            try:
+                db = self._job_repo.db
+                usage_service = AssetUsageService(
+                    usage_log_repository=AssetUsageLogRepository(db),
+                    asset_job_repository=AssetJobRepository(db),
+                    asset_repository=AssetRepository(db),
+                )
+                provider_name = request.provider or "mock"
+                usage_service.record_usage(
+                    job_id=job_id,
+                    provider_name=provider_name,
+                    operation="generate",
+                    estimated_cost=0.01,  # Default estimated cost per job
+                )
+            except Exception as usage_exc:
+                logger.warning("Failed to record usage for job %s: %s", job_id, usage_exc)
             return self._map_job_to_response(job)
 
         return AssetJobResponse(

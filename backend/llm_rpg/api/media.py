@@ -5,11 +5,15 @@ Real implementations using AssetGenerationService with mock providers.
 No external API calls required for testing.
 """
 
+import logging
 import os
-from typing import List, Optional, Union
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from llm_rpg.models.assets import (
     AssetGenerationRequest as AssetGenRequest,
@@ -18,15 +22,29 @@ from llm_rpg.models.assets import (
     AssetResponse,
     AssetType,
 )
+from llm_rpg.observability.npc_mind import NPCMindViewer
 from llm_rpg.services.asset_generation_service import AssetGenerationService
 from llm_rpg.services.asset_job_service import AssetJobService
+from llm_rpg.services.asset_rate_limit import AssetRateLimiter, RateLimitResult
+from llm_rpg.services.npc_portrait_prompt import (
+    build_portrait_context,
+    build_portrait_prompt,
+)
 from llm_rpg.storage.database import get_db
-from llm_rpg.storage.repositories import AssetJobRepository, AssetRepository
+from llm_rpg.storage.repositories import (
+    AssetJobRepository,
+    AssetRateLimitEventRepository,
+    AssetRepository,
+    SessionStateRepository,
+)
 from llm_rpg.api.auth import get_current_active_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/media", tags=["media"])
 
 _DEFAULT_MODE = os.getenv("ASSET_GENERATION_MODE", "sync")
+_PREWARM_MAX_NPCS = int(os.getenv("ASSET_PREWARM_MAX_NPCS", "5"))
 
 
 class PortraitGenerateRequest(BaseModel):
@@ -80,6 +98,26 @@ class BGMJobRequest(BaseModel):
     world_id: Optional[str] = Field(None, description="World ID for context")
 
 
+class PrewarmPortraitsResponse(BaseModel):
+    """Response for portrait prewarm operation."""
+    status: str = Field(..., description="Prewarm status: 'completed' or 'partial_failure'")
+    total: int = Field(..., description="Total NPCs considered")
+    pending: int = Field(..., description="Jobs submitted (pending)")
+    completed: int = Field(..., description="Already cached (skipped)")
+    failed: int = Field(..., description="Failed to process")
+    npc_ids: List[str] = Field(default_factory=list, description="NPC IDs processed")
+
+
+class PrewarmStatusResponse(BaseModel):
+    """Response for prewarm status check."""
+    total: int = Field(..., description="Total portrait jobs for session")
+    pending: int = Field(..., description="Jobs in pending state")
+    processing: int = Field(..., description="Jobs in processing state")
+    completed: int = Field(..., description="Jobs in completed state")
+    failed: int = Field(..., description="Jobs in failed state")
+    npc_ids: List[str] = Field(default_factory=list, description="NPC IDs with portrait jobs")
+
+
 def get_asset_service(db = Depends(get_db)) -> AssetGenerationService:
     repository = AssetRepository(db)
     return AssetGenerationService(repository=repository)
@@ -89,6 +127,65 @@ def get_asset_job_service(db = Depends(get_db)) -> AssetJobService:
     job_repo = AssetJobRepository(db)
     asset_repo = AssetRepository(db)
     return AssetJobService(job_repository=job_repo, asset_repository=asset_repo)
+
+
+def get_rate_limiter(db: Session = Depends(get_db)) -> AssetRateLimiter:
+    repo = AssetRateLimitEventRepository(db)
+    return AssetRateLimiter(rate_limit_event_repo=repo)
+
+
+def _enforce_rate_limit(
+    rate_limiter: AssetRateLimiter,
+    user_id: str,
+    session_id: Optional[str],
+    provider_name: str,
+) -> None:
+    """Check rate limit and raise 429 if exceeded. Records event to DB."""
+    result = rate_limiter.check_rate_limit(user_id, session_id, provider_name)
+    rate_limiter.record_rate_limit_event(
+        user_id=user_id,
+        session_id=session_id,
+        provider_name=provider_name,
+        allowed=result.allowed,
+        limit_type=result.limit_type,
+        limit_value=result.limit_value,
+        current_value=result.current_value,
+        reset_at=result.reset_at,
+    )
+    if not result.allowed:
+        retry_after = 60
+        if result.reset_at:
+            delta = (result.reset_at - datetime.now()).total_seconds()
+            retry_after = max(1, int(delta))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "asset_rate_limited",
+                "limit_type": result.limit_type,
+                "limit_value": result.limit_value,
+                "reset_at": result.reset_at.isoformat() if result.reset_at else None,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _build_rich_portrait_prompt(
+    session_id: Optional[str],
+    npc_id: str,
+    style: Optional[str],
+    expression: Optional[str],
+    db: Session,
+) -> str:
+    """Build rich portrait prompt via NPC context; fallback to trivial prompt on missing session or error."""
+    trivial = f"Portrait of NPC {npc_id}: style={style}, expression={expression}"
+    if not session_id:
+        return trivial
+    try:
+        context = build_portrait_context(session_id, npc_id, db)
+        return build_portrait_prompt(context)
+    except Exception:
+        logger.warning("Portrait context build failed for npc_id=%s, session_id=%s; using trivial prompt", npc_id, session_id, exc_info=True)
+        return trivial
 
 
 @router.post(
@@ -102,10 +199,25 @@ async def generate_portrait(
     current_user = Depends(get_current_active_user),
     service: AssetGenerationService = Depends(get_asset_service),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
+    db: Session = Depends(get_db),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
+    prompt = _build_rich_portrait_prompt(
+        session_id=request.session_id,
+        npc_id=request.npc_id,
+        style=request.style,
+        expression=request.expression,
+        db=db,
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.PORTRAIT,
-        prompt=f"Portrait of NPC {request.npc_id}: style={request.style}, expression={request.expression}",
+        prompt=prompt,
         style=request.style,
         session_id=request.session_id,
         world_id=request.world_id,
@@ -129,7 +241,14 @@ async def generate_scene(
     current_user = Depends(get_current_active_user),
     service: AssetGenerationService = Depends(get_asset_service),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.SCENE,
         prompt=f"Scene of location {request.location_id}: time={request.time_of_day}, weather={request.weather or 'clear'}",
@@ -156,7 +275,14 @@ async def generate_bgm(
     current_user = Depends(get_current_active_user),
     service: AssetGenerationService = Depends(get_asset_service),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.BGM,
         prompt=f"BGM for mood={request.mood}, location={request.location_id or 'generic'}, duration={request.duration_seconds}s",
@@ -213,10 +339,25 @@ async def create_portrait_job(
     request: PortraitJobRequest,
     current_user = Depends(get_current_active_user),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
+    db: Session = Depends(get_db),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
+    prompt = _build_rich_portrait_prompt(
+        session_id=request.session_id,
+        npc_id=request.npc_id,
+        style=request.style,
+        expression=request.expression,
+        db=db,
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.PORTRAIT,
-        prompt=f"Portrait of NPC {request.npc_id}: style={request.style}, expression={request.expression}",
+        prompt=prompt,
         style=request.style,
         session_id=request.session_id,
         world_id=request.world_id,
@@ -236,7 +377,14 @@ async def create_scene_job(
     request: SceneJobRequest,
     current_user = Depends(get_current_active_user),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.SCENE,
         prompt=f"Scene of location {request.location_id}: time={request.time_of_day}, weather={request.weather or 'clear'}",
@@ -259,7 +407,14 @@ async def create_bgm_job(
     request: BGMJobRequest,
     current_user = Depends(get_current_active_user),
     job_service: AssetJobService = Depends(get_asset_job_service),
+    rate_limiter: AssetRateLimiter = Depends(get_rate_limiter),
 ):
+    _enforce_rate_limit(
+        rate_limiter=rate_limiter,
+        user_id=current_user.id,
+        session_id=request.session_id,
+        provider_name="mock",
+    )
     gen_request = AssetGenRequest(
         asset_type=AssetType.BGM,
         prompt=f"BGM for mood={request.mood}, location={request.location_id or 'generic'}, duration={request.duration_seconds}s",
@@ -339,3 +494,145 @@ def cancel_job(
             detail=f"Job {job_id} not found or not in pending state",
         )
     return job
+
+
+@router.post(
+    "/sessions/{session_id}/prewarm-portraits",
+    response_model=PrewarmPortraitsResponse,
+    summary="Prewarm portraits for NPCs at current location",
+)
+async def prewarm_portraits(
+    session_id: str,
+    current_user = Depends(get_current_active_user),
+    job_service: AssetJobService = Depends(get_asset_job_service),
+    db: Session = Depends(get_db),
+):
+    session_state_repo = SessionStateRepository(db)
+    session_state = session_state_repo.get_by_session(session_id)
+    if session_state is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+
+    current_location_id = session_state.current_location_id
+    if not current_location_id:
+        return PrewarmPortraitsResponse(
+            status="completed",
+            total=0,
+            pending=0,
+            completed=0,
+            failed=0,
+            npc_ids=[],
+        )
+
+    npc_viewer = NPCMindViewer(db)
+    all_npcs = npc_viewer.list_session_npcs(session_id)
+
+    location_npcs = [
+        npc for npc in all_npcs
+        if npc.get("current_location_id") == current_location_id
+    ]
+
+    max_npcs = _PREWARM_MAX_NPCS
+    npcs_to_process = location_npcs[:max_npcs]
+
+    total = len(npcs_to_process)
+    pending = 0
+    completed = 0
+    failed = 0
+    processed_npc_ids: List[str] = []
+
+    for npc in npcs_to_process:
+        npc_id = npc.get("npc_id")
+        if not npc_id:
+            continue
+
+        try:
+            context = build_portrait_context(session_id, npc_id, db)
+            prompt = build_portrait_prompt(context)
+
+            gen_request = AssetGenRequest(
+                asset_type=AssetType.PORTRAIT,
+                prompt=prompt,
+                style=None,
+                session_id=session_id,
+                world_id=None,
+                owner_entity_id=npc_id,
+                owner_entity_type="npc",
+            )
+
+            result = await job_service.submit(gen_request)
+            processed_npc_ids.append(npc_id)
+
+            if isinstance(result, AssetResponse):
+                completed += 1
+            elif isinstance(result, AssetJobResponse):
+                if result.status == AssetJobStatus.PENDING:
+                    pending += 1
+                elif result.status == AssetJobStatus.FAILED:
+                    failed += 1
+                else:
+                    pending += 1
+        except Exception as exc:
+            logger.warning(
+                "Portrait prewarm failed for npc_id=%s, session_id=%s: %s",
+                npc_id, session_id, exc, exc_info=True
+            )
+            failed += 1
+
+    status_val = "completed" if failed == 0 else "partial_failure"
+    return PrewarmPortraitsResponse(
+        status=status_val,
+        total=total,
+        pending=pending,
+        completed=completed,
+        failed=failed,
+        npc_ids=processed_npc_ids,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/prewarm-status",
+    response_model=PrewarmStatusResponse,
+    summary="Get portrait prewarm status for session",
+)
+def get_prewarm_status(
+    session_id: str,
+    current_user = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    job_repo = AssetJobRepository(db)
+    job_models = job_repo.list_by_session(session_id, asset_type=AssetType.PORTRAIT.value)
+
+    total = len(job_models)
+    pending = 0
+    processing = 0
+    completed = 0
+    failed = 0
+    npc_ids: List[str] = []
+
+    for job in job_models:
+        status_val = job.status
+        if status_val == AssetJobStatus.PENDING.value:
+            pending += 1
+        elif status_val == AssetJobStatus.PROCESSING.value:
+            processing += 1
+        elif status_val == AssetJobStatus.COMPLETED.value:
+            completed += 1
+        elif status_val == AssetJobStatus.FAILED.value:
+            failed += 1
+
+        request_json = job.request_json or {}
+        owner_entity_id = request_json.get("owner_entity_id")
+        if owner_entity_id and owner_entity_id not in npc_ids:
+            npc_ids.append(owner_entity_id)
+
+    return PrewarmStatusResponse(
+        total=total,
+        pending=pending,
+        processing=processing,
+        completed=completed,
+        failed=failed,
+        npc_ids=npc_ids,
+    )

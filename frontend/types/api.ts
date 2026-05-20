@@ -475,6 +475,7 @@ export enum AssetJobStatus {
   COMPLETED = 'completed',
   FAILED = 'failed',
   CANCELLED = 'cancelled',
+  DEAD_LETTERED = 'dead_lettered',
 }
 
 export interface AssetResponse {
@@ -500,6 +501,10 @@ export interface AssetJobResponse {
   error_message?: string | null;
   last_error_type?: string | null;
   cache_key?: string | null;
+  lease_owner?: string | null;
+  estimated_cost_usd?: number | null;
+  actual_cost_usd?: number | null;
+  result_url?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -550,6 +555,34 @@ export interface BGMGenerateRequest {
   duration_seconds?: number;
   session_id?: string;
   world_id?: string;
+}
+
+export interface PrewarmResponse {
+  status: string;
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  npc_ids: string[];
+}
+
+export interface PrewarmPortraitsResponse {
+  status: string;
+  total: number;
+  pending: number;
+  completed: number;
+  failed: number;
+  npc_ids: string[];
+}
+
+export interface PrewarmStatusResponse {
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  npc_ids: string[];
 }
 
 // =============================================================================
@@ -1234,5 +1267,60 @@ export interface ValidationResultAuditResponse {
   errors: string[];
   warnings: string[];
   transaction_id?: string;
+  created_at: string;
+}
+
+// =============================================================================
+// Debug Usage, Provider, and Rate Limit Types
+// =============================================================================
+
+export interface UsageLogResponse {
+  usage_id: string;
+  job_id?: string;
+  session_id?: string;
+  user_id?: string;
+  provider_name: string;
+  asset_type?: string;
+  operation: string;
+  estimated_cost_usd?: number;
+  actual_cost_usd?: number;
+  status?: string;
+  created_at: string;
+}
+
+export interface CostSummaryResponse {
+  total_estimated: number;
+  total_actual: number;
+  count: number;
+}
+
+export interface ProviderCapabilityResponse {
+  provider_name: string;
+  supported_asset_types: string[];
+  enabled: boolean;
+  requires_api_key: boolean;
+  configured: boolean;
+  supports_async: boolean;
+  supports_cancel: boolean;
+  supports_cost_estimate: boolean;
+}
+
+export interface ProviderHealthResponse {
+  configured: boolean;
+  enabled: boolean;
+  last_error?: string;
+}
+
+export interface RateLimitEventResponse {
+  event_id: string;
+  user_id?: string;
+  session_id?: string;
+  provider_name: string;
+  bucket_key: string;
+  limit_type: string;
+  allowed: boolean;
+  limit_value: number;
+  current_value: number;
+  reset_at: string;
   created_at: string;
 }

@@ -31,6 +31,7 @@ class AssetJobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    DEAD_LETTERED = "dead_lettered"
 
 
 class AssetGenerationRequest(BaseModel):

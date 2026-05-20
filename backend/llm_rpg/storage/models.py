@@ -81,6 +81,7 @@ class NPCTemplateModel(Base):
     hidden_identity = Column(Text, nullable=True)
     personality = Column(Text, nullable=True)
     speech_style = Column(Text, nullable=True)
+    appearance = Column(Text, nullable=True)
     goals = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.now)
 
@@ -950,6 +951,15 @@ class AssetGenerationJobModel(Base):
     completed_at = Column(DateTime, nullable=True)
     cancelled_at = Column(DateTime, nullable=True)
     next_retry_at = Column(DateTime, nullable=True)
+    lease_owner = Column(String, nullable=True, index=True)
+    lease_expires_at = Column(DateTime, nullable=True, index=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    dead_lettered_at = Column(DateTime, nullable=True, index=True)
+    dead_letter_reason = Column(Text, nullable=True)
+    provider_request_id = Column(String, nullable=True, index=True)
+    estimated_cost_usd = Column(Float, nullable=True)
+    actual_cost_usd = Column(Float, nullable=True)
+    rate_limit_bucket = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -957,4 +967,60 @@ class AssetGenerationJobModel(Base):
         Index("idx_jobs_cache_key", "cache_key"),
         Index("idx_jobs_session_status", "session_id", "status"),
         Index("idx_jobs_status_priority", "status", "priority"),
+        Index("idx_jobs_lease_expires_at", "lease_expires_at"),
+        Index("idx_jobs_dead_lettered_at", "dead_lettered_at"),
+        Index("idx_jobs_provider_request_id", "provider_request_id"),
+        Index("idx_jobs_rate_limit_bucket", "rate_limit_bucket"),
+    )
+
+
+class AssetUsageLogModel(Base):
+    __tablename__ = "asset_usage_logs"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    usage_id = Column(String, unique=True, nullable=False)
+    job_id = Column(String, nullable=True)
+    asset_id = Column(String, nullable=True)
+    session_id = Column(String, nullable=True, index=True)
+    user_id = Column(String, nullable=True, index=True)
+    provider_name = Column(String, nullable=True, index=True)
+    asset_type = Column(String, nullable=True)
+    operation = Column(String, nullable=True)
+    input_units = Column(Float, nullable=True)
+    output_units = Column(Float, nullable=True)
+    estimated_cost_usd = Column(Float, nullable=True)
+    actual_cost_usd = Column(Float, nullable=True)
+    currency = Column(String, default="USD")
+    status = Column(String, nullable=True)
+    metadata_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_asset_usage_session", "session_id"),
+        Index("idx_asset_usage_user", "user_id"),
+        Index("idx_asset_usage_provider", "provider_name"),
+        Index("idx_asset_usage_created_at", "created_at"),
+    )
+
+
+class AssetRateLimitEventModel(Base):
+    __tablename__ = "asset_rate_limit_events"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    event_id = Column(String, unique=True, nullable=False)
+    user_id = Column(String, nullable=True, index=True)
+    session_id = Column(String, nullable=True)
+    provider_name = Column(String, nullable=True)
+    bucket_key = Column(String, nullable=True, index=True)
+    limit_type = Column(String, nullable=True)
+    allowed = Column(Boolean, nullable=True)
+    limit_value = Column(Integer, nullable=True)
+    current_value = Column(Integer, nullable=True)
+    reset_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_rate_limit_bucket", "bucket_key"),
+        Index("idx_rate_limit_user", "user_id"),
+        Index("idx_rate_limit_created_at", "created_at"),
     )

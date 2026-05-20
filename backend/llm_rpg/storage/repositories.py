@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Type, TypeVar
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
@@ -46,6 +46,8 @@ from .models import (
     PlotBeatModel,
     AssetModel,
     AssetGenerationJobModel,
+    AssetUsageLogModel,
+    AssetRateLimitEventModel,
 )
 
 T = TypeVar("T")
@@ -1266,7 +1268,18 @@ class AssetJobRepository(BaseRepository):
     ) -> Optional[AssetGenerationJobModel]:
         """Atomic claim: find next pending job (ordered by priority asc, created_at asc),
         optionally filtered by provider_name. Update status to 'processing'.
+        
+        Uses FOR UPDATE SKIP LOCKED on PostgreSQL, falls back to atomic
+        UPDATE with WHERE check on SQLite.
         """
+        try:
+            db_url = str(self.db.bind.url)
+        except Exception:
+            db_url = ""
+        
+        if "sqlite" in db_url:
+            return self._claim_next_pending_sqlite(provider_name)
+
         query = self.db.query(AssetGenerationJobModel).filter(
             AssetGenerationJobModel.status == "pending"
         )
@@ -1283,6 +1296,45 @@ class AssetJobRepository(BaseRepository):
             job.updated_at = datetime.now()
             self.db.commit()
             self.db.refresh(job)
+        return job
+
+    def _claim_next_pending_sqlite(
+        self, provider_name: Optional[str] = None
+    ) -> Optional[AssetGenerationJobModel]:
+        """SQLite-compatible claim: query without FOR UPDATE, then atomic UPDATE
+        with WHERE status='pending' guard to prevent double-claim.
+        """
+        query = self.db.query(AssetGenerationJobModel).filter(
+            AssetGenerationJobModel.status == "pending"
+        )
+        if provider_name:
+            query = query.filter(AssetGenerationJobModel.provider_name == provider_name)
+        job = query.order_by(
+            AssetGenerationJobModel.priority.asc(),
+            AssetGenerationJobModel.created_at.asc()
+        ).first()
+
+        if job is None:
+            return None
+
+        now = datetime.now()
+        updated = (
+            self.db.query(AssetGenerationJobModel)
+            .filter(
+                AssetGenerationJobModel.id == job.id,
+                AssetGenerationJobModel.status == "pending",
+            )
+            .update(
+                {"status": "processing", "started_at": now, "updated_at": now},
+                synchronize_session="fetch",
+            )
+        )
+        self.db.commit()
+
+        if updated == 0:
+            return None
+
+        self.db.refresh(job)
         return job
 
     def update_status(
@@ -1387,3 +1439,300 @@ class AssetJobRepository(BaseRepository):
 
     def count_all(self) -> int:
         return self.db.query(AssetGenerationJobModel).count()
+
+    # -- Lease / heartbeat / stale recovery / dead-letter methods --
+
+    def claim_next_pending_with_lease(
+        self,
+        worker_id: str,
+        lease_seconds: int = 300,
+        provider_name: Optional[str] = None,
+    ) -> Optional[AssetGenerationJobModel]:
+        """Atomic claim with lease: find next pending job, set lease_owner,
+        lease_expires_at, status='processing'. SQLite-compatible (uses WHERE
+        status='pending' guard to prevent double-claim).
+        """
+        query = self.db.query(AssetGenerationJobModel).filter(
+            AssetGenerationJobModel.status == "pending"
+        )
+        if provider_name:
+            query = query.filter(AssetGenerationJobModel.provider_name == provider_name)
+        job = query.order_by(
+            AssetGenerationJobModel.priority.asc(),
+            AssetGenerationJobModel.created_at.asc()
+        ).first()
+
+        if job is None:
+            return None
+
+        now = datetime.now()
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        updated = (
+            self.db.query(AssetGenerationJobModel)
+            .filter(
+                AssetGenerationJobModel.id == job.id,
+                AssetGenerationJobModel.status == "pending",
+            )
+            .update(
+                {
+                    "status": "processing",
+                    "started_at": now,
+                    "lease_owner": worker_id,
+                    "lease_expires_at": lease_expires_at,
+                    "heartbeat_at": now,
+                    "updated_at": now,
+                },
+                synchronize_session="fetch",
+            )
+        )
+        self.db.commit()
+
+        if updated == 0:
+            return None
+
+        self.db.refresh(job)
+        return job
+
+    def heartbeat(
+        self,
+        job_id: str,
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> Optional[AssetGenerationJobModel]:
+        """Update heartbeat_at and extend lease_expires_at for a job,
+        only if lease_owner matches worker_id.
+        """
+        job = self.get_by_job_id(job_id)
+        if job is None:
+            return None
+        if job.lease_owner != worker_id:
+            return None
+
+        now = datetime.now()
+        job.heartbeat_at = now
+        job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        job.updated_at = now
+        self.db.commit()
+        self.db.refresh(job)
+        return job
+
+    def recover_stale_jobs(self, now: datetime) -> int:
+        """Find jobs where lease_expires_at < now and status='processing',
+        reset to 'pending', clear lease_owner. Returns count of recovered jobs.
+        """
+        stale_jobs = (
+            self.db.query(AssetGenerationJobModel)
+            .filter(
+                and_(
+                    AssetGenerationJobModel.status == "processing",
+                    AssetGenerationJobModel.lease_expires_at.isnot(None),
+                    AssetGenerationJobModel.lease_expires_at < now,
+                )
+            )
+            .all()
+        )
+
+        count = 0
+        for job in stale_jobs:
+            job.status = "pending"
+            job.lease_owner = None
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+            job.started_at = None
+            job.updated_at = datetime.now()
+            count += 1
+
+        self.db.commit()
+        return count
+
+    def mark_dead_letter(
+        self,
+        job_id: str,
+        reason: str,
+    ) -> Optional[AssetGenerationJobModel]:
+        """Set dead_lettered_at=now, dead_letter_reason=reason,
+        status='dead_lettered', clear lease fields.
+        """
+        job = self.get_by_job_id(job_id)
+        if job is None:
+            return None
+
+        now = datetime.now()
+        job.status = "dead_lettered"
+        job.dead_lettered_at = now
+        job.dead_letter_reason = reason
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.heartbeat_at = None
+        job.updated_at = now
+        self.db.commit()
+        self.db.refresh(job)
+        return job
+
+    def list_dead_lettered(
+        self, limit: int = 50, offset: int = 0
+    ) -> List[AssetGenerationJobModel]:
+        """List dead-lettered jobs ordered by dead_lettered_at desc."""
+        return (
+            self.db.query(AssetGenerationJobModel)
+            .filter(
+                AssetGenerationJobModel.status == "dead_lettered"
+            )
+            .order_by(desc(AssetGenerationJobModel.dead_lettered_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+
+class AssetUsageLogRepository(BaseRepository):
+    """Repository for AssetUsageLogModel operations."""
+
+    def __init__(self, db: Session):
+        super().__init__(db, AssetUsageLogModel)
+
+    def create_usage_log(self, data: Dict[str, Any]) -> AssetUsageLogModel:
+        """Create a new usage log entry."""
+        return self.create(data)
+
+    def get_by_usage_id(self, usage_id: str) -> Optional[AssetUsageLogModel]:
+        """Get usage log by public usage_id."""
+        return self.db.query(AssetUsageLogModel).filter(
+            AssetUsageLogModel.usage_id == usage_id
+        ).first()
+
+    def list_by_session(
+        self, session_id: str, limit: int = 50, offset: int = 0
+    ) -> List[AssetUsageLogModel]:
+        """List usage logs for session, ordered by created_at desc."""
+        return (
+            self.db.query(AssetUsageLogModel)
+            .filter(AssetUsageLogModel.session_id == session_id)
+            .order_by(desc(AssetUsageLogModel.created_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    def list_by_user(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> List[AssetUsageLogModel]:
+        """List usage logs for user, ordered by created_at desc."""
+        return (
+            self.db.query(AssetUsageLogModel)
+            .filter(AssetUsageLogModel.user_id == user_id)
+            .order_by(desc(AssetUsageLogModel.created_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    def list_by_provider(
+        self, provider_name: str, limit: int = 50, offset: int = 0
+    ) -> List[AssetUsageLogModel]:
+        """List usage logs for provider, ordered by created_at desc."""
+        return (
+            self.db.query(AssetUsageLogModel)
+            .filter(AssetUsageLogModel.provider_name == provider_name)
+            .order_by(desc(AssetUsageLogModel.created_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    def get_cost_summary(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        provider_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get aggregated cost summary for matching usage logs.
+
+        Returns:
+            {"total_estimated": float, "total_actual": float, "count": int}
+        """
+        query = self.db.query(AssetUsageLogModel)
+
+        if session_id is not None:
+            query = query.filter(AssetUsageLogModel.session_id == session_id)
+        if user_id is not None:
+            query = query.filter(AssetUsageLogModel.user_id == user_id)
+        if provider_name is not None:
+            query = query.filter(AssetUsageLogModel.provider_name == provider_name)
+
+        logs = query.all()
+
+        total_estimated = sum(log.estimated_cost_usd or 0 for log in logs)
+        total_actual = sum(log.actual_cost_usd or 0 for log in logs)
+
+        return {
+            "total_estimated": total_estimated,
+            "total_actual": total_actual,
+            "count": len(logs),
+        }
+
+
+class AssetRateLimitEventRepository(BaseRepository):
+    """Repository for AssetRateLimitEventModel operations."""
+
+    def __init__(self, db: Session):
+        super().__init__(db, AssetRateLimitEventModel)
+
+    def create_event(self, data: Dict[str, Any]) -> AssetRateLimitEventModel:
+        """Create a rate limit event record."""
+        return self.create(data)
+
+    def get_recent_events(
+        self, bucket_key: str, since: datetime
+    ) -> List[AssetRateLimitEventModel]:
+        """Get events for a bucket key since a timestamp."""
+        return (
+            self.db.query(AssetRateLimitEventModel)
+            .filter(
+                and_(
+                    AssetRateLimitEventModel.bucket_key == bucket_key,
+                    AssetRateLimitEventModel.created_at >= since
+                )
+            )
+            .order_by(AssetRateLimitEventModel.created_at)
+            .all()
+        )
+
+    def count_recent(self, bucket_key: str, since: datetime) -> int:
+        """Count events for a bucket key since a timestamp."""
+        return (
+            self.db.query(AssetRateLimitEventModel)
+            .filter(
+                and_(
+                    AssetRateLimitEventModel.bucket_key == bucket_key,
+                    AssetRateLimitEventModel.created_at >= since
+                )
+            )
+            .count()
+        )
+
+    def list_by_user(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> List[AssetRateLimitEventModel]:
+        """List events for a user with pagination."""
+        return (
+            self.db.query(AssetRateLimitEventModel)
+            .filter(AssetRateLimitEventModel.user_id == user_id)
+            .order_by(desc(AssetRateLimitEventModel.created_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    def list_by_session(
+        self, session_id: str, limit: int = 50, offset: int = 0
+    ) -> List[AssetRateLimitEventModel]:
+        """List events for a session with pagination."""
+        return (
+            self.db.query(AssetRateLimitEventModel)
+            .filter(AssetRateLimitEventModel.session_id == session_id)
+            .order_by(desc(AssetRateLimitEventModel.created_at))
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )

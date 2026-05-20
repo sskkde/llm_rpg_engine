@@ -248,33 +248,30 @@ jobs:
           APP_ENV: testing
 
   p7-tests:
-    name: P7 Backend & Frontend
+    name: P7 Fast Gate
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - name: Install backend dependencies
-        run: |
-          pip install -r requirements.txt
-      - name: Run P7 tests
-        run: |
-          APP_ENV=testing python3 -m pytest tests/unit/test_asset_job_service.py tests/unit/test_asset_job_repository.py tests/unit/test_asset_job_runner.py tests/unit/test_asset_retry_policy.py tests/unit/test_asset_provider_registry.py tests/integration/test_asset_jobs_api.py tests/integration/test_asset_debug_jobs_api.py -q --tb=short
-      - name: Setup Node.js for frontend
-        uses: actions/setup-node@v4
+          python-version: '3.11'
+          cache: 'pip'
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
       - name: Install frontend dependencies
-        working-directory: frontend
         run: npm ci
-      - name: Frontend typecheck
         working-directory: frontend
-        run: npx tsc --noEmit
-      - name: Frontend asset tests
-        working-directory: frontend
-        continue-on-error: true
-        run: npm test -- __tests__/assets/useAssetJob.test.tsx __tests__/assets/SceneBackground.p7.test.tsx --runInBand --passWithNoTests
+
+      - name: Run P7 fast gate
+        run: make test-p7-fast
+        env:
+          APP_ENV: testing

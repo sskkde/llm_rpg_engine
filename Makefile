@@ -102,7 +102,7 @@ test-asset-jobs-api: ## Run P7 integration tests
 	cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_asset_jobs_api.py tests/integration/test_asset_debug_jobs_api.py tests/integration/test_game_asset_integration_api.py -q --tb=short
 
 test-frontend-asset-jobs: ## Run P7 frontend tests
-	cd frontend && npm test -- __tests__/assets/useAssetJob.test.tsx __tests__/assets/SceneBackground.p7.test.tsx --runInBand --passWithNoTests
+	cd frontend && npm test -- __tests__/assets/useAssetJob.test.tsx __tests__/assets/SceneBackground.p7.test.tsx __tests__/assets/GameAssetIntegration.test.tsx --runInBand
 
 test-scenario-p7: ## Run P7 scenario tests
 	cd backend && APP_ENV=testing python3 -m pytest tests/scenario/test_asset_generation_workflow.py -q --tb=short

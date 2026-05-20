@@ -1,6 +1,6 @@
 import { waitFor } from '@testing-library/react';
 import { renderWithIntl } from '@/test-utils';
-import GameSessionPage from '@/app/[locale]/game/[sessionId]/page';
+import { GameSessionContent } from '@/app/[locale]/game/[sessionId]/page';
 
 const mockGetSessionSnapshot = jest.fn();
 const mockGetAdventureLog = jest.fn();
@@ -8,6 +8,8 @@ const mockGenerateSceneAsset = jest.fn();
 const mockGenerateBGM = jest.fn();
 const mockListSessionNpcs = jest.fn();
 const mockGeneratePortrait = jest.fn();
+const mockCreatePortraitJob = jest.fn();
+const mockGetAssetJob = jest.fn();
 
 jest.mock('@/lib/api', () => ({
   getSessionSnapshot: (...args: unknown[]) => mockGetSessionSnapshot(...args),
@@ -16,6 +18,20 @@ jest.mock('@/lib/api', () => ({
   generateBGM: (...args: unknown[]) => mockGenerateBGM(...args),
   listSessionNpcs: (...args: unknown[]) => mockListSessionNpcs(...args),
   generatePortrait: (...args: unknown[]) => mockGeneratePortrait(...args),
+  createPortraitJob: (...args: unknown[]) => mockCreatePortraitJob(...args),
+  getAssetJob: (...args: unknown[]) => mockGetAssetJob(...args),
+}));
+
+jest.mock('@/hooks/useAssetJob', () => ({
+  useAssetJob: () => ({
+    job: null,
+    isLoading: false,
+    error: null,
+    isPolling: false,
+    retry: jest.fn(),
+    cancel: jest.fn(),
+    refetch: jest.fn(),
+  }),
 }));
 
 jest.mock('@/hooks/useTurnStream', () => ({
@@ -41,7 +57,7 @@ jest.mock('next/navigation', () => ({
 
 function renderPage() {
   return renderWithIntl(
-    <GameSessionPage params={Promise.resolve({ sessionId: 'test-session' })} />
+    <GameSessionContent sessionId="test-session" />
   );
 }
 
@@ -85,6 +101,16 @@ describe('GameAssetIntegration', () => {
     mockGenerateSceneAsset.mockReturnValue(new Promise(() => {}));
     mockGenerateBGM.mockReturnValue(new Promise(() => {}));
     mockGeneratePortrait.mockReturnValue(new Promise(() => {}));
+    mockCreatePortraitJob.mockResolvedValue({
+      job_id: 'job-portrait-1',
+      asset_type: 'portrait',
+      status: 'pending',
+      provider_name: 'mock',
+      attempt_count: 0,
+      max_attempts: 3,
+      created_at: '2025-01-01T00:00:00Z',
+      updated_at: '2025-01-01T00:00:00Z',
+    });
     mockListSessionNpcs.mockResolvedValue({ session_id: 'test-session', npcs: mockNpcsAtLocation });
   });
 
@@ -255,14 +281,15 @@ describe('GameAssetIntegration', () => {
         expect(container.querySelector('[data-testid="npc-portraits"]')).toBeInTheDocument();
       });
 
+      // P8: NPCPortrait with sessionId uses createPortraitJob (async flow)
       await waitFor(() => {
-        expect(mockGeneratePortrait).toHaveBeenCalledWith(
+        expect(mockCreatePortraitJob).toHaveBeenCalledWith(
           expect.objectContaining({
             npc_id: 'npc-elder',
             session_id: 'test-session',
           })
         );
-        expect(mockGeneratePortrait).toHaveBeenCalledWith(
+        expect(mockCreatePortraitJob).toHaveBeenCalledWith(
           expect.objectContaining({
             npc_id: 'npc-guard',
             session_id: 'test-session',

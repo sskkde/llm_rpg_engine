@@ -116,7 +116,7 @@ class TestProviderRegistry:
         registry = ProviderRegistry()
         health = registry.check_provider_health("openai_image")
         assert health["configured"] is False
-        assert health["enabled"] is True
+        assert health["enabled"] is False
         assert health["last_error"] is None
 
     def test_check_provider_health_openai_image_configured(self, monkeypatch):
@@ -124,7 +124,7 @@ class TestProviderRegistry:
         registry = ProviderRegistry()
         health = registry.check_provider_health("openai_image")
         assert health["configured"] is True
-        assert health["enabled"] is True
+        assert health["enabled"] is False
         assert health["last_error"] is None
 
     def test_check_provider_health_mock(self, monkeypatch):

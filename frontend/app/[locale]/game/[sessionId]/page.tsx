@@ -41,7 +41,7 @@ export default function GameSessionPage({ params }: { params: Promise<{ sessionI
   );
 }
 
-function GameSessionContent({ sessionId }: { sessionId: string }) {
+export function GameSessionContent({ sessionId }: { sessionId: string }) {
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [npcs, setNpcs] = useState<SessionNPC[]>([]);

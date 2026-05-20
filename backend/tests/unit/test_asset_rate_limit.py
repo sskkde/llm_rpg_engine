@@ -6,7 +6,12 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from llm_rpg.storage.database import Base
+from llm_rpg.storage.repositories import AssetRateLimitEventRepository
 from llm_rpg.services.asset_rate_limit import (
     AssetRateLimiter,
     RateLimitConfig,
@@ -411,3 +416,64 @@ class TestAssetRateLimiter:
         result = limiter.check_rate_limit("user1", "session1", "mock")
         assert result.allowed is False
         assert result.limit_type == "user_per_day"
+
+
+class TestBlockedEventsWithRealRepository:
+    """Tests using real SQLite repository to verify DB-level filtering."""
+
+    @pytest.fixture
+    def db_session(self):
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        SessionLocal = sessionmaker(bind=engine)
+        session = SessionLocal()
+        yield session
+        session.close()
+        Base.metadata.drop_all(bind=engine)
+
+    def test_blocked_events_do_not_increase_allowed_count_with_repository(self, db_session):
+        repo = AssetRateLimitEventRepository(db_session)
+        config = RateLimitConfig(user_per_day=3, user_per_minute=300, session_per_minute=300)
+        limiter = AssetRateLimiter(rate_limit_event_repo=repo, config=config)
+
+        for i in range(3):
+            result = limiter.check_rate_limit("user1", "session1", "mock")
+            assert result.allowed is True
+            limiter.record_rate_limit_event(
+                user_id="user1",
+                session_id="session1",
+                provider_name="mock",
+                allowed=True,
+            )
+
+        blocked = limiter.check_rate_limit("user1", "session1", "mock")
+        assert blocked.allowed is False
+        limiter.record_rate_limit_event(
+            user_id="user1",
+            session_id="session1",
+            provider_name="mock",
+            allowed=False,
+            limit_type="user_per_day",
+            limit_value=3,
+            current_value=3,
+        )
+
+        for _ in range(5):
+            limiter.check_rate_limit("user1", "session1", "mock")
+            limiter.record_rate_limit_event(
+                user_id="user1",
+                session_id="session1",
+                provider_name="mock",
+                allowed=False,
+                limit_type="user_per_day",
+                limit_value=3,
+                current_value=3,
+            )
+
+        since = datetime.now() - timedelta(hours=1)
+        db_count = repo.count_recent("user_day:user1", since)
+        assert db_count == 3

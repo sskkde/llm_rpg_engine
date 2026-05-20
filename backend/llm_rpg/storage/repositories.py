@@ -1699,13 +1699,18 @@ class AssetRateLimitEventRepository(BaseRepository):
         )
 
     def count_recent(self, bucket_key: str, since: datetime) -> int:
-        """Count events for a bucket key since a timestamp."""
+        """Count allowed events for a bucket key since a timestamp.
+
+        Only counts events where ``allowed`` is True so that blocked
+        requests do not inflate the usage count.
+        """
         return (
             self.db.query(AssetRateLimitEventModel)
             .filter(
                 and_(
                     AssetRateLimitEventModel.bucket_key == bucket_key,
-                    AssetRateLimitEventModel.created_at >= since
+                    AssetRateLimitEventModel.created_at >= since,
+                    AssetRateLimitEventModel.allowed.is_(True),
                 )
             )
             .count()

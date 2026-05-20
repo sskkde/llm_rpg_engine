@@ -83,35 +83,65 @@ class TestAssetRateLimitEventRepository:
             "id": "evt-1",
             "event_id": "pub-evt-1",
             "bucket_key": bucket_key,
+            "allowed": True,
             "created_at": now - timedelta(hours=2),
         })
         repo.create_event({
             "id": "evt-2",
             "event_id": "pub-evt-2",
             "bucket_key": bucket_key,
+            "allowed": True,
             "created_at": now - timedelta(minutes=30),
         })
         repo.create_event({
             "id": "evt-3",
             "event_id": "pub-evt-3",
             "bucket_key": bucket_key,
+            "allowed": False,
             "created_at": now - timedelta(minutes=10),
         })
         repo.create_event({
             "id": "evt-4",
             "event_id": "pub-evt-4",
             "bucket_key": "other:bucket",
+            "allowed": True,
             "created_at": now - timedelta(minutes=5),
         })
 
         since = now - timedelta(hours=1)
         count = repo.count_recent(bucket_key, since)
-        assert count == 2
+        assert count == 1
 
     def test_count_recent_empty(self, db_session):
         repo = AssetRateLimitEventRepository(db_session)
         count = repo.count_recent("nonexistent:bucket", datetime.now())
         assert count == 0
+
+    def test_count_recent_only_counts_allowed(self, db_session):
+        repo = AssetRateLimitEventRepository(db_session)
+        now = datetime.now()
+        bucket_key = "user_day:user1"
+
+        for i in range(3):
+            repo.create_event({
+                "id": f"evt-allowed-{i}",
+                "event_id": f"pub-allowed-{i}",
+                "bucket_key": bucket_key,
+                "allowed": True,
+                "created_at": now - timedelta(minutes=5),
+            })
+        for i in range(5):
+            repo.create_event({
+                "id": f"evt-blocked-{i}",
+                "event_id": f"pub-blocked-{i}",
+                "bucket_key": bucket_key,
+                "allowed": False,
+                "created_at": now - timedelta(minutes=3),
+            })
+
+        since = now - timedelta(hours=1)
+        count = repo.count_recent(bucket_key, since)
+        assert count == 3
 
     def test_list_by_user(self, db_session):
         repo = AssetRateLimitEventRepository(db_session)

@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from llm_rpg.storage.database import Base
-from llm_rpg.storage.repositories import AssetJobRepository
+from llm_rpg.storage.repositories import AssetJobRepository, AssetRepository
 from llm_rpg.assets.interfaces import (
     AssetGenerationRequest,
     AssetGenerationResult,
@@ -47,8 +47,13 @@ def retry_policy():
 
 
 @pytest.fixture
-def runner(job_repo, retry_policy):
-    return AssetJobRunner(job_repo, retry_policy)
+def asset_repo(db_session):
+    return AssetRepository(db_session)
+
+
+@pytest.fixture
+def runner(job_repo, asset_repo, retry_policy):
+    return AssetJobRunner(job_repo, asset_repo, retry_policy)
 
 
 def _insert_pending_job(job_repo, job_id="pub-1", provider_name="mock", **overrides):
@@ -258,3 +263,65 @@ class TestRunPendingBatch:
     async def test_run_pending_batch_empty_queue(self, runner):
         results = await runner.run_pending_batch(batch_size=5)
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_completed_job_creates_asset_model(self, runner, job_repo, asset_repo):
+        _insert_pending_job(job_repo, cache_key="cache-abc")
+
+        mock_provider = MagicMock()
+        mock_provider.generate = AsyncMock(return_value=AssetGenerationResult(
+            request_id="pub-1",
+            status=AssetStatus.COMPLETED,
+            asset_url="https://example.com/mock/portrait.png",
+            asset_id="asset-from-provider",
+        ))
+
+        with patch("llm_rpg.assets.jobs.get_asset_provider", return_value=mock_provider):
+            result = await runner.run_next_job()
+
+        assert result is not None
+        assert result.status == AssetJobStatus.COMPLETED
+        assert result.asset_id == "asset-from-provider"
+
+        asset = asset_repo.get_by_asset_id("asset-from-provider")
+        assert asset is not None
+        assert asset.status == "completed"
+        assert asset.result_url == "https://example.com/mock/portrait.png"
+        assert asset.asset_type == "portrait"
+        assert asset.session_id == "sess-1"
+        assert asset.cache_key == "cache-abc"
+        assert asset.provider_name == "mock"
+
+    @pytest.mark.asyncio
+    async def test_completed_job_updates_existing_asset(self, runner, job_repo, asset_repo):
+        from llm_rpg.storage.models import AssetModel
+        existing = AssetModel(
+            asset_id="asset-existing",
+            asset_type="portrait",
+            status="pending",
+            session_id="sess-1",
+            provider_name="mock",
+        )
+        asset_repo.db.add(existing)
+        asset_repo.db.commit()
+
+        _insert_pending_job(job_repo, job_id="pub-1")
+
+        mock_provider = MagicMock()
+        mock_provider.generate = AsyncMock(return_value=AssetGenerationResult(
+            request_id="pub-1",
+            status=AssetStatus.COMPLETED,
+            asset_url="https://example.com/new/portrait.png",
+            asset_id="asset-existing",
+        ))
+
+        with patch("llm_rpg.assets.jobs.get_asset_provider", return_value=mock_provider):
+            result = await runner.run_next_job()
+
+        assert result is not None
+        assert result.asset_id == "asset-existing"
+
+        asset = asset_repo.get_by_asset_id("asset-existing")
+        assert asset is not None
+        assert asset.status == "completed"
+        assert asset.result_url == "https://example.com/new/portrait.png"

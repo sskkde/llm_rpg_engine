@@ -16,7 +16,7 @@ from llm_rpg.assets.interfaces import (
 from llm_rpg.assets.provider_factory import get_asset_provider
 from llm_rpg.assets.retry_policy import RetryPolicy
 from llm_rpg.models.assets import AssetJobResponse, AssetJobStatus
-from llm_rpg.storage.repositories import AssetJobRepository
+from llm_rpg.storage.repositories import AssetJobRepository, AssetRepository
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,11 @@ class AssetJobRunner:
     def __init__(
         self,
         job_repository: AssetJobRepository,
+        asset_repository: AssetRepository,
         retry_policy: RetryPolicy,
     ):
         self._job_repo = job_repository
+        self._asset_repo = asset_repository
         self._retry_policy = retry_policy
 
     async def run_next_job(
@@ -53,7 +55,31 @@ class AssetJobRunner:
             result: AssetGenerationResult = await provider.generate(request)
 
             if result.status == AssetStatus.COMPLETED:
-                self._job_repo.mark_completed(job.job_id, result.asset_id or "")
+                asset_id = result.asset_id or job.job_id
+                asset = self._asset_repo.get_by_asset_id(asset_id)
+                if asset is None:
+                    from llm_rpg.storage.models import AssetModel
+                    asset = AssetModel(
+                        asset_id=asset_id,
+                        asset_type=job.asset_type,
+                        status="completed",
+                        session_id=job.session_id,
+                        provider_name=job.provider_name,
+                        cache_key=job.cache_key,
+                        result_url=result.asset_url,
+                        request_params=job.request_json or {},
+                        metadata_json=result.metadata or {},
+                    )
+                    self._asset_repo.db.add(asset)
+                    self._asset_repo.db.commit()
+                    self._asset_repo.db.refresh(asset)
+                else:
+                    self._asset_repo.update_status(
+                        asset_id=asset_id,
+                        status="completed",
+                        result_url=result.asset_url,
+                    )
+                self._job_repo.mark_completed(job.job_id, asset_id)
             else:
                 error_msg = result.error_message or f"Provider returned status: {result.status.value}"
                 error_type = result.metadata.get("error_type") if result.metadata else None

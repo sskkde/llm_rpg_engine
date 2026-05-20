@@ -911,6 +911,91 @@ The following features are explicitly out of scope for P7 and deferred to future
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P7_COMPLETION_REPORT.md`, and `P7_READINESS.md`.
 
+## P8 Production Asset Runtime + Provider Integration
+
+This phase upgrades P7 infrastructure to production-grade with provider registry, real OpenAI DALL-E adapter, queue abstraction, cost tracking, rate limiting, and richer NPC portrait integration.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P8 quality gate (fast)
+make test-p8-fast
+
+# Run P8 quality gate (full)
+make test-p8
+
+# Run P8 scenario tests
+make test-scenario-p8
+
+# Run frontend P8 asset tests
+cd frontend
+npm test -- __tests__/assets/NPCPortrait.p8.test.tsx
+```
+
+### Key Features
+
+- **Provider Registry**: Capability metadata for all providers, health checks without real API calls
+- **OpenAI DALL-E Adapter**: Real client abstraction with Fake/Real client injection, no secrets in logs
+- **Queue Backend**: Protocol + in-process implementation, RQ/Celery shells for P9
+- **Lease/Heartbeat**: Job lease with heartbeat, stale recovery, dead-letter handling
+- **Worker CLI**: `python -m llm_rpg.scripts.asset_worker --once/--loop/--batch-size`
+- **Cost Tracking**: Per-job usage recording, cost summary API, session/user/provider queries
+- **Rate Limiting**: Per-user/per-session/per-provider limits, 429 with Retry-After header
+- **NPC Portrait Context**: Prompt includes NPC name, mood, personality, location, narration
+- **Portrait Pre-generation**: Cache-first prewarm for current location NPCs
+- **Admin Audit APIs**: Phase 2 read endpoints with pagination and filtering
+
+### Provider Registry Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/debug/assets/providers` | GET | List provider capabilities |
+| `/debug/assets/providers/{name}/health` | GET | Individual provider health |
+| `/debug/assets/usage` | GET | List usage logs (paginated) |
+| `/debug/assets/usage/summary` | GET | Aggregated cost summary |
+| `/debug/assets/rate-limit-events` | GET | List rate limit events |
+
+### Portrait Prewarm Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/media/sessions/{id}/prewarm-portraits` | POST | Trigger pre-generation for location NPCs |
+| `/media/sessions/{id}/prewarm-status` | GET | Get pre-generation status |
+
+### Admin Audit Endpoints (Phase 2)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/audit/sessions/{id}/logs` | GET | Session event logs (paginated) |
+| `/admin/audit/sessions/{id}/model-calls` | GET | LLM call history |
+| `/admin/audit/sessions/{id}/errors` | GET | Error log |
+| `/admin/audit/export` | GET | Export session audit (JSONL) |
+
+### Debug UI Components
+
+New debug components available in the debug page:
+- **AssetQueueViewer**: Job queue with lease/dead-letter status, retry/cancel actions
+- **AssetUsageViewer**: Usage logs with cost summary, provider/session filters
+- **ProviderHealthViewer**: Provider cards with enabled/configured status
+- **RateLimitViewer**: Rate limit events with allowed/denied badges
+
+### P9 Deferred Items
+
+The following features are explicitly out of scope for P8 and deferred to future phases:
+
+- **Celery/RQ production queue**: Distributed workers with real task queue
+- **Real audio generation**: Music synthesis API for BGM and SFX
+- **SFX asset type support**: Sound effects beyond BGM
+- **CDN/S3 deployment**: Production asset storage and delivery
+- **Real DALL-E integration tests**: End-to-end with recorded responses
+- **Redis-based rate limiting**: Multi-process shared state
+- **ForgetCurve background decay**: Automatic memory decay job
+
+For detailed status, see `IMPLEMENTATION_STATUS.md`, `P8_COMPLETION_REPORT.md`, and `P8_READINESS.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

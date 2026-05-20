@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-16
-**Current Phase**: P7 Complete — Ready for P8 Planning
+**Last Updated**: 2026-05-20
+**Current Phase**: P8 Complete — Ready for P9 Planning
 
 ---
 
@@ -203,6 +203,48 @@ P7 extends P6 sync/mock infrastructure to production-ready async runtime. For de
 
 ---
 
+## P8 Production Asset Runtime + Provider Integration
+
+P8 upgrades P7 infrastructure to production-grade with provider registry, real adapters, queue abstraction, cost tracking, rate limiting, and richer NPC integration. For detailed status, see `P8_COMPLETION_REPORT.md`.
+
+| Deliverable | Status |
+|-------------|--------|
+| Migration 015: asset_usage_logs, rate_limit_events, npc appearance | Completed |
+| ProviderCapability + ProviderRegistry | Completed |
+| ProviderError taxonomy (5 error types) | Completed |
+| AssetQueueBackend Protocol + InProcessAssetQueueBackend | Completed |
+| AssetUsageLogRepository + AssetRateLimitEventRepository | Completed |
+| AssetUsageService + Cost tracking API | Completed |
+| AssetRateLimiter + Rate limit API | Completed |
+| NPC portrait prompt builder with mood/context | Completed |
+| OpenAI DALL-E adapter with client abstraction | Completed |
+| Audio provider shell | Completed |
+| Lease/heartbeat/stale recovery/dead-letter | Completed |
+| Worker CLI (--once/--loop/--batch-size) | Completed |
+| Portrait pre-generation API | Completed |
+| NPCPortrait frontend richer integration | Completed |
+| AuditStore read APIs phase 2 | Completed |
+| AssetQueueViewer debug component | Completed |
+| AssetUsageViewer/ProviderHealthViewer/RateLimitViewer | Completed |
+| P8 Makefile targets + CI p8-tests job | Completed |
+| P8 scenario tests (12 tests) | Completed |
+| P8_COMPLETION_REPORT.md | Completed |
+| P8_READINESS.md | Completed |
+
+**P8 Gates**: `make test-p8-fast`, `make test-p8`
+
+**Test Coverage**: 200+ tests across unit, integration, scenario, and frontend
+
+**Provider Architecture**: Registry wraps factory, OpenAI adapter with Fake/Real client abstraction, audio provider shell
+
+**Queue Backend**: Protocol + in-process implementation, RQ/Celery shells for P9
+
+**Rate Limiting**: In-memory sliding window + DB events, per-user/per-session/per-provider limits
+
+**NPC Integration**: Portrait prompt includes NPC name, mood, personality, location, narration context
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -225,41 +267,50 @@ P7 extends P6 sync/mock infrastructure to production-ready async runtime. For de
 
 ---
 
-## P8+ Deferred Items
+## P9+ Deferred Items
 
-The following items are explicitly out of scope for P7 and deferred to future phases:
+The following items are explicitly out of scope for P8 and deferred to future phases:
 
-### Real External Providers (P8 Priority)
-- DALL-E / Stable Diffusion integration for images with real API calls
-- Audio synthesis for BGM with real generation
-- API key management and cost tracking
-
-### Production Queue Infrastructure (P8 Priority)
-- Celery, RQ, Temporal, or similar
-- Background worker processes
+### Production Queue Infrastructure (P9 Priority)
+- Celery, RQ, or similar task queue with real adapter implementation
+- Distributed worker processes
 - Job monitoring and dead letter queue
 
-### Game Integration (P8 Priority)
+### Real Audio Generation (P9 Priority)
+- Music synthesis API for BGM
+- SFX asset type support
+- Real audio provider implementation
+
+### CDN/S3 Deployment (P9 Priority)
+- Asset upload to cloud storage
+- CDN delivery for images and audio
+- Signed URL generation
+
+### Redis-Based Rate Limiting (P9 Priority)
+- Distributed rate limit state
+- Multi-process support
+- Sliding window with Redis
+
+### Game Integration (P9+ Priority)
 - ~~Wire SceneBackground to location display~~ — Completed in P7
 - ~~Wire BGMControl to scene transitions~~ — Completed in P7
-- ~~Wire NPCPortrait to game session NPCs~~ — Basic integration completed in P7 (renders NPCPortrait for NPCs at current location)
-- NPCPortrait rich integration: mood/state context, narration-tied rendering, pre-generation for major NPCs
+- ~~Wire NPCPortrait to game session NPCs~~ — Completed in P8 (richer integration with mood/context)
+- ~~Portrait pre-generation~~ — Completed in P8
 
-### Engine Refactoring (P8+ Priority)
+### Engine Refactoring (P9+ Priority)
 - ReplayEngine rewrite
 - Turn Orchestrator major refactoring
 
-### Test Infrastructure (P8+ Priority)
-- Real OpenAI/LLM integration for tests
+### Test Infrastructure (P9+ Priority)
+- Real OpenAI/LLM integration for tests (recorded responses)
 - E2E as required CI job (currently optional)
 - Non-debug frontend unit test fixes
 
-### Advanced Features (P8+ Priority)
+### Advanced Features (P9+ Priority)
 - ForgetCurve background decay job
 - Semantic/embedding-based leak detection
-- Full AuditStore read APIs (phase 2)
-- CDN caching for assets
-- Cost tracking and rate limiting
+- Full AuditStore read APIs (phase 3)
+- Real DALL-E integration tests with recorded responses
 
 ---
 
@@ -292,6 +343,11 @@ make test-p7                 # P7 quality gate (full)
 make test-p7-fast            # P7 fast gate
 make test-scenario-p7        # P7 scenario tests
 
+# P8 specific targets
+make test-p8                 # P8 quality gate (full)
+make test-p8-fast            # P8 fast gate
+make test-scenario-p8        # P8 scenario tests
+
 # Frontend asset tests
 cd frontend && npm test -- __tests__/assets
 
@@ -314,4 +370,6 @@ cd backend && python3 -m pytest -q
 - P6 Readiness: `P6_READINESS.md`
 - P7 Completion: `P7_COMPLETION_REPORT.md`
 - P7 Readiness: `P7_READINESS.md`
+- P8 Completion: `P8_COMPLETION_REPORT.md`
+- P8 Readiness: `P8_READINESS.md`
 - AGENTS.md: Project commands and conventions

@@ -125,6 +125,55 @@ These targets will be added in P6 when media generation endpoints are implemente
 
 ---
 
+## P8: Production Asset Runtime
+
+### Scope
+- Provider capability registry + error taxonomy
+- OpenAI DALL-E real adapter with client abstraction
+- Audio provider shell
+- AssetQueueBackend interface + in-process implementation
+- Job lease/heartbeat/stale recovery/dead-letter handling
+- Worker CLI
+- Cost/usage tracking (DB + service + API)
+- Rate limiting (per-user/per-session/per-provider)
+- NPC portrait context builder with mood/expression mapping
+- Portrait pre-generation API
+- NPCPortrait frontend richer integration
+- AuditStore read APIs phase 2
+- Debug/admin UI for queue/cost/provider/rate-limit observability
+
+### Gates
+- `make test-p8-fast` — Provider + queue + cost/rate + admin audit + frontend assets
+- `make test-p8` — test-p8-fast + scenario tests
+- `make test-p7-fast` — Must still pass (no regression)
+
+### Sub-targets
+- `test-asset-provider-p8` — Provider registry, OpenAI adapter, audio provider, error taxonomy
+- `test-asset-queue-p8` — Queue backend, lease/heartbeat, worker CLI
+- `test-asset-cost-rate-p8` — Usage service, rate limit service, APIs
+- `test-admin-audit-p8` — Admin audit read APIs
+- `test-frontend-p8-assets` — NPCPortrait.p8, AssetQueueViewer, AssetUsageViewer, ProviderHealthViewer, RateLimitViewer
+- `test-scenario-p8` — 12 P8 scenario tests
+
+### Scenario Types (12 tests)
+
+| Scenario | Purpose |
+|----------|---------|
+| `test_real_provider_disabled_falls_back_safely` | No key, no crash |
+| `test_openai_provider_missing_key_fails_safely` | ProviderAuthError returned |
+| `test_queue_lease_recovery` | Expired lease recovers stale job |
+| `test_dead_letter_after_max_retries` | Exceeded attempts enter dead-letter |
+| `test_rate_limit_blocks_excessive_requests` | 11th request returns 429 |
+| `test_cost_usage_recorded_for_completed_job` | actual_cost tracked |
+| `test_cost_usage_recorded_for_failed_job` | Failed jobs have usage events |
+| `test_npc_portrait_uses_mood_context` | Prompt contains NPC name/mood |
+| `test_portrait_prewarm_is_cache_first` | Cached NPC skipped |
+| `test_audit_read_api_returns_session_logs` | Paginated logs |
+| `test_debug_usage_summary_aggregates_costs` | Cost summary endpoint |
+| `test_worker_does_not_leak_secrets` | No sk- patterns in output |
+
+---
+
 ## Mock Provider Principles
 
 ### MockLLMProvider

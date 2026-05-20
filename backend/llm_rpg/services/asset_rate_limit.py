@@ -1,6 +1,7 @@
 """Asset rate limiting service with in-memory sliding window + DB event recording.
 
 Provides rate limit checks for asset generation endpoints with:
+- User-per-day limit
 - User-per-minute limit
 - Session-per-minute limit  
 - Provider concurrency limit
@@ -87,8 +88,8 @@ class AssetRateLimiter:
         if now - self._last_cleanup < self._cleanup_interval:
             return
         
-        # Clean up entries older than 2 minutes (buffer for safety)
-        cutoff = now - 120
+        # Keep entries up to 24h + buffer (86500s) for day-window buckets
+        cutoff = now - 86500
         for key in list(self._window_state.keys()):
             self._window_state[key] = [
                 ts for ts in self._window_state[key] if ts > cutoff
@@ -139,9 +140,10 @@ class AssetRateLimiter:
         """Check rate limits for an asset generation request.
         
         Checks in order:
-        1. User-per-minute limit
-        2. Session-per-minute limit
-        3. Provider concurrency limit
+        1. User-per-day limit
+        2. User-per-minute limit
+        3. Session-per-minute limit
+        4. Provider concurrency limit
         
         Returns RateLimitResult with allowed=True if all checks pass.
         Returns RateLimitResult with allowed=False and limit details if any check fails.
@@ -150,6 +152,18 @@ class AssetRateLimiter:
         now = datetime.now()
         now_ts = time.time()
         reset_at = self._get_minute_window_end(now)
+        
+        # Check user-per-day
+        day_bucket = f"user_day:{user_id}"
+        day_count = self._count_in_window(day_bucket, 86400)
+        if day_count >= self._config.user_per_day:
+            return RateLimitResult(
+                allowed=False,
+                limit_type="user_per_day",
+                limit_value=self._config.user_per_day,
+                current_value=day_count,
+                reset_at=now + timedelta(days=1),
+            )
         
         # Check user-per-minute
         user_bucket = f"user:{user_id}"
@@ -192,6 +206,7 @@ class AssetRateLimiter:
             )
         
         # All checks passed - record in memory for sliding window
+        self._window_state.setdefault(day_bucket, []).append(now_ts)
         self._window_state.setdefault(user_bucket, []).append(now_ts)
         if session_id:
             self._window_state.setdefault(f"session:{session_id}", []).append(now_ts)
@@ -225,6 +240,12 @@ class AssetRateLimiter:
         now = datetime.now()
         
         events_to_create = []
+        
+        day_bucket = f"user_day:{user_id}"
+        events_to_create.append({
+            "bucket_key": day_bucket,
+            "limit_type": "user_per_day" if limit_type == "user_per_day" else None,
+        })
         
         user_bucket = f"user:{user_id}"
         events_to_create.append({

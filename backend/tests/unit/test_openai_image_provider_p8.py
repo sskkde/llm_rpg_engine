@@ -274,8 +274,9 @@ class TestMissingApiKey:
         assert result.status == AssetStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_default_no_key_uses_fake_client(self, monkeypatch):
+    async def test_default_no_key_uses_fake_client_in_testing_env(self, monkeypatch):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("APP_ENV", "testing")
         provider = OpenAIImageProvider()
         assert isinstance(provider._client, FakeOpenAIClient)
 
@@ -506,3 +507,64 @@ class TestProtocolCompliance:
                 return ImageResponse(asset_url="custom", asset_id="custom")
 
         assert isinstance(CustomClient(), OpenAIClientProtocol)
+
+
+# ---------------------------------------------------------------------------
+# Production no-key scenario: structured FAILED result
+# ---------------------------------------------------------------------------
+
+class TestProductionNoKeyBehavior:
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_testing_uses_fake_client_without_key(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("APP_ENV", "testing")
+        provider = OpenAIImageProvider()
+        assert isinstance(provider._client, FakeOpenAIClient)
+        request = _make_request()
+        result = await provider.generate(request)
+        assert result.status == AssetStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_production_without_key_fails_safely(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.delenv("ASSET_OPENAI_FAKE_FALLBACK", raising=False)
+        provider = OpenAIImageProvider()
+        assert provider._client is None
+        request = _make_request()
+        result = await provider.generate(request)
+        assert result.status == AssetStatus.FAILED
+        assert result.error_message == "OPENAI_API_KEY not configured"
+        assert result.metadata["error_code"] == "missing_api_key"
+        assert result.metadata["error_type"] == "ProviderAuthError"
+        assert result.metadata["retryable"] is False
+        assert result.metadata["api_key_configured"] is False
+        assert result.processing_time_ms == 0
+
+    @pytest.mark.asyncio
+    async def test_openai_provider_with_injected_fake_client_succeeds(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("APP_ENV", raising=False)
+        provider = OpenAIImageProvider(client=FakeOpenAIClient())
+        request = _make_request()
+        result = await provider.generate(request)
+        assert result.status == AssetStatus.COMPLETED
+        assert result.asset_url is not None
+
+    @pytest.mark.asyncio
+    async def test_production_no_key_check_status_returns_failed(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.delenv("ASSET_OPENAI_FAKE_FALLBACK", raising=False)
+        provider = OpenAIImageProvider()
+        status = await provider.check_status("any-id")
+        assert status == AssetStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_fake_fallback_env_var_enables_fake_client(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("APP_ENV", raising=False)
+        monkeypatch.setenv("ASSET_OPENAI_FAKE_FALLBACK", "true")
+        provider = OpenAIImageProvider()
+        assert isinstance(provider._client, FakeOpenAIClient)

@@ -221,10 +221,12 @@ class OpenAIImageProvider(AssetProvider):
     Accepts an OpenAIClientProtocol instance via *client*.  If no client
     is provided the default is:
       - RealOpenAIClient if OPENAI_API_KEY is set
-      - FakeOpenAIClient otherwise
+      - FakeOpenAIClient if APP_ENV=testing or ASSET_OPENAI_FAKE_FALLBACK=true
+      - None otherwise (production without key)
 
-    Missing API key → returns FAILED result with ProviderAuthError info
-    (no uncaught exception).
+    When self._client is None, generate() and check_status() return a
+    structured FAILED result with error_message="OPENAI_API_KEY not configured"
+    instead of silently using FakeOpenAIClient.
     """
 
     provider_name = "openai_image"
@@ -236,7 +238,14 @@ class OpenAIImageProvider(AssetProvider):
         elif os.environ.get("OPENAI_API_KEY"):
             self._client = RealOpenAIClient()
         else:
-            self._client = FakeOpenAIClient()
+            fake_fallback_enabled = (
+                os.getenv("ASSET_OPENAI_FAKE_FALLBACK", "").lower() == "true"
+                or os.getenv("APP_ENV") == "testing"
+            )
+            if fake_fallback_enabled:
+                self._client = FakeOpenAIClient()
+            else:
+                self._client = None
 
         self._api_key_configured = bool(os.environ.get("OPENAI_API_KEY"))
 
@@ -246,6 +255,21 @@ class OpenAIImageProvider(AssetProvider):
         Returns a structured FAILED result on any ProviderError — never
         raises an uncaught exception.
         """
+        if self._client is None:
+            return AssetGenerationResult(
+                request_id=request.request_id,
+                status=AssetStatus.FAILED,
+                error_message="OPENAI_API_KEY not configured",
+                metadata={
+                    "provider": self.provider_name,
+                    "api_key_configured": False,
+                    "error_code": "missing_api_key",
+                    "error_type": "ProviderAuthError",
+                    "retryable": False,
+                },
+                processing_time_ms=0,
+            )
+
         start = time.time()
         prompt = request.metadata.get("prompt", "")
         size = request.metadata.get("size", "1024x1024")
@@ -309,6 +333,8 @@ class OpenAIImageProvider(AssetProvider):
 
     async def check_status(self, request_id: str) -> AssetStatus:
         """Check status — DALL-E returns synchronously so always COMPLETED."""
+        if self._client is None:
+            return AssetStatus.FAILED
         return AssetStatus.COMPLETED if self._api_key_configured else AssetStatus.FAILED
 
     async def cancel(self, request_id: str) -> bool:

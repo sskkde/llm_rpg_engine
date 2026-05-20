@@ -134,6 +134,24 @@ def get_rate_limiter(db: Session = Depends(get_db)) -> AssetRateLimiter:
     return AssetRateLimiter(rate_limit_event_repo=repo)
 
 
+def _resolve_provider_name(asset_type: AssetType) -> str:
+    """Resolve the provider name for a given asset type.
+
+    Checks ASSET_PROVIDER env var first, then falls back to
+    ProviderRegistry.get_available_provider(), then defaults to "mock".
+    """
+    configured = os.getenv("ASSET_PROVIDER")
+    if configured:
+        return configured
+    try:
+        from llm_rpg.assets.provider_registry import ProviderRegistry
+        registry = ProviderRegistry()
+        provider = registry.get_available_provider(asset_type.value)
+        return provider or "mock"
+    except Exception:
+        return "mock"
+
+
 def _enforce_rate_limit(
     rate_limiter: AssetRateLimiter,
     user_id: str,
@@ -206,7 +224,7 @@ async def generate_portrait(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.PORTRAIT),
     )
     prompt = _build_rich_portrait_prompt(
         session_id=request.session_id,
@@ -247,7 +265,7 @@ async def generate_scene(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.SCENE),
     )
     gen_request = AssetGenRequest(
         asset_type=AssetType.SCENE,
@@ -281,7 +299,7 @@ async def generate_bgm(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.BGM),
     )
     gen_request = AssetGenRequest(
         asset_type=AssetType.BGM,
@@ -346,7 +364,7 @@ async def create_portrait_job(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.PORTRAIT),
     )
     prompt = _build_rich_portrait_prompt(
         session_id=request.session_id,
@@ -383,7 +401,7 @@ async def create_scene_job(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.SCENE),
     )
     gen_request = AssetGenRequest(
         asset_type=AssetType.SCENE,
@@ -413,7 +431,7 @@ async def create_bgm_job(
         rate_limiter=rate_limiter,
         user_id=current_user.id,
         session_id=request.session_id,
-        provider_name="mock",
+        provider_name=_resolve_provider_name(AssetType.BGM),
     )
     gen_request = AssetGenRequest(
         asset_type=AssetType.BGM,

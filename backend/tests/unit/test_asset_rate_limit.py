@@ -217,13 +217,15 @@ class TestAssetRateLimiter:
         )
         
         assert result is not None
-        assert mock_repo.create_event.call_count == 2
+        assert mock_repo.create_event.call_count == 3
         first_call_data = mock_repo.create_event.call_args_list[0][0][0]
-        assert first_call_data["user_id"] == "user1"
-        assert first_call_data["allowed"] is False
-        assert first_call_data["limit_type"] == "user_per_minute"
+        assert first_call_data["bucket_key"] == "user_day:user1"
         second_call_data = mock_repo.create_event.call_args_list[1][0][0]
-        assert second_call_data["bucket_key"] == "session:session1"
+        assert second_call_data["user_id"] == "user1"
+        assert second_call_data["allowed"] is False
+        assert second_call_data["limit_type"] == "user_per_minute"
+        third_call_data = mock_repo.create_event.call_args_list[2][0][0]
+        assert third_call_data["bucket_key"] == "session:session1"
 
     def test_record_rate_limit_event_without_repo(self):
         limiter = AssetRateLimiter(rate_limit_event_repo=None)
@@ -262,7 +264,7 @@ class TestAssetRateLimiter:
         limiter = AssetRateLimiter()
         now = time.time()
         
-        limiter._window_state["test_key"] = [now - 200, now - 150, now - 10]
+        limiter._window_state["test_key"] = [now - 90000, now - 87000, now - 10]
         limiter._last_cleanup = now - limiter._cleanup_interval - 1
         
         with patch.object(time, 'time', return_value=now):
@@ -328,3 +330,84 @@ class TestAssetRateLimiter:
         expected_reset = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
         delta = abs((result.reset_at - expected_reset).total_seconds())
         assert delta < 2
+
+    def test_user_per_day_limit_allows_under_limit(self):
+        config = RateLimitConfig(user_per_day=200, user_per_minute=300, session_per_minute=300)
+        limiter = AssetRateLimiter(config=config)
+        for i in range(199):
+            result = limiter.check_rate_limit(
+                user_id="user1",
+                session_id="session1",
+                provider_name="mock",
+            )
+            assert result.allowed is True, f"Request {i+1} should be allowed"
+
+    def test_user_per_day_limit_blocks_at_limit(self):
+        config = RateLimitConfig(user_per_day=200, user_per_minute=300, session_per_minute=300)
+        limiter = AssetRateLimiter(config=config)
+        for i in range(200):
+            result = limiter.check_rate_limit(
+                user_id="user1",
+                session_id="session1",
+                provider_name="mock",
+            )
+            assert result.allowed is True, f"Request {i+1} should be allowed"
+        result = limiter.check_rate_limit(
+            user_id="user1",
+            session_id="session1",
+            provider_name="mock",
+        )
+        assert result.allowed is False
+        assert result.limit_type == "user_per_day"
+        assert result.limit_value == 200
+
+    def test_user_per_day_limit_records_db_event(self):
+        mock_repo = MagicMock()
+        mock_repo.count_recent.return_value = 0
+        mock_repo.create_event.return_value = MagicMock(event_id="evt-day")
+        config = RateLimitConfig(user_per_day=1, user_per_minute=300, session_per_minute=300)
+        limiter = AssetRateLimiter(rate_limit_event_repo=mock_repo, config=config)
+
+        limiter.check_rate_limit("user1", "session1", "mock")
+        mock_repo.count_recent.return_value = 1
+        result = limiter.check_rate_limit("user1", "session1", "mock")
+        assert result.allowed is False
+        assert result.limit_type == "user_per_day"
+
+        limiter.record_rate_limit_event(
+            user_id="user1",
+            session_id="session1",
+            provider_name="mock",
+            allowed=False,
+            limit_type="user_per_day",
+            limit_value=1,
+            current_value=1,
+            reset_at=datetime.now() + timedelta(days=1),
+        )
+        day_event = mock_repo.create_event.call_args_list[0][0][0]
+        assert day_event["bucket_key"] == "user_day:user1"
+        assert day_event["limit_type"] == "user_per_day"
+
+    def test_blocked_events_do_not_increase_allowed_count(self):
+        config = RateLimitConfig(user_per_day=3, user_per_minute=300, session_per_minute=300)
+        limiter = AssetRateLimiter(config=config)
+        for i in range(3):
+            result = limiter.check_rate_limit("user1", "session1", "mock")
+            assert result.allowed is True
+        blocked = limiter.check_rate_limit("user1", "session1", "mock")
+        assert blocked.allowed is False
+        for _ in range(5):
+            result = limiter.check_rate_limit("user1", "session1", "mock")
+            assert result.allowed is False
+        day_count = len(limiter._window_state.get("user_day:user1", []))
+        assert day_count == 3
+
+    def test_user_per_day_checked_before_user_per_minute(self):
+        config = RateLimitConfig(user_per_day=2, user_per_minute=2, session_per_minute=300)
+        limiter = AssetRateLimiter(config=config)
+        for i in range(2):
+            result = limiter.check_rate_limit("user1", "session1", "mock")
+            assert result.allowed is True
+        result = limiter.check_rate_limit("user1", "session1", "mock")
+        assert result.allowed is False
+        assert result.limit_type == "user_per_day"

@@ -320,6 +320,16 @@ cd frontend && npm test -- __tests__/assets/NPCPortrait.p8.test.tsx
 make test-scenario-p8
 ```
 
+### P8 Closeout Fixes
+
+Three closeout fixes applied after initial implementation review:
+
+| Fix | Status | Description |
+|-----|--------|-------------|
+| F1: OpenAI provider env-safe behavior | ✅ | Production without OPENAI_API_KEY now returns structured FAILED result (no silent FakeOpenAIClient). Fake fallback only in testing or with `ASSET_OPENAI_FAKE_FALLBACK=true`. |
+| F2: user_per_day rate limit | ✅ | `AssetRateLimiter` now enforces `user_per_day` (was defined but never checked). Blocked requests do not increment allowed quota. |
+| F3: dynamic provider name resolution | ✅ | `_resolve_provider_name()` checks `ASSET_PROVIDER` env var + `ProviderRegistry` before falling back to "mock". 6 hardcoded `provider_name="mock"` replaced. |
+
 ### Final Verification Results
 
 | Command | Result |
@@ -331,6 +341,9 @@ make test-scenario-p8
 | `cd frontend && npm run lint` | PASS |
 | `cd frontend && npx tsc --noEmit` | PASS |
 | `make test-scenario-p8` | PASS (12/12) |
+| CI (all 12 jobs) | PASS ✅ |
+| P8 unit tests (`test_openai_image_provider_p8` + `test_asset_rate_limit` + etc.) | 144 passed |
+| P8 frontend tests (`NPCPortrait.p8` + debug viewers) | 52 passed |
 
 ---
 

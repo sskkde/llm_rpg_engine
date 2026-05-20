@@ -261,8 +261,12 @@ Before declaring P8 complete:
 - [x] `cd frontend && npx tsc --noEmit` passes
 - [x] `cd frontend && npm test -- __tests__/assets/NPCPortrait.p8.test.tsx` passes
 - [x] `make test-scenario-p8` passes (12/12)
-- [x] P8_COMPLETION_REPORT.md exists
-- [x] P8_READINESS.md exists
+- [x] OpenAI provider no-key production behavior verified (structured FAILED, no silent fake)
+- [x] user_per_day rate limit verified (enforced, blocked not counted)
+- [x] Provider name resolution verified (ASSET_PROVIDER + ProviderRegistry + mock fallback)
+- [x] CI (all 12 jobs) passes
+- [x] P8_COMPLETION_REPORT.md exists and updated
+- [x] P8_READINESS.md exists and updated
 - [x] README.md updated with P8 section
 - [x] IMPLEMENTATION_STATUS.md updated with P8 deliverables
 - [x] doc/testing_strategy.md updated with P8 gates

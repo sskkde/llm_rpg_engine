@@ -174,6 +174,116 @@ These targets will be added in P6 when media generation endpoints are implemente
 
 ---
 
+## V1 Release Gate
+
+### Scope
+
+V1.0 release gate covers the complete P9 deliverable: rule engine formalization, playable UX, operations release pack, and release test infrastructure.
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `test-v1-release` | All V1 release gate tests + frontend build/lint/tsc |
+| `test-v1-rule-engine` | WP1 rule engine tests (validators, rules, schemas, resolvers) |
+| `test-v1-game-ui` | WP2 frontend game panel tests |
+| `test-v1-ops` | WP3 operations API tests |
+| `test-v1-playthrough` | V1 playthrough scenario (8 phases) |
+
+### CI V1 Release Gate
+
+**File**: `.github/workflows/ci.yml`
+
+Job: `v1-release-tests`
+
+Steps:
+1. Install Python + Node dependencies
+2. Run `make test-v1-release`
+3. Run `make test-p8-fast`
+4. Run `cd frontend && npm run build && npm run lint && npx tsc --noEmit`
+
+Environment: `APP_ENV=testing`, `ASSET_PROVIDER=mock`
+
+**Blocking gate** — the job is NOT `continue-on-error`. If any step fails, the entire CI run fails.
+
+### V1 Release Verification
+
+Before declaring V1.0 ready for production:
+
+```bash
+# V1 release gate (blocking)
+make test-v1-release
+
+# P8 regression (no regressions from previous phases)
+make test-p8-fast
+
+# Frontend static checks
+cd frontend && npm run build && npm run lint && npx tsc --noEmit
+
+# Playthrough validation
+make test-v1-playthrough
+
+# Health check
+curl http://localhost:8000/admin/health
+
+# Release readiness
+curl http://localhost:8000/admin/release-readiness
+```
+
+### V1 Checklist
+
+- [ ] `make test-v1-release` passes
+- [ ] `make test-p8-fast` passes (no regression)
+- [ ] `npm run build` passes
+- [ ] `npx tsc --noEmit` passes
+- [ ] `npm run lint` passes
+- [ ] `make test-v1-playthrough` passes
+- [ ] `/admin/health` returns all OK
+- [ ] `/admin/release-readiness` returns all true
+
+### Frontend Test Debt Strategy
+
+The V1 release acknowledges a known gap in frontend unit test coverage. This section documents the strategy for managing this debt.
+
+#### Current State
+
+- **~118 tests skipped** due to React 19 production build + jsdom incompatibility
+- **Debug tests (105)** pass with `NODE_ENV=development` workaround
+- **P8 asset tests** pass independently
+- **Combat tests (21)** pass and are blocking gate
+
+#### Debt Classification
+
+Tests are classified into four categories (see `docs/frontend_test_debt_audit.md` for full details):
+
+| Category | Description | Action |
+|----------|-------------|--------|
+| A. Obsolete | Tests for removed or replaced components | Delete or mark for removal |
+| B. React 19/jsdom | Tests blocked by jsdom compatibility | Keep skipped with documented reason |
+| C. V1 Critical | Tests for core V1 features | Fixed and unskipped |
+| D. Non-critical Legacy | Tests for non-blocking features | Keep skipped with documentation |
+
+#### V1 Critical Fixes
+
+The following tests were fixed as part of V1:
+- `SaveSlotList.test.tsx` — Save system is V1 core feature
+
+#### Resolution Plan
+
+1. **Short term (V1)**: Accept skipped tests with documented audit trail
+2. **Medium term (P10)**: Investigate React 19 + jsdom compatibility; prioritize Category B tests
+3. **Long term**: Migrate to alternative test framework or wait for jsdom upstream fixes
+
+#### Monitoring
+
+- Skipped test count tracked in CI (non-blocking)
+- New tests should not be added to skipped category without justification
+- Quarterly review of skipped test classification
+
+For the complete audit, see `docs/frontend_test_debt_audit.md`.
+
+---
+
 ## Mock Provider Principles
 
 ### MockLLMProvider

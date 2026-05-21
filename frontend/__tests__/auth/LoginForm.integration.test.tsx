@@ -1,3 +1,9 @@
+/**
+ * TEST DEBT STATUS: Fixed (was skipped with P4 TODO)
+ * Original issue: React 19 / testing-library compatibility - tests rendered empty <div />
+ * Resolution: The compatibility issue has been resolved; tests now pass.
+ * Remaining debt: None for this file.
+ */
 import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {NextIntlClientProvider} from 'next-intl';
 import {LoginForm} from '@/components/auth/LoginForm';
@@ -44,10 +50,7 @@ function renderLoginForm() {
   );
 }
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> due to unknown rendering issue in test environment
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('LoginForm with AuthProvider', () => {
+describe('LoginForm with AuthProvider', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();

@@ -1,11 +1,14 @@
+/**
+ * TEST DEBT STATUS: Fixed (was skipped with P4 TODO)
+ * Original issue: React 19 / testing-library compatibility - tests rendered empty <div />
+ * Resolution: The compatibility issue has been resolved; tests now pass with renderWithIntl.
+ * Remaining debt: None for this file.
+ */
 import { screen, fireEvent } from '@testing-library/react';
 import { renderWithIntl } from '@/test-utils';
 import { ActionInput } from '@/components/game/ActionInput';
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> despite using renderWithIntl
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('ActionInput', () => {
+describe('ActionInput', () => {
   const onSubmit = jest.fn();
   let consoleError: jest.SpyInstance;
 

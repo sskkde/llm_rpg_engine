@@ -1,12 +1,17 @@
+/**
+ * TEST DEBT STATUS: Fixed (was skipped with P4 TODO)
+ * Original issue: React 19 / testing-library compatibility - tests rendered empty <div />
+ * Resolution: The compatibility issue has been resolved; tests now pass with renderWithIntl.
+ * Additional fix: Changed getByText(/向前走/) to getAllByText to handle multiple matches
+ *   (the action text appears in both the title and narration paragraphs).
+ * Remaining debt: None for this file.
+ */
 import { screen, fireEvent } from '@testing-library/react';
 import { renderWithIntl } from '@/test-utils';
 import { LogPanel } from '@/components/game/LogPanel';
 import { AdventureLogEntry } from '@/types/api';
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> due to unknown rendering issue in test environment
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('LogPanel', () => {
+describe('LogPanel', () => {
   const createEntry = (overrides: Partial<AdventureLogEntry> = {}): AdventureLogEntry => ({
     id: 'test-id-1',
     turn_no: 1,
@@ -50,7 +55,7 @@ describe.skip('LogPanel', () => {
     expect(screen.getByTestId('adventure-log')).toBeInTheDocument();
     expect(screen.getByTestId('adventure-log-entry')).toBeInTheDocument();
     expect(screen.getByText(/回合 1/)).toBeInTheDocument();
-    expect(screen.getByText(/向前走/)).toBeInTheDocument();
+    expect(screen.getAllByText(/向前走/).length).toBeGreaterThanOrEqual(1);
   });
 
   it('calls onSelectEntry and marks the selected entry', () => {

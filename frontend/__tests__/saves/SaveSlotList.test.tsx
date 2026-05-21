@@ -1,3 +1,9 @@
+/**
+ * TEST DEBT STATUS: Fixed (was skipped with P4 TODO)
+ * Original issue: React 19 / testing-library compatibility - tests rendered empty <div />
+ * Resolution: The compatibility issue has been resolved; tests now pass with renderWithIntl.
+ * Remaining debt: None for this file.
+ */
 import {screen, fireEvent} from '@testing-library/react';
 import {renderWithIntl} from '@/test-utils';
 import { SaveSlotList } from '@/components/saves/SaveSlotList';
@@ -8,10 +14,7 @@ const mockSaves: SaveSlot[] = [
   { id: '2', user_id: 'u1', slot_number: 2, created_at: '2024-01-02T00:00:00Z', session_count: 0 },
 ];
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> due to unknown rendering issue in test environment
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('SaveSlotList', () => {
+describe('SaveSlotList', () => {
   const onSelect = jest.fn();
   const onDelete = jest.fn();
   const onRetry = jest.fn();

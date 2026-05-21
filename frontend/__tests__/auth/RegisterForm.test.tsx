@@ -1,3 +1,9 @@
+/**
+ * TEST DEBT STATUS: Fixed (was skipped with P4 TODO)
+ * Original issue: React 19 / testing-library compatibility - tests rendered empty <div />
+ * Resolution: The compatibility issue has been resolved; tests now pass with renderWithIntl.
+ * Remaining debt: None for this file.
+ */
 import {screen, fireEvent, waitFor} from '@testing-library/react';
 import {renderToString} from 'react-dom/server';
 import {NextIntlClientProvider} from 'next-intl';
@@ -25,10 +31,7 @@ jest.mock('@/lib/api', () => ({
   },
 }));
 
-// TODO(P4): Skip failing test suite - React 19 / testing-library compatibility issue
-// Tests render empty <div /> due to unknown rendering issue in test environment
-// See: .sisyphus/evidence/p4-content-productization/step1-frontend-unit.txt
-describe.skip('RegisterForm', () => {
+describe('RegisterForm', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });

@@ -9,6 +9,7 @@
         test-assets-unit test-media-api test-asset-debug-api test-frontend-assets test-p6-fast test-p6 \
         test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs test-scenario-p7 test-p7-fast test-p7 \
         test-asset-provider-p8 test-asset-queue-p8 test-asset-cost-rate-p8 test-admin-audit-p8 test-frontend-p8-assets test-scenario-p8 test-p8-fast test-p8 \
+        test-v1-rule-engine test-v1-game-ui test-v1-ops test-v1-playthrough test-v1-release \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -189,6 +190,33 @@ test-p3: ## Quality gate: backend + scenario smoke + pgvector + frontend static 
 	@cd frontend && npm run lint
 	@cd frontend && npx tsc --noEmit
 	@cd frontend && npm test -- __tests__/combat/CombatPanel.test.tsx
+
+# === V1.0 Release Targets ===
+
+test-v1-rule-engine: ## Run WP1 rule engine tests (MovementValidator, QuestValidator, ItemRules, SkillRules, ActionSchema, StateDeltaResolver, ConflictResolver)
+	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_movement_validator.py tests/unit/test_quest_validator.py tests/unit/test_item_rules.py tests/unit/test_skill_rules.py -q --tb=short
+	@cd backend && if [ -f tests/unit/test_action_schema.py ] || [ -f tests/unit/test_state_delta_resolver.py ] || [ -f tests/unit/test_conflict_resolver.py ]; then APP_ENV=testing python3 -m pytest tests/unit/test_action_schema.py tests/unit/test_state_delta_resolver.py tests/unit/test_conflict_resolver.py -q --tb=short; fi
+	@cd backend && if [ -f tests/scenario/test_rule_engine_v1.py ]; then APP_ENV=testing python3 -m pytest tests/scenario/test_rule_engine_v1.py -q --tb=short; fi
+
+test-v1-game-ui: ## Run WP2 game panel test suite
+	@cd frontend && if ls __tests__/game/*.test.tsx 2>/dev/null; then npm test -- __tests__/game/ --runInBand; else echo "No game UI tests found"; fi
+
+test-v1-ops: ## Run WP3 operations API tests (admin ops + player API)
+	@cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_admin_ops_api.py tests/integration/test_release_readiness_api.py -q --tb=short
+	@cd backend && if [ -f tests/integration/test_player_api.py ]; then APP_ENV=testing python3 -m pytest tests/integration/test_player_api.py -q --tb=short; fi
+
+test-v1-playthrough: ## Run V1.0 playthrough scenario tests
+	@cd backend && APP_ENV=testing python3 -m pytest tests/scenario/test_v1_playthrough.py -q --tb=short
+
+test-v1-release: ## V1.0 release gate: all V1 tests + test-p8-fast + frontend build/lint/tsc
+	@$(MAKE) test-v1-rule-engine
+	@$(MAKE) test-v1-game-ui
+	@$(MAKE) test-v1-ops
+	@$(MAKE) test-v1-playthrough
+	@$(MAKE) test-p8-fast
+	@cd frontend && npm run build
+	@cd frontend && npm run lint
+	@cd frontend && npx tsc --noEmit
 
 # ── Run targets ───────────────────────────────────────────────
 

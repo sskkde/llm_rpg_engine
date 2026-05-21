@@ -2675,11 +2675,17 @@ def execute_turn_service(
                 )
             else:
                 # Step 7b: Validate movement with MovementValidator
+                from llm_rpg.models.common import ProposedAction
+                
+                movement_action = ProposedAction(
+                    action_id="turn-move",
+                    actor_id="player",
+                    action_type="move",
+                    target_ids=[target_location_id],
+                )
                 movement_validator = MovementValidator()
                 movement_validation = movement_validator.validate_movement(
-                    actor_id="player",
-                    from_location_id=from_location_id,
-                    to_location_id=target_location_id,
+                    action=movement_action,
                     state=canonical_state,
                     context=validation_context,
                 )

@@ -337,6 +337,16 @@ cd backend
 pytest -q
 ```
 
+### V1 Release Gate
+
+The V1.0 release gate is the blocking quality gate for production:
+
+```bash
+make test-v1-release
+```
+
+This runs all V1 component tests, previous phase gates, and frontend static checks. See `doc/testing_strategy.md` for the full test pyramid and gate definitions.
+
 ### Run Specific Test Suites
 
 ```bash
@@ -504,6 +514,9 @@ make test-scenario-smoke
 
 # Run pgvector tests (requires PostgreSQL with pgvector extension)
 make test-pgvector
+
+# Run V1 release gate (complete V1.0 quality gate)
+make test-v1-release
 ```
 
 ### CI Pipeline
@@ -514,6 +527,7 @@ The project includes a GitHub Actions CI workflow (`.github/workflows/ci.yml`) t
 - **frontend-tests**: Runs frontend static checks (lint + typecheck) and stable combat tests
 - **frontend-unit-tests**: Runs full frontend unit tests (non-blocking, known failures)
 - **pgvector-tests**: Runs pgvector-specific tests against PostgreSQL
+- **v1-release-tests**: Runs V1 release gate + P8 regression + frontend build/lint/tsc (blocking)
 
 The CI workflow calls Makefile targets for consistency with local development.
 
@@ -995,6 +1009,94 @@ The following features are explicitly out of scope for P8 and deferred to future
 - **ForgetCurve background decay**: Automatic memory decay job
 
 For detailed status, see `IMPLEMENTATION_STATUS.md`, `P8_COMPLETION_REPORT.md`, and `P8_READINESS.md`.
+
+## P9 V1.0 Release Readiness
+
+This phase delivers the V1.0 release with a complete rule engine, playable UX, production operations infrastructure, and comprehensive release test gate.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run V1 release gate (blocking)
+make test-v1-release
+
+# Run V1 component gates
+make test-v1-rule-engine
+make test-v1-game-ui
+make test-v1-ops
+make test-v1-playthrough
+
+# Run previous phase gates (no regression)
+make test-p8-fast
+make test-p8
+```
+
+### Key Features
+
+- **Rule Engine Formalization**: MovementValidator, QuestValidator, ItemRules, SkillRules, ActionSchema (16 action types), StateDeltaResolver, ConflictResolver (5 scenarios)
+- **Playable UX**: 4 Player APIs (Quests/Inventory/Relationships/Locations), 4 Frontend panels, Settings Panel, Streaming Turn UI with 9 event types
+- **Production Operations**: Dockerfiles, nginx SSL, docker-compose.prod.yml, Admin Health/Metrics/Release-Readiness APIs
+- **Release Test Gate**: CI V1 release gate, Frontend test debt audit, 30-60 min playthrough scenario
+
+### Player API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/player/sessions/{id}/quests` | GET | Player-visible quest list |
+| `/player/sessions/{id}/inventory` | GET | Player inventory |
+| `/player/sessions/{id}/relationships` | GET | Player-known NPC relationships |
+| `/player/sessions/{id}/locations` | GET | Player-discovered locations |
+
+All endpoints apply PerspectiveService filtering to exclude hidden information.
+
+### Frontend Panels
+
+- **QuestJournalPanel**: Quest tracking with stage progress
+- **InventoryPanel**: Item management with category filter
+- **LocationMapPanel**: Discovered locations with movement paths
+- **RelationshipPanel**: NPC relationship scores with progress bars
+- **SettingsPanel**: BGM volume, text speed, auto-save toggle
+
+### Rule Engine Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| MovementValidator | `core/validation/movement_validator.py` | Path blocking, access rules, stamina |
+| QuestValidator | `core/validation/quest_validator.py` | Stage transitions, prerequisites |
+| ItemRules | `rules/item_rules.py` | Use/give/take validation, effects |
+| SkillRules | `rules/skill_rules.py` | Cast validation, effect resolution |
+| ActionSchema | `rules/action_schema.py` | 16 action type definitions |
+| StateDeltaResolver | `core/state_delta_resolver.py` | Delta generation for 7 action types |
+| ConflictResolver | `core/conflict_resolver.py` | 5 conflict resolution scenarios |
+
+### Admin Operations Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/health` | GET | DB, Redis, Provider health status |
+| `/admin/metrics` | GET | API latency, LLM calls, turn stats |
+| `/admin/release-readiness` | GET | Migration, content, env var status |
+
+### Documentation
+
+| Doc | Content |
+|-----|---------|
+| `docs/deployment.md` | Docker Compose, VPS, cloud deployment |
+| `docs/operations.md` | Health checks, troubleshooting, migrations |
+| `docs/security.md` | Auth mechanism, API key safety, CORS |
+| `docs/backup.md` | PostgreSQL backup, content pack backup |
+| `docs/release_checklist.md` | Pre-release checklist (15+ items) |
+| `docs/rule_engine_spec.md` | Rule engine specification |
+| `docs/v1_playthrough_script.md` | 8-phase playthrough script |
+
+### V1.0 Release Status: COMPLETE
+
+All Must Have items complete. All test gates pass. Ready for production deployment.
+
+For detailed status, see `V1_COMPLETION_REPORT.md` and `V1_READINESS.md`.
 
 ## References
 

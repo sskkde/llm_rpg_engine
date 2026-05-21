@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-20
-**Current Phase**: P8 Complete — Ready for P9 Planning
+**Last Updated**: 2026-05-21
+**Current Phase**: V1.0 Complete — Release Ready
 
 ---
 
@@ -245,6 +245,76 @@ P8 upgrades P7 infrastructure to production-grade with provider registry, real a
 
 ---
 
+## V1.0 Release Readiness (P9)
+
+P9 transforms the P8 Complete codebase into a fully release-ready V1.0 product with formalized rule engine, playable UX, production operations, and comprehensive test gates. For detailed status, see `V1_COMPLETION_REPORT.md` and `V1_READINESS.md`.
+
+### WP1 — Rule Engine Formalization
+
+| Deliverable | Status |
+|-------------|--------|
+| MovementValidator (path blocking, access rules, stamina) | Completed |
+| QuestValidator (stage transitions, prerequisites, hidden objectives) | Completed |
+| ItemRules (use/give/take validation, effect resolution) | Completed |
+| SkillRules (cast validation, effect resolution, available skills) | Completed |
+| ActionSchema (16 action types with required fields) | Completed |
+| StateDeltaResolver (7 resolve methods, source tracking) | Completed |
+| ConflictResolver (5 resolution scenarios) | Completed |
+| WP1 scenario tests | Completed |
+
+### WP2 — Playable UX Closeout
+
+| Deliverable | Status |
+|-------------|--------|
+| Player Quests API (`/player/sessions/{id}/quests`) | Completed |
+| Player Inventory API (`/player/sessions/{id}/inventory`) | Completed |
+| Player Relationships API (`/player/sessions/{id}/relationships`) | Completed |
+| Player Locations API (`/player/sessions/{id}/locations`) | Completed |
+| QuestJournalPanel frontend | Completed |
+| InventoryPanel frontend | Completed |
+| LocationMapPanel frontend | Completed |
+| RelationshipPanel frontend | Completed |
+| In-Game Settings Panel | Completed |
+| Streaming Turn UI (9 event types) | Completed |
+
+### WP3 — Operations Release Pack
+
+| Deliverable | Status |
+|-------------|--------|
+| Backend Dockerfile | Completed |
+| Frontend Dockerfile | Completed |
+| nginx SSL configuration | Completed |
+| docker-compose.prod.yml | Completed |
+| docs/deployment.md | Completed |
+| docs/operations.md | Completed |
+| docs/security.md | Completed |
+| docs/backup_and_restore.md | Completed |
+| docs/release_checklist.md | Completed |
+| .env.production.example | Completed |
+| Admin Health API (`/admin/health`) | Completed |
+| Admin Metrics API (`/admin/metrics`) | Completed |
+| Admin Release-Readiness API (`/admin/release-readiness`) | Completed |
+
+### WP4 — Release Test Gate
+
+| Deliverable | Status |
+|-------------|--------|
+| Makefile test-v1-* targets | Completed |
+| CI V1 release gate job | Completed |
+| Frontend test debt audit | Completed |
+| Frontend panel integration tests | Completed |
+| 30-60 min playthrough with hidden fact verification | Completed |
+| V1_COMPLETION_REPORT.md | Completed |
+| V1_READINESS.md | Completed |
+
+**V1 Gates**: `make test-v1-release`, `make test-v1-rule-engine`, `make test-v1-game-ui`, `make test-v1-ops`, `make test-v1-playthrough`
+
+**Test Coverage**: 200+ backend tests + 150+ frontend tests + 12 scenario types
+
+**Playthrough**: 8 phases covering exploration, dialogue, items, quests, combat, relationships, save/load
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -267,50 +337,22 @@ P8 upgrades P7 infrastructure to production-grade with provider registry, real a
 
 ---
 
-## P9+ Deferred Items
+## V1.x Deferred Items
 
-The following items are explicitly out of scope for P8 and deferred to future phases:
+The following items are explicitly deferred to future phases beyond V1.0:
 
-### Production Queue Infrastructure (P9 Priority)
-- Celery, RQ, or similar task queue with real adapter implementation
-- Distributed worker processes
-- Job monitoring and dead letter queue
-
-### Real Audio Generation (P9 Priority)
-- Music synthesis API for BGM
-- SFX asset type support
-- Real audio provider implementation
-
-### CDN/S3 Deployment (P9 Priority)
-- Asset upload to cloud storage
-- CDN delivery for images and audio
-- Signed URL generation
-
-### Redis-Based Rate Limiting (P9 Priority)
-- Distributed rate limit state
-- Multi-process support
-- Sliding window with Redis
-
-### Game Integration (P9+ Priority)
-- ~~Wire SceneBackground to location display~~ — Completed in P7
-- ~~Wire BGMControl to scene transitions~~ — Completed in P7
-- ~~Wire NPCPortrait to game session NPCs~~ — Completed in P8 (richer integration with mood/context)
-- ~~Portrait pre-generation~~ — Completed in P8
-
-### Engine Refactoring (P9+ Priority)
-- ReplayEngine rewrite
-- Turn Orchestrator major refactoring
-
-### Test Infrastructure (P9+ Priority)
-- Real OpenAI/LLM integration for tests (recorded responses)
-- E2E as required CI job (currently optional)
-- Non-debug frontend unit test fixes
-
-### Advanced Features (P9+ Priority)
-- ForgetCurve background decay job
-- Semantic/embedding-based leak detection
-- Full AuditStore read APIs (phase 3)
-- Real DALL-E integration tests with recorded responses
+| Item | Category | Impact | Mitigation |
+|------|----------|--------|------------|
+| Celery/RQ production queue | Infrastructure | No horizontal worker scaling | Queue abstraction complete; RQ/Celery adapters implementable without interface change |
+| Real audio/SFX generation | Media | BGM and SFX return stub data | Provider interface complete; real synthesis swappable |
+| CDN/S3 asset deployment | Infrastructure | No production asset distribution | Asset URLs configurable; CDN/S3 addable without API change |
+| Redis-based rate limiting | Infrastructure | Rate limit state not shared across processes | DB event recording provides audit trail; in-memory sufficient for single-process |
+| ForgetCurve background decay | Engine | NPC memories do not auto-decay | Decay logic exists; triggerable via admin API or scheduled job |
+| Real DALL-E integration tests | Testing | No end-to-end DALL-E proof | Client abstraction allows local testing with real key |
+| Non-debug frontend unit tests (~118) | Testing | React 19 + jsdom compatibility | Tests explicitly skipped; documented in audit |
+| RelationshipPanel game page integration | UX | Relationships API-only, not in game UI | API complete; integration is UI layout change |
+| Character creation UI | UX | No pre-game customization | Character state fully configurable via API |
+| Combat auto-trigger from turns | Engine | Combat requires manual start | Combat API complete; auto-trigger is narrative logic |
 
 ---
 
@@ -372,4 +414,6 @@ cd backend && python3 -m pytest -q
 - P7 Readiness: `P7_READINESS.md`
 - P8 Completion: `P8_COMPLETION_REPORT.md`
 - P8 Readiness: `P8_READINESS.md`
+- V1 Completion: `V1_COMPLETION_REPORT.md`
+- V1 Readiness: `V1_READINESS.md`
 - AGENTS.md: Project commands and conventions

@@ -16,8 +16,10 @@ from ..models.lore import LoreEntry
 
 # Import from new validation module for re-export
 from .validation.context import ValidationContext
-from .validation.result import ValidationResult, ValidationCheck
+from .validation.result import ValidationResult, ValidationCheck, passed_result, failed_result
 from .validation.state_delta_validator import StateDeltaValidator
+from .validation.movement_validator import MovementValidator
+from .validation.quest_validator import QuestValidator
 
 
 class Validator:
@@ -36,6 +38,8 @@ class Validator:
     def __init__(self):
         self._rules: Dict[str, callable] = {}
         self._state_delta_validator = StateDeltaValidator()
+        self._movement_validator = MovementValidator()
+        self._quest_validator = QuestValidator()
     
     def register_rule(self, rule_name: str, rule_func: callable) -> None:
         self._rules[rule_name] = rule_func
@@ -107,10 +111,59 @@ class Validator:
                     reason="Item use requires a target",
                 )
         
+        if action.action_type == "move":
+            movement_result = self._movement_validator.validate_movement(
+                action, state,
+            )
+            if not movement_result.is_valid:
+                return ValidationCheck(
+                    check_name="rule_validation",
+                    passed=False,
+                    reason="; ".join(movement_result.errors),
+                )
+        
+        if action.action_type in ("quest_start", "quest_progress"):
+            quest_result = self._validate_quest_action(action, state)
+            if not quest_result.is_valid:
+                return ValidationCheck(
+                    check_name="rule_validation",
+                    passed=False,
+                    reason="; ".join(quest_result.errors),
+                )
+        
         return ValidationCheck(
             check_name="rule_validation",
             passed=True,
         )
+    
+    def _validate_quest_action(
+        self,
+        action: ProposedAction,
+        state: CanonicalState,
+    ) -> ValidationResult:
+        quest_id = action.target_ids[0] if action.target_ids else None
+        if not quest_id:
+            return failed_result("quest_action_validation", "Quest action requires a quest target ID")
+        
+        quest_state = state.quest_states.get(quest_id)
+        if quest_state is None:
+            return failed_result("quest_action_validation", f"Quest '{quest_id}' not found in state")
+        
+        if action.action_type == "quest_start":
+            return self._quest_validator.validate_quest_start(
+                action=action,
+                quest_state=quest_state,
+                quest_template=None,
+                all_quest_states=state.quest_states,
+            )
+        elif action.action_type == "quest_progress":
+            return self._quest_validator.validate_quest_progress(
+                action=action,
+                quest_state=quest_state,
+                quest_template=None,
+            )
+        
+        return passed_result("quest_action_validation", "Quest action type not handled")
     
     def _validate_state(
         self,

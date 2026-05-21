@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from ..models.common import ProposedAction, CommittedAction
 from ..models.states import CanonicalState, NPCState
 from ..models.events import GameEvent
+from .conflict_resolver import ConflictResolver, ConflictResult
 
 
 class ActionScheduler:
@@ -11,6 +12,7 @@ class ActionScheduler:
         self._scene_triggers: Dict[str, Dict[str, Any]] = {}
         self._action_queue: List[ProposedAction] = []
         self._committed_actions: List[CommittedAction] = []
+        self.conflict_resolver = ConflictResolver()
     
     def register_scene_trigger(
         self,
@@ -81,14 +83,20 @@ class ActionScheduler:
         state: CanonicalState,
     ) -> List[ProposedAction]:
         resolved = []
+        blocked_ids: set[str] = set()
         conflicts = self._detect_conflicts(actions)
         
         for conflict_group in conflicts:
             if len(conflict_group) == 1:
                 resolved.append(conflict_group[0])
             else:
-                winner = self._resolve_conflict_group(conflict_group, state)
-                resolved.append(winner)
+                result, winner = self._resolve_conflict_group(conflict_group, state)
+                if winner is not None:
+                    resolved.append(winner)
+                blocked_ids.update(result.blocked_actions)
+        
+        if blocked_ids:
+            resolved = [a for a in resolved if a.action_id not in blocked_ids]
         
         return resolved
     
@@ -134,8 +142,41 @@ class ActionScheduler:
         self,
         actions: List[ProposedAction],
         state: CanonicalState,
-    ) -> ProposedAction:
-        return max(actions, key=lambda a: a.priority)
+    ) -> tuple[ConflictResult, Optional[ProposedAction]]:
+        sorted_actions = sorted(actions, key=lambda a: a.priority, reverse=True)
+        
+        player_actions = [a for a in sorted_actions if a.actor_id == "player"]
+        npc_actions = [a for a in sorted_actions if a.actor_id != "player"]
+        
+        if player_actions and npc_actions:
+            result = self.conflict_resolver.resolve_npc_block(
+                player_actions[0], npc_actions[0], state,
+            )
+            if result.should_block:
+                return result, npc_actions[0]
+            return result, player_actions[0]
+        
+        if len(sorted_actions) > 1:
+            action_types = {a.action_type for a in sorted_actions}
+            if "take_item" in action_types:
+                result = self.conflict_resolver.resolve_item_competition(
+                    sorted_actions, state,
+                )
+                winner = sorted_actions[0]
+                for a in sorted_actions:
+                    if a.action_id not in result.blocked_actions:
+                        winner = a
+                        break
+                return result, winner
+        
+        winner = sorted_actions[0]
+        blocked = [a.action_id for a in sorted_actions[1:]]
+        return ConflictResult(
+            should_block=len(blocked) > 0,
+            blocked_actions=blocked,
+            resolved_actions=[],
+            narration="",
+        ), winner
     
     def commit_action(
         self,

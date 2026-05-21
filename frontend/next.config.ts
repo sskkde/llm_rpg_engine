@@ -17,6 +17,7 @@ const apiProxyPrefixes = [
 ];
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
   async rewrites() {
     return apiProxyPrefixes.map((prefix) => ({
       source: `/${prefix}/:path*`,

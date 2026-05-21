@@ -19,6 +19,8 @@ import type {
   PortraitJobRequest, SceneJobRequest, BGMJobRequest,
   UsageLogResponse, CostSummaryResponse, ProviderCapabilityResponse, ProviderHealthResponse, RateLimitEventResponse,
   PrewarmPortraitsResponse, PrewarmStatusResponse,
+  PlayerLocation, RawPlayerLocation, PlayerRelationship, RelationshipListResponse, RelationshipSummary, PlayerQuestSummary, PlayerQuestDetail,
+  RawQuestDetail, PlayerInventoryItem, InventoryStats,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -143,6 +145,59 @@ export async function loadSession(sessionId: string): Promise<LoadSessionRespons
 
 export async function getAdventureLog(sessionId: string): Promise<AdventureLogEntry[]> {
   return fetchWithAuth<AdventureLogEntry[]>(`/sessions/${sessionId}/adventure-log`);
+}
+
+export async function getPlayerQuests(sessionId: string, status?: string): Promise<PlayerQuestSummary[]> {
+  const params = status ? `?status=${encodeURIComponent(status)}` : '';
+  return fetchWithAuth<PlayerQuestSummary[]>(`/player/sessions/${sessionId}/quests${params}`);
+}
+
+export async function getPlayerQuestDetail(sessionId: string, questId: string): Promise<PlayerQuestDetail> {
+  const raw = await fetchWithAuth<RawQuestDetail>(`/player/sessions/${sessionId}/quests/${questId}`);
+  return {
+    quest_id: raw.quest_id,
+    title: raw.title,
+    description: raw.description,
+    stage: raw.stage,
+    status: raw.status,
+    objectives: raw.objectives,
+    started_at: raw.last_updated_at,
+  };
+}
+
+function normalizeDangerLevel(value: number): 'safe' | 'dangerous' | 'lethal' {
+  if (value <= 0.3) return 'safe';
+  if (value <= 0.7) return 'dangerous';
+  return 'lethal';
+}
+
+export async function getPlayerLocations(sessionId: string, accessible?: boolean): Promise<PlayerLocation[]> {
+  const params = accessible !== undefined ? `?accessible=${accessible}` : '';
+  const raw = await fetchWithAuth<RawPlayerLocation[]>(`/player/sessions/${sessionId}/locations${params}`);
+  return raw.map(loc => ({
+    ...loc,
+    danger_level: normalizeDangerLevel(loc.danger_level),
+  }));
+}
+
+export async function getPlayerCurrentLocation(sessionId: string): Promise<PlayerLocation> {
+  const raw = await fetchWithAuth<RawPlayerLocation>(`/player/sessions/${sessionId}/locations/current`);
+  return { ...raw, danger_level: normalizeDangerLevel(raw.danger_level) };
+}
+
+export async function getPlayerLocationDetail(sessionId: string, locationId: string): Promise<PlayerLocation> {
+  const raw = await fetchWithAuth<RawPlayerLocation>(`/player/sessions/${sessionId}/locations/${locationId}`);
+  return { ...raw, danger_level: normalizeDangerLevel(raw.danger_level) };
+}
+
+export async function getPlayerRelationships(sessionId: string, sortBy?: string): Promise<PlayerRelationship[]> {
+  const params = sortBy ? `?sort_by=${sortBy}` : '';
+  const response = await fetchWithAuth<RelationshipListResponse>(`/player/sessions/${sessionId}/relationships${params}`);
+  return response.relationships;
+}
+
+export async function getPlayerRelationshipsSummary(sessionId: string): Promise<RelationshipSummary> {
+  return fetchWithAuth<RelationshipSummary>(`/player/sessions/${sessionId}/relationships/summary`);
 }
 
 // =============================================================================
@@ -836,6 +891,37 @@ export async function getDebugRateLimitEvents(
     `/debug/assets/rate-limit-events${query ? `?${query}` : ''}`,
   );
   return { total: response.total, items: response.events };
+}
+
+// =============================================================================
+// Inventory
+// =============================================================================
+
+export async function getPlayerInventory(
+  sessionId: string,
+  category?: string,
+): Promise<PlayerInventoryItem[]> {
+  const params = category ? `?category=${encodeURIComponent(category)}` : '';
+  return fetchWithAuth<PlayerInventoryItem[]>(
+    `/player/sessions/${sessionId}/inventory${params}`,
+  );
+}
+
+export async function getPlayerInventoryItem(
+  sessionId: string,
+  itemId: string,
+): Promise<PlayerInventoryItem> {
+  return fetchWithAuth<PlayerInventoryItem>(
+    `/player/sessions/${sessionId}/inventory/${itemId}`,
+  );
+}
+
+export async function getPlayerInventoryStats(
+  sessionId: string,
+): Promise<InventoryStats> {
+  return fetchWithAuth<InventoryStats>(
+    `/player/sessions/${sessionId}/inventory/stats`,
+  );
 }
 
 export { APIError };

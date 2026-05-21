@@ -1324,3 +1324,112 @@ export interface RateLimitEventResponse {
   reset_at: string;
   created_at: string;
 }
+
+// =============================================================================
+// Inventory Types
+// =============================================================================
+
+export interface PlayerInventoryItem {
+  id: string;
+  name: string;
+  description: string;
+  quantity: number;
+  rarity: string;
+  item_type: string;
+  effects?: Record<string, number>;
+}
+
+export interface InventoryStats {
+  total_items: number;
+  unique_items: number;
+  categories: Record<string, number>;
+}
+
+// =============================================================================
+// Player Quest Journal Types
+// =============================================================================
+
+export interface QuestObjective {
+  step_no: number;
+  objective: string;
+  completed: boolean;
+}
+
+export interface PlayerQuestSummary {
+  quest_id: string;
+  title: string;
+  description: string;
+  stage: number;
+  status: 'active' | 'completed' | 'failed' | 'abandoned';
+  objectives: QuestObjective[];
+}
+
+export interface QuestStep {
+  stage: number;
+  description: string;
+  completed: boolean;
+}
+
+export interface PlayerQuestDetail extends PlayerQuestSummary {
+  steps?: QuestStep[];
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface RawQuestDetail extends PlayerQuestSummary {
+  quest_type?: string;
+  step_history: QuestObjective[];
+  progress: Record<string, unknown>;
+  visibility: string;
+  last_updated_at?: string;
+}
+
+// =============================================================================
+// Relationship Types
+// =============================================================================
+
+export interface RelationshipListResponse {
+  session_id: string;
+  relationships: PlayerRelationship[];
+  total: number;
+}
+
+export interface PlayerRelationship {
+  npc_id: string;
+  npc_name: string;
+  trust_score: number;
+  respect_score: number;
+  fear_score: number;
+  last_interaction_turn?: number;
+}
+
+export interface RelationshipSummary {
+  total_npcs: number;
+  highest_trust: { npc_id: string; npc_name: string; trust_score: number } | null;
+  lowest_trust: { npc_id: string; npc_name: string; trust_score: number } | null;
+  average_trust: number;
+  average_respect: number;
+}
+
+// =============================================================================
+// Player Location Types
+// =============================================================================
+
+export interface PlayerLocation {
+  location_id: string;
+  name: string;
+  description: string;
+  connections: string[];
+  is_current: boolean;
+  danger_level: 'safe' | 'dangerous' | 'lethal';
+  accessible?: boolean;
+}
+
+export interface RawPlayerLocation {
+  location_id: string;
+  name: string;
+  description: string;
+  connections: string[];
+  is_current: boolean;
+  danger_level: number;
+}

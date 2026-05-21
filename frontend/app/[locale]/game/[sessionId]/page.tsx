@@ -10,10 +10,15 @@ import { ActionInput } from '@/components/game/ActionInput';
 import { RecommendedActions } from '@/components/game/RecommendedActions';
 import { StatePanel } from '@/components/game/StatePanel';
 import { LogPanel } from '@/components/game/LogPanel';
+import { LocationMapPanel } from '@/components/game/LocationMapPanel';
+import { InventoryPanel } from '@/components/game/InventoryPanel';
 import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
+import { QuestJournalPanel } from '@/components/game/QuestJournalPanel';
+import { RelationshipPanel } from '@/components/game/RelationshipPanel';
 import { SceneBackground } from '@/components/assets/SceneBackground';
 import { BGMControl } from '@/components/assets/BGMControl';
+import { SettingsPanel } from '@/components/game/SettingsPanel';
 import { NPCPortrait } from '@/components/assets/NPCPortrait';
 import { useTurnStream } from '@/hooks/useTurnStream';
 import { getSessionSnapshot, getAdventureLog, listSessionNpcs } from '@/lib/api';
@@ -49,7 +54,7 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
   const [selectedLogEntryId, setSelectedLogEntryId] = useState<string | null>(null);
   const [recommendedActions, setRecommendedActions] = useState<string[]>([]);
 
-  const { isStreaming, isPending, narration, error, usedFallback, submitTurn, clearError } = useTurnStream(sessionId);
+  const { isStreaming, isPending, isComplete, narration, error, usedFallback, streamingDuration, submitTurn, clearError } = useTurnStream(sessionId);
   const t = useTranslations('Game');
 
   const defaultRecommendedActions = useCallback(() => [
@@ -151,6 +156,7 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
         <div className="flex items-center gap-4">
           <BGMControl locationId={currentLocationId} sessionId={sessionId} />
           <ConnectionStatus isStreaming={isStreaming} usedFallback={usedFallback} />
+          <SettingsPanel sessionId={sessionId} />
         </div>
       </div>
 
@@ -178,7 +184,7 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
         <div className="lg:col-span-2 space-y-4">
-          <NarrationPanel narration={currentNarration} isStreaming={isStreaming} />
+          <NarrationPanel narration={currentNarration} isStreaming={isStreaming} isComplete={isComplete} streamingDuration={streamingDuration} />
           <RecommendedActions
             actions={recommendedActions}
             onSelect={handleAction}
@@ -204,6 +210,26 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
             </CollapsibleSection>
 
             <CollapsibleSection
+              id="mobile-inventory-section"
+              title={t('inventory')}
+              defaultOpen={false}
+            >
+              <div className="px-4 pb-4">
+                <InventoryPanel sessionId={sessionId} />
+              </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              id="mobile-location-section"
+              title={t('locationMap')}
+              defaultOpen={false}
+            >
+              <div className="px-4 pb-4">
+                <LocationMapPanel sessionId={sessionId} currentLocationId={currentLocationId} />
+              </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
               id="mobile-log-section"
               title={t('adventureLog')}
               defaultOpen={false}
@@ -217,17 +243,41 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
                 />
               </div>
             </CollapsibleSection>
-          </div>
-        </div>
+
+            <CollapsibleSection
+              id="mobile-quest-section"
+              title={t('questJournal')}
+              defaultOpen={false}
+            >
+              <div className="px-4 pb-4">
+                <QuestJournalPanel sessionId={sessionId} />
+              </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              id="mobile-relationship-section"
+              title={t('relationships')}
+              defaultOpen={false}
+            >
+              <div className="px-4 pb-4">
+                <RelationshipPanel sessionId={sessionId} />
+              </div>
+            </CollapsibleSection>
+           </div>
+         </div>
 
         {/* Desktop: Side panel with State and Log */}
         <div className="hidden lg:block space-y-4">
           <StatePanel snapshot={snapshot} />
+          <InventoryPanel sessionId={sessionId} />
+          <LocationMapPanel sessionId={sessionId} currentLocationId={currentLocationId} />
           <LogPanel
             entries={logEntries}
             selectedEntryId={selectedLogEntryId}
             onSelectEntry={(entry) => setSelectedLogEntryId(entry.id)}
           />
+          <QuestJournalPanel sessionId={sessionId} />
+          <RelationshipPanel sessionId={sessionId} />
         </div>
       </div>
     </div>

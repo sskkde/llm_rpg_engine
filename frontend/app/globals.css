@@ -24,3 +24,74 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Streaming cursor animation - smooth blink */
+@keyframes streaming-cursor {
+  0%, 50% {
+    opacity: 1;
+  }
+  51%, 100% {
+    opacity: 0;
+  }
+}
+
+.animate-streaming-cursor {
+  animation: streaming-cursor 0.8s ease-in-out infinite;
+}
+
+/* Typing dots animation - sequential wave */
+@keyframes typing-dot {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.animate-typing-dot-1 {
+  animation: typing-dot 1.2s ease-in-out infinite;
+  animation-delay: 0s;
+}
+
+.animate-typing-dot-2 {
+  animation: typing-dot 1.2s ease-in-out infinite;
+  animation-delay: 0.2s;
+}
+
+.animate-typing-dot-3 {
+  animation: typing-dot 1.2s ease-in-out infinite;
+  animation-delay: 0.4s;
+}
+
+/* Fade in animation for completed narration */
+@keyframes fade-in-narration {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-narration {
+  animation: fade-in-narration 0.3s ease-out forwards;
+}
+
+/* Streaming indicator pulse */
+@keyframes streaming-indicator {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-streaming-indicator {
+  animation: streaming-indicator 1.5s ease-in-out infinite;
+}

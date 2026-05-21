@@ -2682,6 +2682,7 @@ def execute_turn_service(
                     actor_id="player",
                     action_type="move",
                     target_ids=[target_location_id],
+                    summary=f"移动到 {target_location_id}",
                 )
                 movement_validator = MovementValidator()
                 movement_validation = movement_validator.validate_movement(

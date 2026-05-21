@@ -226,6 +226,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: Unit tests")
     config.addinivalue_line("markers", "integration: Integration tests")
     config.addinivalue_line("markers", "slow: Slow tests")
+    config.addinivalue_line("markers", "v1_scenario: V1 playthrough scenario tests")
 
 
 def pytest_collection_modifyitems(config, items):

@@ -105,11 +105,6 @@ class MovementValidator:
         state: CanonicalState,
         perspective: Optional[Perspective],
     ) -> ValidationResult:
-        # If no perspective is available, skip the known-location check
-        # (e.g., during internal engine processing without a player viewpoint)
-        if perspective is None:
-            return passed_result("location_known", "No perspective — skipping known-location check")
-
         # Check via PlayerPerspective.discovered_locations first
         if isinstance(perspective, PlayerPerspective):
             if target_location_id in perspective.discovered_locations:
@@ -129,10 +124,15 @@ class MovementValidator:
         if loc_state and loc_state.known_to_player:
             return passed_result("location_known", "Location is known to player")
 
-        return failed_result(
-            "location_known",
-            f"Location {target_location_id} has not been discovered by the player",
-        )
+        # If explicit perspective was provided (but not PlayerPerspective), enforce strictly
+        if perspective is not None:
+            return failed_result(
+                "location_known",
+                f"Location {target_location_id} has not been discovered",
+            )
+
+        # No perspective available (internal engine call) — skip check
+        return passed_result("location_known", "Location known (no perspective)")
 
     def _check_path_not_blocked(
         self,

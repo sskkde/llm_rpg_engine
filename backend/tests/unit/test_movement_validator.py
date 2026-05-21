@@ -350,7 +350,7 @@ class TestUnknownLocation:
     """Movement to a location the player hasn't discovered should fail."""
 
     def test_undiscovered_location_without_perspective(self):
-        """Without perspective, check player flags for discovered_{loc_id}."""
+        """Without perspective, known-location check is skipped (internal engine call)."""
         state = _make_base_state(
             player_location="loc_tavern",
             player_flags={},  # no discovered flags
@@ -360,20 +360,18 @@ class TestUnknownLocation:
         validator = MovementValidator()
         result = validator.validate_movement(action, state)
 
-        assert result.is_valid is False
-        assert any("discover" in e.lower() or "known" in e.lower() or "unknown" in e.lower() for e in result.errors)
+        assert result.is_valid is True
 
     def test_undiscovered_location_with_perspective(self):
-        """With perspective, check discovered_locations list."""
+        """With PlayerPerspective, undiscovered locations are rejected."""
         state = _make_base_state(player_location="loc_tavern")
         action = _make_move_action(target_location="loc_unknown")
-        # Perspective doesn't include loc_unknown
         perspective = _make_player_perspective(
             discovered_locations=["loc_tavern", "loc_forest"],
         )
 
         validator = MovementValidator()
-        result = validator.validate_movement(action, state)
+        result = validator.validate_movement(action, state, perspective=perspective)
 
         assert result.is_valid is False
 

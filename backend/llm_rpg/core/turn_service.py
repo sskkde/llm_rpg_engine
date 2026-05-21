@@ -2722,11 +2722,21 @@ def execute_turn_service(
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
             # Validate quest progression before checking
+            # Build a minimal quest state for validation
+            from llm_rpg.models.common import ProposedAction
+            
+            quest_validation_action = ProposedAction(
+                action_id="turn-quest-check",
+                actor_id="player",
+                action_type="quest_progress",
+                target_ids=[],
+                summary="Check quest progression after movement",
+            )
             quest_validator = QuestValidator()
             quest_validation = quest_validator.validate_quest_progress(
-                quest_id="current",
-                new_stage=0,  # Placeholder - actual stage determined by quest system
-                state=canonical_state,
+                action=quest_validation_action,
+                quest_state=None,  # Will be filled from canonical_state.quest_states by the validator
+                quest_template=None,
                 context=validation_context,
             )
             

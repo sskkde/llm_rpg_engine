@@ -105,6 +105,11 @@ class MovementValidator:
         state: CanonicalState,
         perspective: Optional[Perspective],
     ) -> ValidationResult:
+        # If no perspective is available, skip the known-location check
+        # (e.g., during internal engine processing without a player viewpoint)
+        if perspective is None:
+            return passed_result("location_known", "No perspective — skipping known-location check")
+
         # Check via PlayerPerspective.discovered_locations first
         if isinstance(perspective, PlayerPerspective):
             if target_location_id in perspective.discovered_locations:

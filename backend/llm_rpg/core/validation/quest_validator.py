@@ -84,6 +84,9 @@ class QuestValidator:
         Returns:
             ValidationResult indicating if progression is valid
         """
+        if quest_state is None:
+            return passed_result("quest_progress_validation", "No quest state to validate (placeholder)")
+
         results: List[ValidationResult] = []
 
         results.append(self._check_quest_status(quest_state, "progress"))

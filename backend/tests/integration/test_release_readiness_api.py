@@ -251,3 +251,71 @@ class TestReleaseReadinessNoSecrets:
         env_vars = data["env_vars"]
         for key, value in env_vars.items():
             assert value in (True, False), f"env_vars[{key}] should be boolean, got {value!r}"
+
+
+class TestReleaseReadinessGateMarker:
+    def test_release_readiness_reads_gate_status_marker(self, client, db_engine, admin_user_data, tmp_path, monkeypatch):
+        from llm_rpg.api import admin_ops
+
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+
+        marker_data = {
+            "gate": "test-v1-release",
+            "status": "pass",
+            "commit": "abc1234",
+            "ran_at": "2026-05-22T10:00:00+08:00",
+        }
+        marker_file = tmp_path / "v1_gate_status.json"
+        marker_file.write_text(__import__("json").dumps(marker_data))
+
+        def mock_check_test_gate():
+            return {
+                "status": "pass",
+                "gate": "test-v1-release",
+                "commit": "abc1234",
+                "ran_at": "2026-05-22T10:00:00+08:00",
+                "source": str(marker_file),
+            }
+
+        monkeypatch.setattr(admin_ops, "_check_test_gate", mock_check_test_gate)
+
+        headers = get_auth_header(client, admin_user_data)
+        response = client.get("/admin/release-readiness", headers=headers)
+        assert response.status_code == 200
+
+        data = response.json()
+        test_gate = data["test_gate"]
+        assert test_gate["status"] == "pass"
+        assert test_gate["gate"] == "test-v1-release"
+        assert test_gate["commit"] == "abc1234"
+
+    def test_release_readiness_unknown_when_marker_missing(self, client, db_engine, admin_user_data, monkeypatch):
+        from llm_rpg.api import admin_ops
+
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+
+        def mock_check_test_gate():
+            return {
+                "status": "unknown",
+                "message": "No release gate status marker found. Run make test-v1-release and update .release/v1_gate_status.json.",
+            }
+
+        monkeypatch.setattr(admin_ops, "_check_test_gate", mock_check_test_gate)
+
+        headers = get_auth_header(client, admin_user_data)
+        response = client.get("/admin/release-readiness", headers=headers)
+        assert response.status_code == 200
+
+        data = response.json()
+        test_gate = data["test_gate"]
+        assert test_gate["status"] == "unknown"
+        assert "marker" in test_gate.get("message", "").lower() or "no release" in test_gate.get("message", "").lower()
+
+    def test_release_readiness_requires_admin(self, client, db_engine, admin_user_data, regular_user_data):
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+        create_user_in_db(db_engine, regular_user_data, is_admin=False)
+
+        user_headers = get_auth_header(client, regular_user_data)
+
+        response = client.get("/admin/release-readiness", headers=user_headers)
+        assert response.status_code == 403

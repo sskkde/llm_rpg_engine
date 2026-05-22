@@ -194,16 +194,32 @@ test-p3: ## Quality gate: backend + scenario smoke + pgvector + frontend static 
 # === V1.0 Release Targets ===
 
 test-v1-rule-engine: ## Run WP1 rule engine tests (MovementValidator, QuestValidator, ItemRules, SkillRules, ActionSchema, StateDeltaResolver, ConflictResolver)
-	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_movement_validator.py tests/unit/test_quest_validator.py tests/unit/test_item_rules.py tests/unit/test_skill_rules.py -q --tb=short
-	@cd backend && if [ -f tests/unit/test_action_schema.py ] || [ -f tests/unit/test_state_delta_resolver.py ] || [ -f tests/unit/test_conflict_resolver.py ]; then APP_ENV=testing python3 -m pytest tests/unit/test_action_schema.py tests/unit/test_state_delta_resolver.py tests/unit/test_conflict_resolver.py -q --tb=short; fi
-	@cd backend && if [ -f tests/scenario/test_rule_engine_v1.py ]; then APP_ENV=testing python3 -m pytest tests/scenario/test_rule_engine_v1.py -q --tb=short; fi
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_movement_validator.py \
+		tests/unit/test_quest_validator.py \
+		tests/unit/test_item_rules.py \
+		tests/unit/test_skill_rules.py \
+		tests/unit/test_action_schema.py \
+		tests/unit/test_state_delta_resolver.py \
+		tests/unit/test_conflict_resolver.py \
+		tests/scenario/test_rule_engine_v1.py \
+		-q --tb=short
 
 test-v1-game-ui: ## Run WP2 game panel test suite
-	@cd frontend && if ls __tests__/game/*.test.tsx 2>/dev/null; then npm test -- __tests__/game/ --runInBand; else echo "No game UI tests found"; fi
+	cd frontend && npm test -- \
+		__tests__/game/QuestJournalPanel.test.tsx \
+		__tests__/game/InventoryPanel.test.tsx \
+		__tests__/game/LocationMapPanel.test.tsx \
+		__tests__/game/RelationshipPanel.test.tsx \
+		__tests__/game/V1PlayableFlow.test.tsx \
+		--runInBand
 
-test-v1-ops: ## Run WP3 operations API tests (admin ops + player API)
-	@cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_admin_ops_api.py tests/integration/test_release_readiness_api.py -q --tb=short
-	@cd backend && if [ -f tests/integration/test_player_api.py ]; then APP_ENV=testing python3 -m pytest tests/integration/test_player_api.py -q --tb=short; fi
+test-v1-ops: ## Run WP3 operations API tests (admin ops + release readiness + player API)
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/integration/test_admin_ops_api.py \
+		tests/integration/test_release_readiness_api.py \
+		tests/integration/test_player_api.py \
+		-q --tb=short
 
 test-v1-playthrough: ## Run V1.0 playthrough scenario tests
 	@cd backend && APP_ENV=testing python3 -m pytest tests/scenario/test_v1_playthrough.py -q --tb=short

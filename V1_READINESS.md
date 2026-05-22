@@ -16,7 +16,7 @@ Before declaring V1.0 release-ready, the following must be complete:
 | V1 Release Gate | `make test-v1-release` | All tests pass |
 | P8 Fast Gate | `make test-p8-fast` | All tests pass (no regression) |
 | Frontend Static | `cd frontend && npm run build && npm run lint && npx tsc --noEmit` | All pass |
-| CI V1 Release Gate | `.github/workflows/ci.yml` job `v1-release-tests` | All pass |
+| CI V1 Release Gate | `.github/workflows/ci.yml` job `v1-release-tests` | All pass (CI run 26215557880: success, 13/13 jobs) |
 | Playthrough | `make test-v1-playthrough` | 8 phases pass with hidden fact verification |
 
 ### Test Verification
@@ -154,32 +154,32 @@ All "Must NOT Have" items from V1.0 plan verified absent:
 
 | Suite | Command | Expected | Status |
 |-------|---------|----------|--------|
-| V1 Release Gate | `make test-v1-release` | ALL PASS | Expected PASS |
-| V1 Rule Engine | `make test-v1-rule-engine` | ALL PASS | Expected PASS |
-| V1 Operations | `make test-v1-ops` | ALL PASS | Expected PASS |
-| V1 Playthrough | `make test-v1-playthrough` | ALL PASS | Expected PASS |
-| P8 Fast Gate | `make test-p8-fast` | ALL PASS | Expected PASS |
-| P8 Full Gate | `make test-p8` | ALL PASS | Expected PASS |
+| V1 Release Gate | `make test-v1-release` | ALL PASS | PASS (CI run 26215557880) |
+| V1 Rule Engine | `make test-v1-rule-engine` | ALL PASS | PASS |
+| V1 Operations | `make test-v1-ops` | ALL PASS | PASS |
+| V1 Playthrough | `make test-v1-playthrough` | ALL PASS | PASS |
+| P8 Fast Gate | `make test-p8-fast` | ALL PASS | PASS |
+| P8 Full Gate | `make test-p8` | ALL PASS | PASS |
 
 ### Frontend Tests
 
 | Suite | Command | Expected | Status |
 |-------|---------|----------|--------|
-| Build | `cd frontend && npm run build` | Success | Expected PASS |
-| Lint | `cd frontend && npm run lint` | No errors | Expected PASS |
-| TypeScript | `cd frontend && npx tsc --noEmit` | No errors | Expected PASS |
-| V1 Game UI | `npm test -- __tests__/game/V1PlayableFlow.test.tsx` | ALL PASS | Expected PASS |
-| Debug Tests | `npm test -- __tests__/debug/` | ALL PASS | Expected PASS |
-| P8 Asset Tests | `npm test -- __tests__/assets/NPCPortrait.p8.test.tsx` | ALL PASS | Expected PASS |
+| Build | `cd frontend && npm run build` | Success | PASS |
+| Lint | `cd frontend && npm run lint` | No errors | PASS |
+| TypeScript | `cd frontend && npx tsc --noEmit` | No errors | PASS |
+| V1 Game UI | `npm test -- __tests__/game/V1PlayableFlow.test.tsx` | ALL PASS | PASS |
+| Debug Tests | `npm test -- __tests__/debug/` | ALL PASS | PASS |
+| P8 Asset Tests | `npm test -- __tests__/assets/NPCPortrait.p8.test.tsx` | ALL PASS | PASS |
 
 ### CI Jobs
 
 | Job | Workflow | Expected | Status |
 |-----|----------|----------|--------|
-| v1-release-tests | `.github/workflows/ci.yml` | PASS | Expected PASS |
-| backend-tests | `.github/workflows/ci.yml` | PASS | Expected PASS |
-| frontend-tests | `.github/workflows/ci.yml` | PASS | Expected PASS |
-| p8-tests | `.github/workflows/ci.yml` | PASS | Expected PASS |
+| v1-release-tests | `.github/workflows/ci.yml` | PASS | PASS (run 26215557880) |
+| backend-tests | `.github/workflows/ci.yml` | PASS | PASS |
+| frontend-tests | `.github/workflows/ci.yml` | PASS | PASS |
+| p8-tests | `.github/workflows/ci.yml` | PASS | PASS |
 
 ---
 
@@ -274,15 +274,15 @@ All "Must NOT Have" items from V1.0 plan verified absent:
 
 ---
 
-### 8. RelationshipPanel Not Integrated on Game Page
+### 8. RelationshipPanel Basic Integration Complete
 
-**Status**: Component exists but not rendered in `GameSessionContent` layout
+**Status**: Component rendered in `GameSessionContent` layout (mobile + desktop)
 
-**Impact**: Relationships visible via API but not in game UI
+**Impact**: Basic relationship display available in game UI; richer interaction flows deferred
 
-**Mitigation**: API complete; integration is UI layout change
+**Mitigation**: API complete; basic game-page integration done
 
-**P10 Scope**: Game page layout integration
+**P10 Scope**: Richer relationship interaction flows (click-to-interact, detail modals)
 
 ---
 
@@ -368,7 +368,7 @@ The following features are explicitly out of scope for V1.0 and deferred to futu
 - **ForgetCurve background decay**: Automatic memory decay job
 - **Real DALL-E integration tests**: End-to-end with recorded responses
 - **Frontend non-debug unit test fixes**: React 19 + jsdom compatibility
-- **RelationshipPanel game page integration**: UI layout change
+- **Richer relationship interaction flows**: Click-to-interact, detail modals
 - **Character creation UI**: Pre-game character customization
 - **Combat auto-trigger**: Narrative-driven combat initiation
 - **Multi-player support**: Multiplayer game sessions

@@ -251,7 +251,7 @@ This report documents the automated V1.0 playthrough test results. The test suit
 | Combat not auto-triggered from game turns | Low | Phase 6 | Requires manual `POST /combat/start` |
 | Item usage only via free-text turns | Low | Phase 4 | No click-to-use button in InventoryPanel |
 | NPC dialogue only via free-text turns | Low | Phase 3 | No click-to-talk button on NPC portraits |
-| RelationshipPanel not rendered on game session page | Low | Phase 7 | Component exists but not integrated |
+| RelationshipPanel basic integration done on game session page | Low | Phase 7 | Richer interaction flows (click-to-interact, detail modals) deferred to P10+ |
 | No explicit character creation UI | Low | Phase 1 | Game starts with default character state |
 
 ---

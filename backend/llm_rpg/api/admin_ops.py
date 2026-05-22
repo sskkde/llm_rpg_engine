@@ -5,14 +5,16 @@ Provides health checks, metrics, and release-readiness endpoints.
 All endpoints require admin role authentication.
 """
 
+import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 from ..storage.database import get_db
 from ..storage.models import UserModel, SessionModel
@@ -104,10 +106,100 @@ def _get_active_sessions_count(db: DBSession) -> int:
         return 0
 
 
-def _get_rate_limit_hit_count() -> int:
-    """Get rate limit hit count (placeholder)."""
-    # In a real implementation, this would query the rate limit event store
-    return 0
+def _get_rate_limit_hit_count(db: DBSession) -> int:
+    """Get rate limit hit count from DB."""
+    try:
+        from ..storage.models import AssetRateLimitEventModel
+        return db.query(AssetRateLimitEventModel).filter(
+            AssetRateLimitEventModel.allowed == False  # noqa: E712
+        ).count()
+    except Exception:
+        return 0
+
+
+def _get_llm_call_metrics(db: DBSession) -> Dict[str, Any]:
+    """Get LLM call metrics from DB."""
+    try:
+        from ..storage.models import ModelCallAuditLogModel
+        total = db.query(ModelCallAuditLogModel).count()
+        success = db.query(ModelCallAuditLogModel).filter(
+            ModelCallAuditLogModel.success == True  # noqa: E712
+        ).count()
+        failure = total - success
+        failure_rate = (failure / total) if total > 0 else 0.0
+        return {
+            "total_count": total,
+            "success_count": success,
+            "failure_count": failure,
+            "failure_rate": round(failure_rate, 4),
+        }
+    except Exception:
+        return {
+            "total_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "failure_rate": 0.0,
+        }
+
+
+def _get_validator_metrics(db: DBSession) -> Dict[str, Any]:
+    """Get validation metrics from DB."""
+    try:
+        from ..storage.models import ValidationReportModel
+        total = db.query(ValidationReportModel).count()
+        rejections = db.query(ValidationReportModel).filter(
+            ValidationReportModel.is_valid == False  # noqa: E712
+        ).count()
+        return {
+            "validation_count": total,
+            "rejection_count": rejections,
+        }
+    except Exception:
+        return {
+            "validation_count": 0,
+            "rejection_count": 0,
+        }
+
+
+def _get_turn_metrics(db: DBSession) -> Dict[str, Any]:
+    """Get turn success/failure metrics from DB."""
+    try:
+        from ..storage.models import TurnTransactionModel
+        committed = db.query(TurnTransactionModel).filter(
+            TurnTransactionModel.status == "committed"
+        ).count()
+        rolled_back = db.query(TurnTransactionModel).filter(
+            TurnTransactionModel.status == "rolled_back"
+        ).count()
+        return {
+            "success_count": committed,
+            "failure_count": rolled_back,
+        }
+    except Exception:
+        return {
+            "success_count": 0,
+            "failure_count": 0,
+        }
+
+
+def _get_asset_job_metrics(db: DBSession) -> Dict[str, Any]:
+    """Get asset generation job metrics from DB."""
+    try:
+        from ..storage.models import AssetGenerationJobModel
+        result = {}
+        for s in ("pending", "processing", "completed", "failed", "dead_lettered"):
+            result[s] = db.query(AssetGenerationJobModel).filter(
+                AssetGenerationJobModel.status == s
+            ).count()
+        return result
+    except Exception:
+        return {
+            "pending": 0,
+            "processing": 0,
+            "completed": 0,
+            "failed": 0,
+            "dead_lettered": 0,
+        }
 
 
 def _check_migrations(db: DBSession) -> Dict[str, Any]:
@@ -201,13 +293,28 @@ def _check_content_seeded(db: DBSession) -> Dict[str, Any]:
 
 
 def _check_test_gate() -> Dict[str, Any]:
-    """Check test gate status (placeholder)."""
-    # In a real implementation, this would check if tests pass
-    # For now, return a placeholder status
-    return {
-        "status": "ready",
-        "message": "Test gate check not implemented in this endpoint",
-    }
+    """Check test gate status from .release/v1_gate_status.json marker."""
+    marker_path = Path(__file__).resolve().parents[2] / ".release" / "v1_gate_status.json"
+    if not marker_path.exists():
+        return {
+            "status": "unknown",
+            "message": "No release gate status marker found. Run make test-v1-release and update .release/v1_gate_status.json.",
+        }
+    try:
+        with open(marker_path, "r") as f:
+            data = json.load(f)
+        return {
+            "status": data.get("status", "unknown"),
+            "gate": data.get("gate", "test-v1-release"),
+            "commit": data.get("commit"),
+            "ran_at": data.get("ran_at"),
+            "source": str(marker_path),
+        }
+    except Exception as e:
+        return {
+            "status": "unknown",
+            "message": f"Failed to read gate status marker: {str(e)[:100]}",
+        }
 
 
 # =============================================================================
@@ -229,6 +336,7 @@ class MetricsResponse(BaseModel):
     validator: Dict[str, Any] = Field(default_factory=dict)
     turns: Dict[str, Any] = Field(default_factory=dict)
     rate_limit: Dict[str, Any] = Field(default_factory=dict)
+    asset_jobs: Dict[str, Any] = Field(default_factory=dict)
     sessions: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -252,6 +360,10 @@ class ContentSeedStatus(BaseModel):
 class TestGateStatus(BaseModel):
     """Test gate status."""
     status: str
+    gate: Optional[str] = None
+    commit: Optional[str] = None
+    ran_at: Optional[str] = None
+    source: Optional[str] = None
     message: Optional[str] = None
 
 
@@ -299,12 +411,13 @@ def get_metrics(
     """
     Get system metrics.
     
-    Returns metrics for:
-    - API latency (placeholder)
-    - LLM call count and failure rate (placeholder)
-    - Validator rejection count (placeholder)
-    - Turn success/failure count (placeholder)
+    Returns DB-backed metrics for:
+    - API latency (placeholder — requires request middleware)
+    - LLM call count and failure rate
+    - Validator rejection count
+    - Turn success/failure count
     - Rate limit hit count
+    - Asset job status distribution
     - Active sessions count
     
     Requires admin role.
@@ -317,23 +430,13 @@ def get_metrics(
             "p99_ms": 0,
             "count": 0,
         },
-        llm_calls={
-            "total_count": 0,
-            "success_count": 0,
-            "failure_count": 0,
-            "failure_rate": 0.0,
-        },
-        validator={
-            "rejection_count": 0,
-            "validation_count": 0,
-        },
-        turns={
-            "success_count": 0,
-            "failure_count": 0,
-        },
+        llm_calls=_get_llm_call_metrics(db),
+        validator=_get_validator_metrics(db),
+        turns=_get_turn_metrics(db),
         rate_limit={
-            "hit_count": _get_rate_limit_hit_count(),
+            "hit_count": _get_rate_limit_hit_count(db),
         },
+        asset_jobs=_get_asset_job_metrics(db),
         sessions={
             "active_count": _get_active_sessions_count(db),
         },
@@ -359,6 +462,8 @@ def get_release_readiness(
     migration_status = _check_migrations(db)
     content_status = _check_content_seeded(db)
     
+    gate_result = _check_test_gate()
+    
     return ReleaseReadinessResponse(
         migrations=MigrationStatus(
             current=migration_status.get("current"),
@@ -375,7 +480,11 @@ def get_release_readiness(
         ),
         env_vars=_check_env_vars(),
         test_gate=TestGateStatus(
-            status=_check_test_gate().get("status", "unknown"),
-            message=_check_test_gate().get("message"),
+            status=gate_result.get("status", "unknown"),
+            gate=gate_result.get("gate"),
+            commit=gate_result.get("commit"),
+            ran_at=gate_result.get("ran_at"),
+            source=gate_result.get("source"),
+            message=gate_result.get("message"),
         ),
     )

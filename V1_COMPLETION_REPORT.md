@@ -387,9 +387,9 @@ WP4 establishes the V1.0 release test infrastructure with Makefile targets, CI a
 | T31 | Frontend panel integration tests | Complete | `frontend/__tests__/game/V1PlayableFlow.test.tsx` |
 | T33 | CI V1 release gate | Complete | `.github/workflows/ci.yml` |
 | T34 | V1_COMPLETION_REPORT.md | Complete | This file |
-| T35 | V1_READINESS.md | Pending | `V1_READINESS.md` |
-| T36 | IMPLEMENTATION_STATUS.md update | Pending | `IMPLEMENTATION_STATUS.md` |
-| T37 | README + roadmap docs | Pending | `README.md`, `docs/roadmap_alignment_status.md`, `docs/v1_release_notes.md` |
+| T35 | V1_READINESS.md | Complete | `V1_READINESS.md` |
+| T36 | IMPLEMENTATION_STATUS.md update | Complete | `IMPLEMENTATION_STATUS.md` |
+| T37 | README + roadmap docs | Complete | `README.md`, `docs/roadmap_alignment_status.md`, `docs/v1_release_notes.md` |
 
 ### Makefile Targets
 
@@ -559,15 +559,15 @@ The following items are explicitly deferred to P10+ and are NOT V1.0 blockers:
 
 **P10 Scope**: React 19 + jsdom compatibility resolution
 
-### 8. RelationshipPanel Not Integrated on Game Page
+### 8. RelationshipPanel Basic Integration Complete
 
-**Status**: Component exists but not rendered in `GameSessionContent` layout
+**Status**: Component rendered in `GameSessionContent` layout (mobile + desktop)
 
-**Impact**: Relationships visible via API but not in game UI
+**Impact**: Basic relationship display available in game UI; richer interaction flows deferred
 
-**Mitigation**: API complete; integration is UI layout change
+**Mitigation**: API complete; basic game-page integration done
 
-**P10 Scope**: Game page layout integration
+**P10 Scope**: Richer relationship interaction flows (click-to-interact, detail modals)
 
 ### 9. No Explicit Character Creation UI
 
@@ -606,9 +606,21 @@ The following items are explicitly deferred to P10+ and are NOT V1.0 blockers:
 | Playthrough | PASS | 8 phases + hidden fact verification |
 | Security | PASS | No secrets in logs, admin-gated debug, CORS configured |
 
-### V1.0 Release Readiness: **READY**
+### V1 Closeout Fixes
 
-All Must Have items complete. All test gates pass. Known limitations are documented and deferred to P10+. No blocking issues remain.
+| Fix | Status | Evidence |
+|-----|--------|----------|
+| Documentation status consistency | Completed | Pending entries removed from WP4 table |
+| RelationshipPanel game page status | Completed | Rendered in mobile and desktop game layout |
+| Admin ops metrics DB-backed | Completed | Real queries for LLM calls, validations, turns, rate limits, asset jobs, sessions |
+| Release-readiness gate marker | Completed | Reads `.release/v1_gate_status.json`; returns `unknown` when missing |
+| V1 release gate strictness | Completed | Optional file checks removed from Makefile |
+
+---
+
+## V1.0 Release Readiness: **READY**
+
+All required gates are strict and pass. Admin ops metrics are DB-backed. Release-readiness endpoint reads gate evidence. Documentation contradictions have been corrected.
 
 ### Deployment Steps
 

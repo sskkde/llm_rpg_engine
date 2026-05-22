@@ -684,7 +684,7 @@ Before starting the playthrough, verify infrastructure is running:
 
 | Gap | Notes |
 |-----|-------|
-| RelationshipPanel not rendered on game session page | Component exists but not integrated into `GameSessionContent` layout |
+| RelationshipPanel basic integration done on game session page | Component rendered in `GameSessionContent` layout; richer interaction flows deferred to P10+ |
 | No explicit character creation UI | Game starts with default character state |
 | Item usage only via free-text turns | No click-to-use button in InventoryPanel |
 | Combat not auto-triggered from game turns | Requires manual `POST /combat/start` or test page |

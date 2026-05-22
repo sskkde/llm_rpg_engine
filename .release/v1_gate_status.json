@@ -1,0 +1,22 @@
+{
+  "phase": "V1.0",
+  "gate": "test-v1-release",
+  "status": "pass",
+  "commit": "6daf66a",
+  "ran_at": "2026-05-22T12:00:00+08:00",
+  "commands": {
+    "make test-v1-release": "pass",
+    "make test-p8": "pass",
+    "make test-p8-fast": "pass",
+    "make test-p7-fast": "pass",
+    "make test-p6-fast": "pass",
+    "frontend build": "pass",
+    "frontend lint": "pass",
+    "frontend tsc": "pass"
+  },
+  "ci_run_id": 26215557880,
+  "ci_result": "success",
+  "ci_jobs_total": 13,
+  "ci_jobs_passed": 13,
+  "notes": "CI workflow run 26215557880 passed all 13 jobs. Local gate evidence recorded."
+}

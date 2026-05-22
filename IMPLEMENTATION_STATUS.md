@@ -313,6 +313,17 @@ P9 transforms the P8 Complete codebase into a fully release-ready V1.0 product w
 
 **Playthrough**: 8 phases covering exploration, dialogue, items, quests, combat, relationships, save/load
 
+### V1.0 Closeout Verification
+
+| Item | Status |
+|------|--------|
+| V1 documentation consistency fixes | Completed |
+| RelationshipPanel game-page status corrected | Completed |
+| Admin metrics use real DB-backed counts | Completed |
+| Release-readiness gate marker implemented | Completed |
+| V1 Makefile gates strict, no optional file skips | Completed |
+| Final gate evidence recorded | Completed |
+
 ---
 
 ## Known Risks
@@ -350,7 +361,7 @@ The following items are explicitly deferred to future phases beyond V1.0:
 | ForgetCurve background decay | Engine | NPC memories do not auto-decay | Decay logic exists; triggerable via admin API or scheduled job |
 | Real DALL-E integration tests | Testing | No end-to-end DALL-E proof | Client abstraction allows local testing with real key |
 | Non-debug frontend unit tests (~118) | Testing | React 19 + jsdom compatibility | Tests explicitly skipped; documented in audit |
-| RelationshipPanel game page integration | UX | Relationships API-only, not in game UI | API complete; integration is UI layout change |
+| RelationshipPanel richer interaction flows | UX | Basic integration done; richer flows deferred | API + basic game-page integration complete; click-to-interact and detail modals deferred |
 | Character creation UI | UX | No pre-game customization | Character state fully configurable via API |
 | Combat auto-trigger from turns | Engine | Combat requires manual start | Combat API complete; auto-trigger is narrative logic |
 

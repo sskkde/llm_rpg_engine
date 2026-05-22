@@ -2,7 +2,7 @@
   "phase": "V1.0",
   "gate": "test-v1-release",
   "status": "pass",
-  "commit": "6daf66a",
+  "commit": "79cc508",
   "ran_at": "2026-05-22T12:00:00+08:00",
   "commands": {
     "make test-v1-release": "pass",
@@ -14,9 +14,9 @@
     "frontend lint": "pass",
     "frontend tsc": "pass"
   },
-  "ci_run_id": 26215557880,
+  "ci_run_id": 26263739690,
   "ci_result": "success",
   "ci_jobs_total": 13,
   "ci_jobs_passed": 13,
-  "notes": "CI workflow run 26215557880 passed all 13 jobs. Local gate evidence recorded."
+  "notes": "CI workflow run 26263739690 passed all 13 jobs. Closeout fixes committed and verified."
 }

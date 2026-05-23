@@ -8,6 +8,7 @@ All endpoints require admin role authentication.
 
 import hashlib
 import json
+import os
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any
@@ -2655,6 +2656,47 @@ def get_provider_health(
         configured=health.get("configured", False),
         enabled=health.get("enabled", False),
         last_error=health.get("last_error"),
+    )
+
+
+class ResolvedProvidersResponse(BaseModel):
+    """Response model for resolved providers."""
+    default_provider: str
+    portrait_provider: str
+    scene_provider: str
+    bgm_provider: str
+    sfx_provider: str
+    env_vars: Dict[str, str]
+
+
+@router.get(
+    "/assets/providers/resolved",
+    response_model=ResolvedProvidersResponse,
+    summary="Get resolved providers for each asset type (admin)",
+)
+def get_resolved_providers(
+    current_user: UserModel = Depends(require_debug_admin),
+):
+    require_admin_role(current_user)
+
+    from ..assets.provider_resolver import resolve_asset_provider_name
+    from ..assets.interfaces import AssetType
+
+    return ResolvedProvidersResponse(
+        default_provider=os.getenv("ASSET_PROVIDER_DEFAULT", "mock"),
+        portrait_provider=resolve_asset_provider_name(AssetType.PORTRAIT),
+        scene_provider=resolve_asset_provider_name(AssetType.SCENE),
+        bgm_provider=resolve_asset_provider_name(AssetType.BGM),
+        sfx_provider=resolve_asset_provider_name(AssetType.SFX),
+        env_vars={
+            "ASSET_PROVIDER_PORTRAIT": os.getenv("ASSET_PROVIDER_PORTRAIT", "(not set)"),
+            "ASSET_PROVIDER_SCENE": os.getenv("ASSET_PROVIDER_SCENE", "(not set)"),
+            "ASSET_PROVIDER_IMAGE": os.getenv("ASSET_PROVIDER_IMAGE", "(not set)"),
+            "ASSET_PROVIDER_BGM": os.getenv("ASSET_PROVIDER_BGM", "(not set)"),
+            "ASSET_PROVIDER_SFX": os.getenv("ASSET_PROVIDER_SFX", "(not set)"),
+            "ASSET_PROVIDER_AUDIO": os.getenv("ASSET_PROVIDER_AUDIO", "(not set)"),
+            "ASSET_PROVIDER_DEFAULT": os.getenv("ASSET_PROVIDER_DEFAULT", "(not set)"),
+        },
     )
 
 

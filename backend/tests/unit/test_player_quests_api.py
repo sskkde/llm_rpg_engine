@@ -108,13 +108,15 @@ def _make_session(db: Session, user_id: str, world_id: str) -> SessionModel:
 
 def _make_quest_state(db: Session, session_id: str, quest_template_id: str,
                       status: str = "active", current_step_no: int = 1,
-                      progress_json: dict = None) -> SessionQuestStateModel:
+                      progress_json: dict = None,
+                      player_visibility: str = "discovered") -> SessionQuestStateModel:
     return SessionQuestStateRepository(db).create({
         "session_id": session_id,
         "quest_template_id": quest_template_id,
         "current_step_no": current_step_no,
         "status": status,
         "progress_json": progress_json or {},
+        "player_visibility": player_visibility,
     })
 
 
@@ -248,7 +250,7 @@ def test_get_quest_detail_correct_fields(db_engine, client):
     assert data["quest_type"] == "main"
     assert data["stage"] == 2
     assert data["status"] == "active"
-    assert data["visibility"] == "visible"
+    assert data["visibility"] == "discovered"
     assert data["progress"] == {"step_1": True}
     assert len(data["objectives"]) == 2
     assert data["objectives"][0]["completed"] is True

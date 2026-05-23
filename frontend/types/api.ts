@@ -1362,6 +1362,7 @@ export interface PlayerQuestSummary {
   stage: number;
   status: 'active' | 'completed' | 'failed' | 'abandoned';
   objectives: QuestObjective[];
+  visibility?: string;
 }
 
 export interface QuestStep {

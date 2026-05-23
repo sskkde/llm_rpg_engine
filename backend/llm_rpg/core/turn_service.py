@@ -30,7 +30,10 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple, Literal
+
+from .turn_progress import TurnProgressEvent, emit_stage
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -1729,6 +1732,7 @@ def _execute_llm_stages(
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
     transaction_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1755,12 +1759,18 @@ def _execute_llm_stages(
         movement_result: Optional movement result from this turn
         state_deltas: Optional state deltas from this turn
         current_location_id: The current location ID after any movement
+        progress_callback: Optional callback for progress events
         
     Returns:
         List of LLMStageResult objects, one per stage executed
     """
+    def _emit(stage: str, phase: str, **kw):
+        if progress_callback:
+            progress_callback(emit_stage(stage, phase, **kw))
+    
     results: List[LLMStageResult] = []
     
+    _emit("world_stage", "started")
     world_result = _execute_world_stage(
         db=db,
         session_id=session_id,
@@ -1771,7 +1781,9 @@ def _execute_llm_stages(
         transaction_id=transaction_id,
     )
     results.append(world_result)
+    _emit("world_stage", "completed")
     
+    _emit("scene_stage", "started")
     scene_result = _execute_scene_stage(
         db=db,
         session_id=session_id,
@@ -1785,7 +1797,9 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(scene_result)
+    _emit("scene_stage", "completed")
     
+    _emit("npc_stage", "started")
     npc_result = _execute_npc_stage(
         db=db,
         session_id=session_id,
@@ -1799,11 +1813,18 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(npc_result)
+    npc_name_for_progress: Optional[str] = None
+    if npc_result.accepted and npc_result.parsed_proposal:
+        npc_reactions = npc_result.parsed_proposal.get("npc_reactions", [])
+        if npc_reactions:
+            npc_name_for_progress = npc_reactions[0].get("npc_name")
+    _emit("npc_stage", "completed", actor_name=npc_name_for_progress)
     
     npc_reactions_for_narration: List[Dict[str, Any]] = []
     if npc_result.accepted and npc_result.parsed_proposal:
         npc_reactions_for_narration = npc_result.parsed_proposal.get("npc_reactions", [])
     
+    _emit("narration", "started")
     narration_result = _execute_narration_stage(
         db=db,
         session_id=session_id,
@@ -1818,6 +1839,7 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(narration_result)
+    _emit("narration", "completed")
     
     return results
 
@@ -2432,6 +2454,7 @@ def execute_turn_service(
     player_input: str,
     idempotency_key: Optional[str] = None,
     use_mock: bool = False,
+    progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
 ) -> TurnResult:
     """
     Execute a turn with full transaction support.
@@ -2463,6 +2486,10 @@ def execute_turn_service(
         TurnValidationError: If validation fails
         TurnServiceError: For other errors
     """
+    def _emit(stage: str, phase: str, **kw):
+        if progress_callback:
+            progress_callback(emit_stage(stage, phase, **kw))
+    
     # Step 1: Verify session exists
     session_repo = SessionRepository(db)
     session = session_repo.get_by_id(session_id)
@@ -2554,6 +2581,7 @@ def execute_turn_service(
         )
         
         # Step 5: Execute input intent LLM stage (before deterministic parsing)
+        _emit("input_intent", "started")
         input_intent_result = _execute_input_intent_stage(
             db=db,
             session_id=session_id,
@@ -2563,6 +2591,7 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
         )
+        _emit("input_intent", "completed")
         
         # Validate InputIntentProposal before using it
         if input_intent_result.accepted and input_intent_result.parsed_proposal:
@@ -2601,6 +2630,7 @@ def execute_turn_service(
         
         # Step 6: Parse player input and determine action type
         # Use LLM intent if accepted, otherwise fall back to deterministic parser
+        _emit("action_resolving", "started")
         action_type = "action"
         target = None
         input_intent_metadata: Optional[Dict[str, Any]] = None
@@ -2718,6 +2748,8 @@ def execute_turn_service(
             else:
                 # Blocked movement - no state mutation
                 state_deltas["blocked_reason"] = movement_result.blocked_reason
+        
+        _emit("action_resolving", "completed")
         
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
@@ -2837,6 +2869,7 @@ def execute_turn_service(
         player_state = _get_player_state(canonical_state, current_location_id)
         
         # Step 13: Commit turn to DB with template narration (durable commit first)
+        _emit("committing", "started")
         try:
             event = commit_turn(
                 db=db,
@@ -2866,6 +2899,7 @@ def execute_turn_service(
                 session_id=session_id,
                 turn_no=turn_no,
             )
+        _emit("committing", "completed")
         
         # Step 13b: Create game_event for player_input
         _create_game_event(
@@ -2902,9 +2936,11 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
             transaction_id=transaction_id,
+            progress_callback=progress_callback,
         )
         
         # Step 14b: Validate all proposals before committing
+        _emit("validation", "started")
         from ..models.proposals import (
             WorldTickProposal, SceneEventProposal, NPCActionProposal, NarrationProposal,
             CandidateEvent, StateDeltaCandidate, ProposalAuditMetadata, ProposalType, ProposalSource,
@@ -3109,6 +3145,7 @@ def execute_turn_service(
                         stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
                 except Exception as e:
                     logger.warning("Failed to validate NarrationProposal: %s", e)
+        _emit("validation", "completed")
         
         # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
         final_recommended_actions = deterministic_recommended_actions

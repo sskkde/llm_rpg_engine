@@ -27,6 +27,7 @@ Note: runtime/turn_orchestrator.py is DEPRECATED and for reference only.
 
 import asyncio
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple, Literal
 
 from .turn_progress import TurnProgressEvent, emit_stage
 from datetime import datetime
+
+TIME_ADVANCE_LLM_MODE = os.getenv("TIME_ADVANCE_LLM_MODE", "reuse")
 
 from sqlalchemy.orm import Session
 
@@ -832,6 +835,9 @@ def _execute_world_stage(
 
         parsed_proposal: Dict[str, Any] = {
             "time_description": getattr(proposal, "time_description", ""),
+            "elapsed_minutes": getattr(proposal, "elapsed_minutes", None),
+            "time_category": getattr(proposal, "time_category", None),
+            "display_hint": getattr(proposal, "display_hint", None),
             "candidate_events": [
                 {
                     "event_type": getattr(e, "event_type", "unknown"),

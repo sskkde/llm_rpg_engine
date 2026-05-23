@@ -335,6 +335,10 @@ class SessionQuestStateModel(Base):
     progress_json = Column(JSON, default=dict)
     status = Column(String, default="active")
     last_updated_at = Column(DateTime, default=datetime.now)
+    player_visibility = Column(String(20), default="hidden")  # hidden | discovered | archived
+    revealed_at = Column(DateTime, nullable=True)
+    reveal_source_event_id = Column(String, nullable=True)
+    last_revealed_step_no = Column(Integer, nullable=True)
 
     session = relationship("SessionModel", back_populates="quest_states")
     quest_template = relationship("QuestTemplateModel", back_populates="quest_states")

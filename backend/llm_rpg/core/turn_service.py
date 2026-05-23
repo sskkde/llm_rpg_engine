@@ -220,6 +220,7 @@ class TurnResult:
     movement_result: Optional[MovementResult] = None
     is_new_turn: bool = True
     llm_stage_results: List[LLMStageResult] = field(default_factory=list)
+    time_advance_result: Optional[Dict[str, Any]] = None
 
 
 def _run_async_safe(coro):
@@ -2840,7 +2841,39 @@ def execute_turn_service(
             action_type=action_type,
             intent_result=input_intent_result,
         )
-        world_time = _advance_world_time(world_time_before, elapsed_minutes=elapsed_minutes)
+
+        from .time_advance import INTENT_TO_TIME_CATEGORY, TimeAdvanceProposal
+        from .time_advance_validator import TimeAdvanceValidator
+
+        _intent_type = None
+        if input_intent_result is not None:
+            _parsed = getattr(input_intent_result, "parsed_proposal", None)
+            if _parsed and isinstance(_parsed, dict):
+                _intent_type = _parsed.get("intent_type")
+        if _intent_type is None and action_type:
+            _intent_type = action_type
+        _resolved_category = INTENT_TO_TIME_CATEGORY.get(_intent_type or "", "unknown")
+
+        _time_proposal = TimeAdvanceProposal(
+            elapsed_minutes=elapsed_minutes,
+            time_category=_resolved_category,
+        )
+        _validator = TimeAdvanceValidator()
+        _validator_result = _validator.validate(_time_proposal)
+
+        world_time = _advance_world_time(
+            world_time_before,
+            elapsed_minutes=_validator_result.accepted_elapsed_minutes,
+        )
+
+        time_advance_result = {
+            "accepted_elapsed_minutes": _validator_result.accepted_elapsed_minutes,
+            "original_elapsed_minutes": _validator_result.original_elapsed_minutes,
+            "adjusted": _validator_result.adjusted,
+            "reason": _validator_result.reason,
+            "category": _validator_result.category,
+            "new_world_time": world_time,
+        }
         
         # Step 11b: Process scheduled events with new world time
         scheduled_event_results: list[dict[str, Any]] = []
@@ -3191,6 +3224,41 @@ def execute_turn_service(
                     npc_reactions_for_json = stage_result.parsed_proposal.get("npc_reactions", [])
                 else:
                     npc_fallback_reason = stage_result.fallback_reason
+
+        # Step 15b: Refine time advance with world stage LLM result if available
+        _world_stage_result = next(
+            (sr for sr in llm_stage_results if sr.stage_name == "world" and sr.accepted),
+            None,
+        )
+        if _world_stage_result is not None:
+            _refined_minutes = _resolve_elapsed_minutes(
+                action_type=action_type,
+                intent_result=input_intent_result,
+                world_result=_world_stage_result,
+            )
+            if _refined_minutes != _validator_result.accepted_elapsed_minutes:
+                _refined_category = _resolved_category
+                _world_cat = getattr(_world_stage_result, "parsed_proposal", {})
+                if isinstance(_world_cat, dict) and _world_cat.get("time_category"):
+                    _refined_category = _world_cat["time_category"]
+                _refined_proposal = TimeAdvanceProposal(
+                    elapsed_minutes=_refined_minutes,
+                    time_category=_refined_category,
+                )
+                _refined_validator_result = _validator.validate(_refined_proposal)
+                _refined_world_time = _advance_world_time(
+                    world_time_before,
+                    elapsed_minutes=_refined_validator_result.accepted_elapsed_minutes,
+                )
+                world_time = _refined_world_time
+                time_advance_result = {
+                    "accepted_elapsed_minutes": _refined_validator_result.accepted_elapsed_minutes,
+                    "original_elapsed_minutes": _refined_validator_result.original_elapsed_minutes,
+                    "adjusted": _refined_validator_result.adjusted,
+                    "reason": _refined_validator_result.reason,
+                    "category": _refined_validator_result.category,
+                    "new_world_time": world_time,
+                }
         
         # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
         final_narration = narration
@@ -3341,6 +3409,7 @@ def execute_turn_service(
             "npc_fallback_reason": npc_fallback_reason,
             "world_progression": world_progression,
             "world_fallback_reason": world_fallback_reason,
+            "time_advance_result": time_advance_result,
         }
         event_log_repo = EventLogRepository(db)
         event_log_repo.update(event.id, {"result_json": updated_result_json})
@@ -3409,6 +3478,7 @@ def execute_turn_service(
             movement_result=movement_result,
             is_new_turn=is_new,
             llm_stage_results=[input_intent_result] + llm_stage_results,
+            time_advance_result=time_advance_result,
         )
     
     except Exception as e:

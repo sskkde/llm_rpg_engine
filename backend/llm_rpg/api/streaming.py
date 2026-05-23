@@ -522,6 +522,7 @@ async def execute_turn_stream(
             "player_state": result.player_state,
             "world_time": result.world_time,
             "timestamp": datetime.now().isoformat(),
+            "time_advance_result": result.time_advance_result,
         },
         event_id=f"{event_id}_complete"
     )

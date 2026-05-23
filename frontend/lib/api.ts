@@ -190,8 +190,10 @@ export async function getPlayerLocationDetail(sessionId: string, locationId: str
   return { ...raw, danger_level: normalizeDangerLevel(raw.danger_level) };
 }
 
-export async function getPlayerRelationships(sessionId: string, sortBy?: string): Promise<PlayerRelationship[]> {
-  const params = sortBy ? `?sort_by=${sortBy}` : '';
+type RelationshipSort = 'trust' | 'respect' | 'fear' | 'last_interaction';
+
+export async function getPlayerRelationships(sessionId: string, sortBy?: RelationshipSort): Promise<PlayerRelationship[]> {
+  const params = sortBy ? `?sort=${encodeURIComponent(sortBy)}` : '';
   const response = await fetchWithAuth<RelationshipListResponse>(`/player/sessions/${sessionId}/relationships${params}`);
   return response.relationships;
 }

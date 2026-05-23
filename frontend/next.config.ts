@@ -13,6 +13,7 @@ const apiProxyPrefixes = [
   'admin',
   'debug',
   'media',
+  'player',
   'dev',
 ];
 

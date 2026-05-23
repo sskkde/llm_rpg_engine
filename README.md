@@ -1098,6 +1098,90 @@ All Must Have items complete. All test gates pass. Ready for production deployme
 
 For detailed status, see `V1_COMPLETION_REPORT.md` and `V1_READINESS.md`.
 
+## P10-A: Immersion & Provider Routing
+
+This phase adds four experience/architecture modules: SSE stage progress events, minute-precision dynamic world time, quest anti-spoiler gating, and per-asset-type provider routing.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P10-A quality gate (fast)
+make test-p10a-fast
+
+# Run P10-A quality gate (full)
+make test-p10a
+
+# Verify no regression
+make test-v1-release
+```
+
+### Key Features
+
+- **SSE Stage Progress Events**: Real-time stage updates during turn execution via `stage_started` and `stage_completed` events
+- **TurnStageStatus Component**: Frontend component replacing static "故事展开中" with dynamic stage labels
+- **Dynamic World Time**: Minute-precision time with hour/minute fields (辰时 → 08:35)
+- **TimeAdvanceValidator**: Enforces per-action time ranges (inspect: 1-5 min, dialogue: 3-15 min, movement: 5-180 min)
+- **Quest Anti-Spoiler Gating**: Hidden quests excluded from Player API until discovered
+- **Per-Asset-Type Provider Routing**: PORTRAIT → IMAGE → DEFAULT → mock fallback chain
+- **Debug Endpoint**: `GET /debug/assets/providers/resolved` for provider inspection
+
+### New SSE Events
+
+| Event | Description |
+|-------|-------------|
+| `stage_started` | Turn stage begins (e.g., NPC 思考中……) |
+| `stage_completed` | Turn stage finishes |
+
+### New Environment Variables
+
+```bash
+# Asset Provider Configuration
+ASSET_PROVIDER_DEFAULT=mock          # Global fallback
+ASSET_PROVIDER_IMAGE=mock            # Image category (portrait, scene)
+ASSET_PROVIDER_PORTRAIT=mock         # Portrait-specific override
+ASSET_PROVIDER_SCENE=mock            # Scene-specific override
+ASSET_PROVIDER_AUDIO=audio_placeholder  # Audio category (bgm, sfx)
+ASSET_PROVIDER_BGM=audio_placeholder    # BGM-specific override
+ASSET_PROVIDER_SFX=audio_placeholder    # SFX-specific override
+
+# Time Advance Configuration
+TIME_ADVANCE_LLM_MODE=reuse          # "reuse" or "explicit"
+```
+
+### Quest Visibility
+
+Quests now have `player_visibility` field:
+- `hidden`: Not returned by Player API (spoiler protection)
+- `discovered`: Visible to player
+- Completed quests auto-promoted to `discovered`
+
+### Time Categories
+
+| Category | Minutes | Example Actions |
+|----------|---------|-----------------|
+| inspect | 1-5 | Look around, examine item |
+| short_dialogue | 3-15 | Talk, ask question |
+| long_dialogue | 10-45 | Persuade, negotiate |
+| nearby_movement | 5-30 | Move within area |
+| far_movement | 30-180 | Travel to distant location |
+| combat | 1-10 | Attack, defend, cast skill |
+| rest | 30-480 | Rest, recover |
+| wait | 1-1440 | Explicit wait action |
+
+### P10-B Deferred Items
+
+The following features are explicitly out of scope for P10-A:
+
+- **TIME_ADVANCE_LLM_MODE=explicit**: Separate LLM call for time advancement
+- **Real external providers**: DALL-E/Stable Diffusion with real API calls
+- **SFX asset generation**: Sound effects beyond placeholder
+- **Real audio synthesis**: Music generation API
+
+For detailed status, see `P10A_EXECUTION_REPORT.md` and `P10A_READINESS.md`.
+
 ## References
 
 - [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)

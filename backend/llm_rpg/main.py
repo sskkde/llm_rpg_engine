@@ -38,20 +38,26 @@ from .api import auth, saves, sessions, game, player_relationships, streaming, w
 
 
 APP_ENV = os.getenv("APP_ENV", "development")
-DEFAULT_CORS_ORIGINS = (
+DEFAULT_DEV_CORS_ORIGINS = (
     "http://localhost:3005,http://127.0.0.1:3005,"
     "http://localhost:3000,http://127.0.0.1:3000,"
     "http://localhost:8000,http://127.0.0.1:8000,"
     "https://llm.nas-1.club:18080"
 )
 
-app = FastAPI(title="LLM RPG Engine", version="2.0.0")
+if APP_ENV == "production":
+    _cors_env = os.getenv("CORS_ORIGINS", "")
+    if not _cors_env:
+        raise RuntimeError("CORS_ORIGINS must be set in production (e.g., CORS_ORIGINS=https://yourdomain.com)")
+    cors_origins = [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
+else:
+    cors_origins = [
+        origin.strip()
+        for origin in os.getenv("CORS_ORIGINS", DEFAULT_DEV_CORS_ORIGINS).split(",")
+        if origin.strip()
+    ]
 
-cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
-    if origin.strip()
-]
+app = FastAPI(title="LLM RPG Engine", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -100,6 +106,13 @@ class MaintenanceModeMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(MaintenanceModeMiddleware)
+
+
+@app.get("/health")
+def health_check():
+    """Unauthenticated health check for container orchestration and load balancers."""
+    return {"status": "ok"}
+
 
 app.include_router(auth.router)
 app.include_router(saves.router)

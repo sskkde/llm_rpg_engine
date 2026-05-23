@@ -20,7 +20,12 @@ from ..storage.models import UserModel
 from ..storage.repositories import UserRepository
 
 # Security configuration
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
+_jwt_secret_from_env = os.getenv("JWT_SECRET_KEY")
+if not _jwt_secret_from_env:
+    if os.getenv("APP_ENV") == "production":
+        raise RuntimeError("JWT_SECRET_KEY must be set in production. Generate with: openssl rand -hex 32")
+    _jwt_secret_from_env = "dev-secret-key-change-in-production"
+SECRET_KEY = _jwt_secret_from_env
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 

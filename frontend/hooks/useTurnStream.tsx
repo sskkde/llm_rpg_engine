@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createTurnStream, executeTurn } from '@/lib/api';
-import type { TurnResponse } from '@/types/api';
+import type { TurnResponse, TurnStageState } from '@/types/api';
 
 interface TurnState {
   isStreaming: boolean;
@@ -12,6 +12,8 @@ interface TurnState {
   error: string | null;
   usedFallback: boolean;
   streamingDuration: number;
+  currentStage: TurnStageState | null;
+  stageHistory: TurnStageState[];
 }
 
 function generateIdempotencyKey(): string {
@@ -27,6 +29,8 @@ export function useTurnStream(sessionId: string | null) {
     error: null,
     usedFallback: false,
     streamingDuration: 0,
+    currentStage: null,
+    stageHistory: [],
   });
   const streamRef = useRef<{ abort(): void } | null>(null);
   const pendingKeyRef = useRef<string | null>(null);
@@ -90,6 +94,8 @@ export function useTurnStream(sessionId: string | null) {
         error: null,
         usedFallback: true,
         streamingDuration: 0,
+        currentStage: null,
+        stageHistory: [],
       });
       return response;
     } catch (err: unknown) {
@@ -105,6 +111,8 @@ export function useTurnStream(sessionId: string | null) {
         error: errorMessage,
         usedFallback: true,
         streamingDuration: 0,
+        currentStage: null,
+        stageHistory: [],
       });
       return null;
     }
@@ -124,6 +132,8 @@ export function useTurnStream(sessionId: string | null) {
       error: null,
       usedFallback: false,
       streamingDuration: 0,
+      currentStage: null,
+      stageHistory: [],
     });
 
     try {
@@ -142,6 +152,30 @@ export function useTurnStream(sessionId: string | null) {
               setState((prev) => ({
                 ...prev,
                 narration: accumulatedNarration,
+              }));
+              break;
+
+            case 'stage_started': {
+              const stageState: TurnStageState = {
+                code: event.stage,
+                phase: 'started',
+                label: event.label,
+                actorId: event.actor_id,
+                actorName: event.actor_name,
+                progress: event.progress,
+              };
+              setState((prev) => ({
+                ...prev,
+                currentStage: stageState,
+                stageHistory: [...prev.stageHistory, stageState],
+              }));
+              break;
+            }
+
+            case 'stage_completed':
+              setState((prev) => ({
+                ...prev,
+                currentStage: null,
               }));
               break;
 
@@ -167,6 +201,8 @@ export function useTurnStream(sessionId: string | null) {
                 error: null,
                 usedFallback: false,
                 streamingDuration: 0,
+                currentStage: null,
+                stageHistory: [],
               });
               return turnResponse;
             }
@@ -181,6 +217,7 @@ export function useTurnStream(sessionId: string | null) {
                 isComplete: false,
                 error: event.message || 'Turn failed',
                 streamingDuration: 0,
+                currentStage: null,
               }));
               return null;
           }
@@ -197,6 +234,7 @@ export function useTurnStream(sessionId: string | null) {
         isComplete: false,
         usedFallback: true,
         streamingDuration: 0,
+        currentStage: null,
       }));
       return fallbackTurn(action, idempotencyKey);
     } catch {

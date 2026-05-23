@@ -2830,7 +2830,11 @@ def execute_turn_service(
         
         # Step 11: Advance world time for the committed turn
         world_time_before = _get_world_time(session_state)
-        world_time = _advance_world_time(world_time_before)
+        elapsed_minutes = _resolve_elapsed_minutes(
+            action_type=action_type,
+            intent_result=input_intent_result,
+        )
+        world_time = _advance_world_time(world_time_before, elapsed_minutes=elapsed_minutes)
         
         # Step 11b: Process scheduled events with new world time
         scheduled_event_results: list[dict[str, Any]] = []
@@ -2841,6 +2845,8 @@ def execute_turn_service(
                 season=world_time.get("season", "春"),
                 day=_parse_world_day(world_time.get("day", "第1日")),
                 period=world_time.get("period", "辰时"),
+                hour=world_time.get("hour", 7),
+                minute=world_time.get("minute", 0),
             )
             scheduled_processor = ScheduledEventProcessor(db)
             scheduled_event_results = scheduled_processor.process_scheduled_events(
@@ -3517,15 +3523,27 @@ def _build_narration(
 def _get_world_time(session_state) -> Dict[str, Any]:
     """Get world time from session state."""
     if session_state and session_state.current_time:
-        # Parse time string format: "修仙历 春 第1日 辰时"
         time_parts = session_state.current_time.split()
         if len(time_parts) >= 4:
-            return {
+            result = {
                 "calendar": time_parts[0],
                 "season": time_parts[1],
                 "day": time_parts[2],
                 "period": time_parts[3],
             }
+            # New format: "修仙历 春 第1日 辰时 07:00"
+            if len(time_parts) >= 5:
+                time_str = time_parts[4]
+                if ":" in time_str:
+                    try:
+                        h, m = time_str.split(":")
+                        result["hour"] = int(h)
+                        result["minute"] = int(m)
+                        day_int = _parse_world_day(result["day"])
+                        result["total_minutes"] = (day_int - 1) * 1440 + result["hour"] * 60 + result["minute"]
+                    except (ValueError, IndexError):
+                        pass
+            return result
     
     # Default world time
     return {
@@ -3546,27 +3564,135 @@ def _parse_world_day(day_value: Any) -> int:
     return 1
 
 
-def _advance_world_time(world_time: Dict[str, Any]) -> Dict[str, Any]:
-    periods = [
-        "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
-        "午时", "未时", "申时", "酉时", "戌时", "亥时",
-    ]
-    current_period = world_time.get("period", "辰时")
-    try:
-        current_index = periods.index(current_period)
-    except ValueError:
-        current_index = periods.index("辰时")
+def _resolve_elapsed_minutes(
+    action_type: Optional[str] = None,
+    intent_result: Optional[Any] = None,
+    world_result: Optional[Any] = None,
+) -> int:
+    """Resolve elapsed minutes for time advancement.
 
-    next_index = (current_index + 1) % len(periods)
+    Priority:
+    1. Extract from world_result.parsed_proposal.get("elapsed_minutes")
+    2. Map intent_type to time_category via INTENT_TO_TIME_CATEGORY, then DETERMINISTIC_DEFAULTS
+    3. Fallback: return 10 (default)
+    """
+    from .time_advance import DETERMINISTIC_DEFAULTS, INTENT_TO_TIME_CATEGORY
+
+    if world_result is not None:
+        parsed = getattr(world_result, "parsed_proposal", None)
+        if parsed and isinstance(parsed, dict):
+            em = parsed.get("elapsed_minutes")
+            if isinstance(em, (int, float)) and em >= 0:
+                return int(em)
+
+    intent_type = None
+    if intent_result is not None:
+        parsed = getattr(intent_result, "parsed_proposal", None)
+        if parsed and isinstance(parsed, dict):
+            intent_type = parsed.get("intent_type")
+    if intent_type is None and action_type:
+        intent_type = action_type
+
+    if intent_type and intent_type in INTENT_TO_TIME_CATEGORY:
+        category = INTENT_TO_TIME_CATEGORY[intent_type]
+        if category in DETERMINISTIC_DEFAULTS:
+            return DETERMINISTIC_DEFAULTS[category]
+
+    return 10
+
+
+def _advance_world_time(world_time: Dict[str, Any], elapsed_minutes: Optional[int] = None) -> Dict[str, Any]:
+    from ..models.events import WorldTime
+
+    seasons = ["春", "夏", "秋", "冬"]
+
+    if elapsed_minutes is None:
+        # Old behavior: advance 1 period (2 hours)
+        periods = [
+            "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
+            "午时", "未时", "申时", "酉时", "戌时", "亥时",
+        ]
+        current_period = world_time.get("period", "辰时")
+        try:
+            current_index = periods.index(current_period)
+        except ValueError:
+            current_index = periods.index("辰时")
+
+        next_index = (current_index + 1) % len(periods)
+        day = _parse_world_day(world_time.get("day", "第1日"))
+        season = world_time.get("season", "春")
+
+        if next_index == 0:
+            day += 1
+            if day > 30:
+                day = 1
+                try:
+                    season = seasons[(seasons.index(season) + 1) % 4]
+                except ValueError:
+                    season = "春"
+
+        return {
+            "calendar": world_time.get("calendar", "修仙历"),
+            "season": season,
+            "day": f"第{day}日",
+            "period": periods[next_index],
+        }
+
+    # Minute-precision path
+    if elapsed_minutes == 0:
+        result = {
+            "calendar": world_time.get("calendar", "修仙历"),
+            "season": world_time.get("season", "春"),
+            "day": world_time.get("day", "第1日"),
+            "period": world_time.get("period", "辰时"),
+        }
+        hour = world_time.get("hour")
+        minute = world_time.get("minute")
+        if hour is not None and minute is not None:
+            result["hour"] = hour
+            result["minute"] = minute
+            result["total_minutes"] = world_time.get("total_minutes", (_parse_world_day(result["day"]) - 1) * 1440 + hour * 60 + minute)
+            result["display_text"] = f"{result['calendar']} {result['season']} {result['day']} {result['period']} {hour:02d}:{minute:02d}"
+        return result
+
+    calendar = world_time.get("calendar", "修仙历")
+    season = world_time.get("season", "春")
     day = _parse_world_day(world_time.get("day", "第1日"))
-    if next_index == 0:
-        day += 1
+
+    # Derive current hour/minute from world_time dict
+    if "hour" in world_time and "minute" in world_time:
+        current_hour = int(world_time["hour"])
+        current_minute = int(world_time["minute"])
+    else:
+        current_hour = WorldTime.from_period(world_time.get("period", "辰时"))
+        current_minute = 0
+
+    total_minutes = (day - 1) * 1440 + current_hour * 60 + current_minute + elapsed_minutes
+    new_day = total_minutes // 1440 + 1
+    remaining = total_minutes % 1440
+    new_hour = remaining // 60
+    new_minute = remaining % 60
+    new_period = WorldTime.derive_period(new_hour)
+
+    # Season rollover: every 30 days
+    while new_day > 30:
+        new_day -= 30
+        try:
+            season = seasons[(seasons.index(season) + 1) % 4]
+        except ValueError:
+            season = "春"
+
+    display_text = f"{calendar} {season} 第{new_day}日 {new_period} {new_hour:02d}:{new_minute:02d}"
 
     return {
-        "calendar": world_time.get("calendar", "修仙历"),
-        "season": world_time.get("season", "春"),
-        "day": f"第{day}日",
-        "period": periods[next_index],
+        "calendar": calendar,
+        "season": season,
+        "day": f"第{new_day}日",
+        "period": new_period,
+        "hour": new_hour,
+        "minute": new_minute,
+        "total_minutes": total_minutes,
+        "display_text": display_text,
     }
 
 

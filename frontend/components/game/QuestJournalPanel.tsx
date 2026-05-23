@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTranslations } from 'next-intl';
 import { Loading } from '@/components/ui/Loading';
 import { getPlayerQuests, getPlayerQuestDetail } from '@/lib/api';
@@ -199,6 +199,8 @@ export function QuestJournalPanel({ sessionId }: QuestJournalPanelProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showNewQuestToast, setShowNewQuestToast] = useState(false);
+  const prevQuestCountRef = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -209,6 +211,11 @@ export function QuestJournalPanel({ sessionId }: QuestJournalPanelProps) {
       try {
         const data = await getPlayerQuests(sessionId);
         if (mounted) {
+          if (prevQuestCountRef.current === 0 && data.length > 0) {
+            setShowNewQuestToast(true);
+          }
+          prevQuestCountRef.current = data.length;
+          
           setQuests(data);
           if (data.length > 0) {
             const detail = await getPlayerQuestDetail(sessionId, data[0].quest_id);
@@ -234,6 +241,16 @@ export function QuestJournalPanel({ sessionId }: QuestJournalPanelProps) {
       mounted = false;
     };
   }, [sessionId, t]);
+
+  useEffect(() => {
+    if (!showNewQuestToast) return;
+    
+    const timer = setTimeout(() => {
+      setShowNewQuestToast(false);
+    }, 4000);
+    
+    return () => clearTimeout(timer);
+  }, [showNewQuestToast]);
 
   const handleSelectQuest = async (questId: string) => {
     setIsLoadingDetail(true);
@@ -283,6 +300,16 @@ export function QuestJournalPanel({ sessionId }: QuestJournalPanelProps) {
 
   return (
     <div className="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
+      {showNewQuestToast && (
+        <div 
+          className="bg-emerald-100 dark:bg-emerald-900/30 px-4 py-2 border-b border-emerald-200 dark:border-emerald-800"
+          role="alert"
+        >
+          <p className="text-sm text-emerald-700 dark:text-emerald-300">
+            新的任务线索已记录
+          </p>
+        </div>
+      )}
       <div className="p-4 border-b border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-medium text-slate-500 dark:text-slate-400">

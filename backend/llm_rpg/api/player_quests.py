@@ -26,6 +26,7 @@ from ..storage.repositories import (
     QuestTemplateRepository,
     QuestStepRepository,
 )
+from ..services.quest_journal_service import QuestJournalService
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/player/sessions/{session_id}", tags=["player-quests"])
@@ -50,6 +51,7 @@ class QuestListItem(BaseModel):
     stage: int
     status: str
     objectives: List[QuestObjective] = []
+    visibility: str = "hidden"
 
 
 class QuestDetail(BaseModel):
@@ -132,11 +134,10 @@ def list_quests(
     """
     _get_session_and_verify_owner(session_id, current_user, db)
 
-    quest_state_repo = SessionQuestStateRepository(db)
-    quest_states = quest_state_repo.get_by_session(session_id)
-
-    if status is not None and status != "all":
-        quest_states = [qs for qs in quest_states if qs.status == status]
+    journal_service = QuestJournalService(db)
+    quest_states = journal_service.list_visible_quests(
+        session_id, status=status if status != "all" else None
+    )
 
     result = []
     for qs in quest_states:
@@ -158,6 +159,7 @@ def list_quests(
             stage=qs.current_step_no,
             status=qs.status,
             objectives=objectives,
+            visibility=qs.player_visibility,
         ))
 
     return result
@@ -187,6 +189,12 @@ def get_quest_detail(
             detail="Quest not found",
         )
 
+    if quest_state.player_visibility == "hidden":
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail="Quest not found",
+        )
+
     template_repo = QuestTemplateRepository(db)
     template = template_repo.get_by_id(quest_id)
 
@@ -210,7 +218,7 @@ def get_quest_detail(
         objectives=objectives,
         step_history=step_history,
         progress=progress,
-        visibility=template.visibility,
+        visibility=quest_state.player_visibility,
         last_updated_at=quest_state.last_updated_at.isoformat()
             if quest_state.last_updated_at else None,
     )

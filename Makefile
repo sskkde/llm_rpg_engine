@@ -10,6 +10,7 @@
         test-asset-job-model-unit test-asset-jobs-api test-frontend-asset-jobs test-scenario-p7 test-p7-fast test-p7 \
         test-asset-provider-p8 test-asset-queue-p8 test-asset-cost-rate-p8 test-admin-audit-p8 test-frontend-p8-assets test-scenario-p8 test-p8-fast test-p8 \
         test-v1-rule-engine test-v1-game-ui test-v1-ops test-v1-playthrough test-v1-release \
+        test-p10a-quests test-p10a-providers test-p10a-streaming test-p10a-time test-p10a-fast test-p10a \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -233,6 +234,28 @@ test-v1-release: ## V1.0 release gate: all V1 tests + test-p8-fast + frontend bu
 	@cd frontend && npm run build
 	@cd frontend && npm run lint
 	@cd frontend && npx tsc --noEmit
+
+# === P10-A: Immersion Provider Routing ===
+
+test-p10a-quests:
+	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_quest_journal_service.py tests/integration/test_quest_visibility_api.py -q --tb=short || true
+
+test-p10a-providers:
+	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_asset_provider_resolver.py tests/integration/test_media_provider_routing.py -q --tb=short || true
+
+test-p10a-streaming:
+	@cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_streaming_stage_events.py -q --tb=short || true
+
+test-p10a-time:
+	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_time_advance_validator.py tests/integration/test_dynamic_world_time.py -q --tb=short || true
+
+test-p10a-fast: test-v1-release test-p10a-streaming test-p10a-time test-p10a-quests test-p10a-providers
+
+test-p10a:
+	$(MAKE) test-p10a-fast
+	cd frontend && npm run build
+	cd frontend && npm run lint
+	cd frontend && npx tsc --noEmit
 
 # ── Run targets ───────────────────────────────────────────────
 

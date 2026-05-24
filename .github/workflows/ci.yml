@@ -354,3 +354,35 @@ jobs:
       - name: Frontend type check
         run: npx tsc --noEmit
         working-directory: frontend
+
+  p10a-tests:
+    name: P10-A Immersion Provider Routing Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run P10-A fast gate
+        run: make test-p10a-fast
+        env:
+          APP_ENV: testing
+          LLM_PROVIDER: mock
+          ASSET_PROVIDER_DEFAULT: mock
+          ASSET_PROVIDER: mock

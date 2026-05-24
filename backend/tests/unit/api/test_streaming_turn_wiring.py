@@ -265,6 +265,7 @@ class TestStreamingCommitEventTiming:
         mock_result.narration = "测试叙述"
         mock_result.recommended_actions = []
         mock_result.player_state = {}
+        mock_result.time_advance_result = None
         
         def track_execute_turn_service(*args, **kwargs):
             call_order.append("execute_turn_service")
@@ -319,6 +320,7 @@ class TestStreamingCommitEventTiming:
         mock_result.narration = "测试"
         mock_result.recommended_actions = []
         mock_result.player_state = {}
+        mock_result.time_advance_result = None
         
         with patch('llm_rpg.api.streaming.execute_turn_service', return_value=mock_result) as mock_service:
             from llm_rpg.api.streaming import execute_turn_stream

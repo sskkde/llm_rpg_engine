@@ -27,11 +27,17 @@ Note: runtime/turn_orchestrator.py is DEPRECATED and for reference only.
 
 import asyncio
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple, Literal
+
+from .turn_progress import TurnProgressEvent, emit_stage
 from datetime import datetime
+
+TIME_ADVANCE_LLM_MODE = os.getenv("TIME_ADVANCE_LLM_MODE", "reuse")
 
 from sqlalchemy.orm import Session
 
@@ -214,6 +220,7 @@ class TurnResult:
     movement_result: Optional[MovementResult] = None
     is_new_turn: bool = True
     llm_stage_results: List[LLMStageResult] = field(default_factory=list)
+    time_advance_result: Optional[Dict[str, Any]] = None
 
 
 def _run_async_safe(coro):
@@ -829,6 +836,9 @@ def _execute_world_stage(
 
         parsed_proposal: Dict[str, Any] = {
             "time_description": getattr(proposal, "time_description", ""),
+            "elapsed_minutes": getattr(proposal, "elapsed_minutes", None),
+            "time_category": getattr(proposal, "time_category", None),
+            "display_hint": getattr(proposal, "display_hint", None),
             "candidate_events": [
                 {
                     "event_type": getattr(e, "event_type", "unknown"),
@@ -1729,6 +1739,7 @@ def _execute_llm_stages(
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
     transaction_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1755,12 +1766,18 @@ def _execute_llm_stages(
         movement_result: Optional movement result from this turn
         state_deltas: Optional state deltas from this turn
         current_location_id: The current location ID after any movement
+        progress_callback: Optional callback for progress events
         
     Returns:
         List of LLMStageResult objects, one per stage executed
     """
+    def _emit(stage: str, phase: str, **kw):
+        if progress_callback:
+            progress_callback(emit_stage(stage, phase, **kw))
+    
     results: List[LLMStageResult] = []
     
+    _emit("world_stage", "started")
     world_result = _execute_world_stage(
         db=db,
         session_id=session_id,
@@ -1771,7 +1788,9 @@ def _execute_llm_stages(
         transaction_id=transaction_id,
     )
     results.append(world_result)
+    _emit("world_stage", "completed")
     
+    _emit("scene_stage", "started")
     scene_result = _execute_scene_stage(
         db=db,
         session_id=session_id,
@@ -1785,7 +1804,9 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(scene_result)
+    _emit("scene_stage", "completed")
     
+    _emit("npc_stage", "started")
     npc_result = _execute_npc_stage(
         db=db,
         session_id=session_id,
@@ -1799,11 +1820,18 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(npc_result)
+    npc_name_for_progress: Optional[str] = None
+    if npc_result.accepted and npc_result.parsed_proposal:
+        npc_reactions = npc_result.parsed_proposal.get("npc_reactions", [])
+        if npc_reactions:
+            npc_name_for_progress = npc_reactions[0].get("npc_name")
+    _emit("npc_stage", "completed", actor_name=npc_name_for_progress)
     
     npc_reactions_for_narration: List[Dict[str, Any]] = []
     if npc_result.accepted and npc_result.parsed_proposal:
         npc_reactions_for_narration = npc_result.parsed_proposal.get("npc_reactions", [])
     
+    _emit("narration", "started")
     narration_result = _execute_narration_stage(
         db=db,
         session_id=session_id,
@@ -1818,6 +1846,7 @@ def _execute_llm_stages(
         use_mock=use_mock,
     )
     results.append(narration_result)
+    _emit("narration", "completed")
     
     return results
 
@@ -2432,6 +2461,7 @@ def execute_turn_service(
     player_input: str,
     idempotency_key: Optional[str] = None,
     use_mock: bool = False,
+    progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
 ) -> TurnResult:
     """
     Execute a turn with full transaction support.
@@ -2463,6 +2493,10 @@ def execute_turn_service(
         TurnValidationError: If validation fails
         TurnServiceError: For other errors
     """
+    def _emit(stage: str, phase: str, **kw):
+        if progress_callback:
+            progress_callback(emit_stage(stage, phase, **kw))
+    
     # Step 1: Verify session exists
     session_repo = SessionRepository(db)
     session = session_repo.get_by_id(session_id)
@@ -2554,6 +2588,7 @@ def execute_turn_service(
         )
         
         # Step 5: Execute input intent LLM stage (before deterministic parsing)
+        _emit("input_intent", "started")
         input_intent_result = _execute_input_intent_stage(
             db=db,
             session_id=session_id,
@@ -2563,6 +2598,7 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
         )
+        _emit("input_intent", "completed")
         
         # Validate InputIntentProposal before using it
         if input_intent_result.accepted and input_intent_result.parsed_proposal:
@@ -2601,6 +2637,7 @@ def execute_turn_service(
         
         # Step 6: Parse player input and determine action type
         # Use LLM intent if accepted, otherwise fall back to deterministic parser
+        _emit("action_resolving", "started")
         action_type = "action"
         target = None
         input_intent_metadata: Optional[Dict[str, Any]] = None
@@ -2719,6 +2756,8 @@ def execute_turn_service(
                 # Blocked movement - no state mutation
                 state_deltas["blocked_reason"] = movement_result.blocked_reason
         
+        _emit("action_resolving", "completed")
+        
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
             # Validate quest progression before checking
@@ -2798,7 +2837,43 @@ def execute_turn_service(
         
         # Step 11: Advance world time for the committed turn
         world_time_before = _get_world_time(session_state)
-        world_time = _advance_world_time(world_time_before)
+        elapsed_minutes = _resolve_elapsed_minutes(
+            action_type=action_type,
+            intent_result=input_intent_result,
+        )
+
+        from .time_advance import INTENT_TO_TIME_CATEGORY, TimeAdvanceProposal
+        from .time_advance_validator import TimeAdvanceValidator
+
+        _intent_type = None
+        if input_intent_result is not None:
+            _parsed = getattr(input_intent_result, "parsed_proposal", None)
+            if _parsed and isinstance(_parsed, dict):
+                _intent_type = _parsed.get("intent_type")
+        if _intent_type is None and action_type:
+            _intent_type = action_type
+        _resolved_category = INTENT_TO_TIME_CATEGORY.get(_intent_type or "", "unknown")
+
+        _time_proposal = TimeAdvanceProposal(
+            elapsed_minutes=elapsed_minutes,
+            time_category=_resolved_category,
+        )
+        _validator = TimeAdvanceValidator()
+        _validator_result = _validator.validate(_time_proposal)
+
+        world_time = _advance_world_time(
+            world_time_before,
+            elapsed_minutes=_validator_result.accepted_elapsed_minutes,
+        )
+
+        time_advance_result = {
+            "accepted_elapsed_minutes": _validator_result.accepted_elapsed_minutes,
+            "original_elapsed_minutes": _validator_result.original_elapsed_minutes,
+            "adjusted": _validator_result.adjusted,
+            "reason": _validator_result.reason,
+            "category": _validator_result.category,
+            "new_world_time": world_time,
+        }
         
         # Step 11b: Process scheduled events with new world time
         scheduled_event_results: list[dict[str, Any]] = []
@@ -2809,6 +2884,8 @@ def execute_turn_service(
                 season=world_time.get("season", "春"),
                 day=_parse_world_day(world_time.get("day", "第1日")),
                 period=world_time.get("period", "辰时"),
+                hour=world_time.get("hour", 7),
+                minute=world_time.get("minute", 0),
             )
             scheduled_processor = ScheduledEventProcessor(db)
             scheduled_event_results = scheduled_processor.process_scheduled_events(
@@ -2837,6 +2914,7 @@ def execute_turn_service(
         player_state = _get_player_state(canonical_state, current_location_id)
         
         # Step 13: Commit turn to DB with template narration (durable commit first)
+        _emit("committing", "started")
         try:
             event = commit_turn(
                 db=db,
@@ -2866,6 +2944,7 @@ def execute_turn_service(
                 session_id=session_id,
                 turn_no=turn_no,
             )
+        _emit("committing", "completed")
         
         # Step 13b: Create game_event for player_input
         _create_game_event(
@@ -2902,9 +2981,11 @@ def execute_turn_service(
             current_location_id=current_location_id,
             use_mock=use_mock,
             transaction_id=transaction_id,
+            progress_callback=progress_callback,
         )
         
         # Step 14b: Validate all proposals before committing
+        _emit("validation", "started")
         from ..models.proposals import (
             WorldTickProposal, SceneEventProposal, NPCActionProposal, NarrationProposal,
             CandidateEvent, StateDeltaCandidate, ProposalAuditMetadata, ProposalType, ProposalSource,
@@ -3109,6 +3190,7 @@ def execute_turn_service(
                         stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
                 except Exception as e:
                     logger.warning("Failed to validate NarrationProposal: %s", e)
+        _emit("validation", "completed")
         
         # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
         final_recommended_actions = deterministic_recommended_actions
@@ -3142,6 +3224,41 @@ def execute_turn_service(
                     npc_reactions_for_json = stage_result.parsed_proposal.get("npc_reactions", [])
                 else:
                     npc_fallback_reason = stage_result.fallback_reason
+
+        # Step 15b: Refine time advance with world stage LLM result if available
+        _world_stage_result = next(
+            (sr for sr in llm_stage_results if sr.stage_name == "world" and sr.accepted),
+            None,
+        )
+        if _world_stage_result is not None:
+            _refined_minutes = _resolve_elapsed_minutes(
+                action_type=action_type,
+                intent_result=input_intent_result,
+                world_result=_world_stage_result,
+            )
+            if _refined_minutes != _validator_result.accepted_elapsed_minutes:
+                _refined_category = _resolved_category
+                _world_cat = getattr(_world_stage_result, "parsed_proposal", {})
+                if isinstance(_world_cat, dict) and _world_cat.get("time_category"):
+                    _refined_category = _world_cat["time_category"]
+                _refined_proposal = TimeAdvanceProposal(
+                    elapsed_minutes=_refined_minutes,
+                    time_category=_refined_category,
+                )
+                _refined_validator_result = _validator.validate(_refined_proposal)
+                _refined_world_time = _advance_world_time(
+                    world_time_before,
+                    elapsed_minutes=_refined_validator_result.accepted_elapsed_minutes,
+                )
+                world_time = _refined_world_time
+                time_advance_result = {
+                    "accepted_elapsed_minutes": _refined_validator_result.accepted_elapsed_minutes,
+                    "original_elapsed_minutes": _refined_validator_result.original_elapsed_minutes,
+                    "adjusted": _refined_validator_result.adjusted,
+                    "reason": _refined_validator_result.reason,
+                    "category": _refined_validator_result.category,
+                    "new_world_time": world_time,
+                }
         
         # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
         final_narration = narration
@@ -3292,6 +3409,7 @@ def execute_turn_service(
             "npc_fallback_reason": npc_fallback_reason,
             "world_progression": world_progression,
             "world_fallback_reason": world_fallback_reason,
+            "time_advance_result": time_advance_result,
         }
         event_log_repo = EventLogRepository(db)
         event_log_repo.update(event.id, {"result_json": updated_result_json})
@@ -3360,6 +3478,7 @@ def execute_turn_service(
             movement_result=movement_result,
             is_new_turn=is_new,
             llm_stage_results=[input_intent_result] + llm_stage_results,
+            time_advance_result=time_advance_result,
         )
     
     except Exception as e:
@@ -3480,15 +3599,27 @@ def _build_narration(
 def _get_world_time(session_state) -> Dict[str, Any]:
     """Get world time from session state."""
     if session_state and session_state.current_time:
-        # Parse time string format: "修仙历 春 第1日 辰时"
         time_parts = session_state.current_time.split()
         if len(time_parts) >= 4:
-            return {
+            result = {
                 "calendar": time_parts[0],
                 "season": time_parts[1],
                 "day": time_parts[2],
                 "period": time_parts[3],
             }
+            # New format: "修仙历 春 第1日 辰时 07:00"
+            if len(time_parts) >= 5:
+                time_str = time_parts[4]
+                if ":" in time_str:
+                    try:
+                        h, m = time_str.split(":")
+                        result["hour"] = int(h)
+                        result["minute"] = int(m)
+                        day_int = _parse_world_day(result["day"])
+                        result["total_minutes"] = (day_int - 1) * 1440 + result["hour"] * 60 + result["minute"]
+                    except (ValueError, IndexError):
+                        pass
+            return result
     
     # Default world time
     return {
@@ -3509,37 +3640,150 @@ def _parse_world_day(day_value: Any) -> int:
     return 1
 
 
-def _advance_world_time(world_time: Dict[str, Any]) -> Dict[str, Any]:
-    periods = [
-        "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
-        "午时", "未时", "申时", "酉时", "戌时", "亥时",
-    ]
-    current_period = world_time.get("period", "辰时")
-    try:
-        current_index = periods.index(current_period)
-    except ValueError:
-        current_index = periods.index("辰时")
+def _resolve_elapsed_minutes(
+    action_type: Optional[str] = None,
+    intent_result: Optional[Any] = None,
+    world_result: Optional[Any] = None,
+) -> int:
+    """Resolve elapsed minutes for time advancement.
 
-    next_index = (current_index + 1) % len(periods)
+    Priority:
+    1. Extract from world_result.parsed_proposal.get("elapsed_minutes")
+    2. Map intent_type to time_category via INTENT_TO_TIME_CATEGORY, then DETERMINISTIC_DEFAULTS
+    3. Fallback: return 10 (default)
+    """
+    from .time_advance import DETERMINISTIC_DEFAULTS, INTENT_TO_TIME_CATEGORY
+
+    if world_result is not None:
+        parsed = getattr(world_result, "parsed_proposal", None)
+        if parsed and isinstance(parsed, dict):
+            em = parsed.get("elapsed_minutes")
+            if isinstance(em, (int, float)) and em >= 0:
+                return int(em)
+
+    intent_type = None
+    if intent_result is not None:
+        parsed = getattr(intent_result, "parsed_proposal", None)
+        if parsed and isinstance(parsed, dict):
+            intent_type = parsed.get("intent_type")
+    if intent_type is None and action_type:
+        intent_type = action_type
+
+    if intent_type and intent_type in INTENT_TO_TIME_CATEGORY:
+        category = INTENT_TO_TIME_CATEGORY[intent_type]
+        if category in DETERMINISTIC_DEFAULTS:
+            return DETERMINISTIC_DEFAULTS[category]
+
+    return 10
+
+
+def _advance_world_time(world_time: Dict[str, Any], elapsed_minutes: Optional[int] = None) -> Dict[str, Any]:
+    from ..models.events import WorldTime
+
+    seasons = ["春", "夏", "秋", "冬"]
+
+    if elapsed_minutes is None:
+        # Old behavior: advance 1 period (2 hours)
+        periods = [
+            "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
+            "午时", "未时", "申时", "酉时", "戌时", "亥时",
+        ]
+        current_period = world_time.get("period", "辰时")
+        try:
+            current_index = periods.index(current_period)
+        except ValueError:
+            current_index = periods.index("辰时")
+
+        next_index = (current_index + 1) % len(periods)
+        day = _parse_world_day(world_time.get("day", "第1日"))
+        season = world_time.get("season", "春")
+
+        if next_index == 0:
+            day += 1
+            if day > 30:
+                day = 1
+                try:
+                    season = seasons[(seasons.index(season) + 1) % 4]
+                except ValueError:
+                    season = "春"
+
+        return {
+            "calendar": world_time.get("calendar", "修仙历"),
+            "season": season,
+            "day": f"第{day}日",
+            "period": periods[next_index],
+        }
+
+    # Minute-precision path
+    if elapsed_minutes == 0:
+        result = {
+            "calendar": world_time.get("calendar", "修仙历"),
+            "season": world_time.get("season", "春"),
+            "day": world_time.get("day", "第1日"),
+            "period": world_time.get("period", "辰时"),
+        }
+        hour = world_time.get("hour")
+        minute = world_time.get("minute")
+        if hour is not None and minute is not None:
+            result["hour"] = hour
+            result["minute"] = minute
+            result["total_minutes"] = world_time.get("total_minutes", (_parse_world_day(result["day"]) - 1) * 1440 + hour * 60 + minute)
+            result["display_text"] = f"{result['calendar']} {result['season']} {result['day']} {result['period']} {hour:02d}:{minute:02d}"
+        return result
+
+    calendar = world_time.get("calendar", "修仙历")
+    season = world_time.get("season", "春")
     day = _parse_world_day(world_time.get("day", "第1日"))
-    if next_index == 0:
-        day += 1
+
+    # Derive current hour/minute from world_time dict
+    if "hour" in world_time and "minute" in world_time:
+        current_hour = int(world_time["hour"])
+        current_minute = int(world_time["minute"])
+    else:
+        current_hour = WorldTime.from_period(world_time.get("period", "辰时"))
+        current_minute = 0
+
+    total_minutes = (day - 1) * 1440 + current_hour * 60 + current_minute + elapsed_minutes
+    new_day = total_minutes // 1440 + 1
+    remaining = total_minutes % 1440
+    new_hour = remaining // 60
+    new_minute = remaining % 60
+    new_period = WorldTime.derive_period(new_hour)
+
+    # Season rollover: every 30 days
+    while new_day > 30:
+        new_day -= 30
+        try:
+            season = seasons[(seasons.index(season) + 1) % 4]
+        except ValueError:
+            season = "春"
+
+    display_text = f"{calendar} {season} 第{new_day}日 {new_period} {new_hour:02d}:{new_minute:02d}"
 
     return {
-        "calendar": world_time.get("calendar", "修仙历"),
-        "season": world_time.get("season", "春"),
-        "day": f"第{day}日",
-        "period": periods[next_index],
+        "calendar": calendar,
+        "season": season,
+        "day": f"第{new_day}日",
+        "period": new_period,
+        "hour": new_hour,
+        "minute": new_minute,
+        "total_minutes": total_minutes,
+        "display_text": display_text,
     }
 
 
 def _format_world_time(world_time: Dict[str, Any]) -> str:
-    return " ".join([
+    parts = [
         str(world_time.get("calendar", "修仙历")),
         str(world_time.get("season", "春")),
         str(world_time.get("day", "第1日")),
         str(world_time.get("period", "辰时")),
-    ])
+    ]
+    hour = world_time.get("hour")
+    minute = world_time.get("minute")
+    if hour is not None and minute is not None:
+        parts.append(f"{int(hour):02d}:{int(minute):02d}")
+    return " ".join(parts)
 
 
 def _get_player_state(

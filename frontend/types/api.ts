@@ -176,6 +176,8 @@ export type SSEEventType =
   | 'turn_started'
   | 'event_committed'
   | 'narration_delta'
+  | 'stage_started'
+  | 'stage_completed'
   | 'turn_completed'
   | 'turn_error';
 
@@ -207,6 +209,32 @@ export interface NarrationDeltaEvent {
   event: 'narration_delta';
   delta: string;
   turn_index: number;
+}
+
+export interface TurnStageState {
+  code: string;
+  phase: string;      // "started" | "completed"
+  label: string;
+  actorId?: string;
+  actorName?: string;
+  progress?: number;  // 0-100
+}
+
+export interface StageStartedEvent {
+  event: 'stage_started';
+  stage: string;
+  phase: string;
+  label: string;
+  actor_id?: string;
+  actor_name?: string;
+  progress?: number;
+}
+
+export interface StageCompletedEvent {
+  event: 'stage_completed';
+  stage: string;
+  phase: string;
+  label: string;
 }
 
 export interface TurnCompletedEvent {
@@ -245,6 +273,8 @@ export type SSEEventData =
   | TurnStartedEvent 
   | EventCommittedEvent 
   | NarrationDeltaEvent 
+  | StageStartedEvent
+  | StageCompletedEvent
   | TurnCompletedEvent 
   | TurnErrorEvent;
 
@@ -1362,6 +1392,7 @@ export interface PlayerQuestSummary {
   stage: number;
   status: 'active' | 'completed' | 'failed' | 'abandoned';
   objectives: QuestObjective[];
+  visibility?: string;
 }
 
 export interface QuestStep {

@@ -4,7 +4,7 @@ Game API - Turn Execution Endpoints
 Provides endpoints for executing game turns with full transaction support.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -120,6 +120,7 @@ class TurnResponse(BaseModel):
     actions_committed: int
     validation_passed: bool
     transaction_id: str
+    time_advance_result: Optional[Dict[str, Any]] = None
 
 
 class ReplayRequest(BaseModel):
@@ -289,6 +290,7 @@ def execute_turn(
             actions_committed=result.actions_committed,
             validation_passed=result.validation_passed,
             transaction_id=result.transaction_id or "",
+            time_advance_result=result.time_advance_result,
         )
     except LLMConfigurationError as e:
         raise HTTPException(

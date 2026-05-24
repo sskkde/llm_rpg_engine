@@ -12,6 +12,7 @@ Events are emitted in order:
 
 import asyncio
 import json
+import threading
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any, Optional, List, List
@@ -37,6 +38,7 @@ from ..core.turn_service import (
     TurnValidationError as TurnServiceValidationError,
     LLMConfigurationError,
 )
+from ..core.turn_progress import TurnProgressEvent
 from ..core.event_log import EventLog
 from ..core.canonical_state import CanonicalStateManager
 from ..core.action_scheduler import ActionScheduler
@@ -328,142 +330,202 @@ async def execute_turn_stream(
     
     Event order:
     1. turn_started
-    2. event_committed (after atomic commit)
-    3. narration_delta (streaming text)
-    4. DB writes (adventure log, session state, last_played)
+    2. stage_started / stage_completed (progress events from pipeline)
+    3. event_committed (after atomic commit)
+    4. narration_delta (streaming text)
     5. turn_completed
     """
     event_id = str(uuid.uuid4())
+    _SENTINEL = object()
+    progress_queue: asyncio.Queue[TurnProgressEvent | object] = asyncio.Queue()
+    thread_result: dict[str, Any] = {}
+    thread_error: dict[str, Any] = {}
+    
+    def progress_callback(event: TurnProgressEvent):
+        progress_queue.put_nowait(event)
+    
+    def run_turn_in_thread():
+        try:
+            result = execute_turn_service(
+                db=db,
+                session_id=session_id,
+                player_input=player_input,
+                use_mock=use_mock,
+                idempotency_key=idempotency_key,
+                progress_callback=progress_callback,
+            )
+            thread_result["value"] = result
+        except Exception as e:
+            thread_error["value"] = e
+        finally:
+            progress_queue.put_nowait(_SENTINEL)
+    
+    # 1. Emit turn_started
+    yield format_sse(
+        "turn_started",
+        {
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "player_input": player_input,
+            "timestamp": datetime.now().isoformat(),
+        },
+        event_id=f"{event_id}_start"
+    )
+    
+    thread = threading.Thread(target=run_turn_in_thread, daemon=True)
+    thread.start()
     
     try:
-        # 1. Emit turn_started
-        yield format_sse(
-            "turn_started",
-            {
-                "session_id": session_id,
-                "turn_index": turn_index,
-                "player_input": player_input,
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_start"
-        )
-        
-        result = execute_turn_service(
-            db=db,
-            session_id=session_id,
-            player_input=player_input,
-            use_mock=use_mock,
-            idempotency_key=idempotency_key,
-        )
-        
-        # 2. Emit event_committed after atomic commit
-        yield format_sse(
-            "event_committed",
-            {
-                "session_id": session_id,
-                "turn_index": result.turn_no,
-                "transaction_id": result.transaction_id,
-                "events_committed": result.events_committed,
-                "actions_committed": result.actions_committed,
-                "world_time": result.world_time,
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_committed"
-        )
-        
-        # Small delay to ensure frontend processes the commit event
-        await asyncio.sleep(0.05)
-        
-        if result.narration:
+        while True:
+            try:
+                event = await asyncio.wait_for(progress_queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                yield format_sse(
+                    "turn_error",
+                    {
+                        "session_id": session_id,
+                        "turn_index": turn_index,
+                        "error_type": "turn_timeout",
+                        "message": "Turn execution timeout",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                    event_id=f"{event_id}_error"
+                )
+                break
+            
+            if isinstance(event, TurnProgressEvent):
+                sse_event_type = "stage_started" if event.phase == "started" else "stage_completed"
+                yield format_sse(
+                    sse_event_type,
+                    {
+                        "stage": event.stage,
+                        "phase": event.phase,
+                        "label": event.label,
+                        "actor_name": event.actor_name,
+                        "progress": event.progress,
+                    },
+                    event_id=f"{event_id}_{event.stage}_{event.phase}"
+                )
+            else:
+                break
+    except asyncio.CancelledError:
+        return
+    
+    if thread_error.get("value"):
+        e = thread_error["value"]
+        if isinstance(e, TurnServiceValidationError):
             yield format_sse(
-                "narration_delta",
+                "turn_error",
                 {
-                    "delta": result.narration,
-                    "turn_index": result.turn_no,
+                    "session_id": session_id,
+                    "turn_index": e.turn_no,
+                    "error_type": "validation_error",
+                    "message": str(e),
+                    "errors": e.errors,
+                    "timestamp": datetime.now().isoformat(),
                 },
-                event_id=f"{event_id}_delta"
+                event_id=f"{event_id}_error"
             )
-            await asyncio.sleep(0.01)
-        
-        # 5. Emit turn_completed
+        elif isinstance(e, TurnServiceSessionNotFoundError):
+            yield format_sse(
+                "turn_error",
+                {
+                    "session_id": session_id,
+                    "turn_index": e.turn_no,
+                    "error_type": "session_not_found",
+                    "message": str(e),
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        elif isinstance(e, LLMConfigurationError):
+            yield format_sse(
+                "turn_error",
+                {
+                    "session_id": session_id,
+                    "turn_index": e.turn_no,
+                    "error_type": "llm_configuration_error",
+                    "message": str(e),
+                    "provider_mode": e.provider_mode,
+                    "missing_config": e.missing_config,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        elif isinstance(e, TurnServiceError):
+            yield format_sse(
+                "turn_error",
+                {
+                    "session_id": session_id,
+                    "turn_index": e.turn_no,
+                    "error_type": "turn_service_error",
+                    "message": str(e),
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        else:
+            provider_timeout = isinstance(e, TimeoutError)
+            yield format_sse(
+                "turn_error",
+                {
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "error_type": "provider_timeout" if provider_timeout else "unexpected_error",
+                    "message": "LLM provider request timed out" if provider_timeout else "Unexpected error while streaming turn",
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        return
+    
+    result = thread_result.get("value")
+    if result is None:
+        return
+    
+    # 2. Emit event_committed after atomic commit
+    yield format_sse(
+        "event_committed",
+        {
+            "session_id": session_id,
+            "turn_index": result.turn_no,
+            "transaction_id": result.transaction_id,
+            "events_committed": result.events_committed,
+            "actions_committed": result.actions_committed,
+            "world_time": result.world_time,
+            "timestamp": datetime.now().isoformat(),
+        },
+        event_id=f"{event_id}_committed"
+    )
+    
+    await asyncio.sleep(0.05)
+    
+    if result.narration:
         yield format_sse(
-            "turn_completed",
+            "narration_delta",
             {
-                "session_id": session_id,
+                "delta": result.narration,
                 "turn_index": result.turn_no,
-                "narration": result.narration,
-                "recommended_actions": result.recommended_actions,
-                "player_state": result.player_state,
-                "world_time": result.world_time,
-                "timestamp": datetime.now().isoformat(),
             },
-            event_id=f"{event_id}_complete"
+            event_id=f"{event_id}_delta"
         )
-        
-    except TurnServiceValidationError as e:
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": e.turn_no,
-                "error_type": "validation_error",
-                "message": str(e),
-                "errors": e.errors,
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
-    except TurnServiceSessionNotFoundError as e:
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": e.turn_no,
-                "error_type": "session_not_found",
-                "message": str(e),
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
-    except LLMConfigurationError as e:
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": e.turn_no,
-                "error_type": "llm_configuration_error",
-                "message": str(e),
-                "provider_mode": e.provider_mode,
-                "missing_config": e.missing_config,
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
-    except TurnServiceError as e:
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": e.turn_no,
-                "error_type": "turn_service_error",
-                "message": str(e),
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
-    except Exception as e:
-        provider_timeout = isinstance(e, TimeoutError)
-        yield format_sse(
-            "turn_error",
-            {
-                "session_id": session_id,
-                "turn_index": turn_index,
-                "error_type": "provider_timeout" if provider_timeout else "unexpected_error",
-                "message": "LLM provider request timed out" if provider_timeout else "Unexpected error while streaming turn",
-                "timestamp": datetime.now().isoformat(),
-            },
-            event_id=f"{event_id}_error"
-        )
+        await asyncio.sleep(0.01)
+    
+    # 5. Emit turn_completed
+    yield format_sse(
+        "turn_completed",
+        {
+            "session_id": session_id,
+            "turn_index": result.turn_no,
+            "narration": result.narration,
+            "recommended_actions": result.recommended_actions,
+            "player_state": result.player_state,
+            "world_time": result.world_time,
+            "timestamp": datetime.now().isoformat(),
+            "time_advance_result": result.time_advance_result,
+        },
+        event_id=f"{event_id}_complete"
+    )
 
 
 @router.post("/sessions/{session_id}/turn")

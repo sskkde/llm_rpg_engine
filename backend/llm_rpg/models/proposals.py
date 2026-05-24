@@ -156,6 +156,11 @@ class WorldTickProposal(BaseModel):
     time_delta_turns: int = Field(default=1, description="时间推进回合数")
     time_description: str = Field(default="", description="时间推进描述")
     
+    # Minute-precision time fields
+    elapsed_minutes: Optional[int] = Field(None, description="提议经过的分钟数")
+    time_category: Optional[str] = Field(None, description="时间类别(inspect/short_dialogue/long_dialogue/nearby_movement/far_movement/combat/rest)")
+    display_hint: Optional[str] = Field(None, description="时辰显示提示(如: 辰时三刻)")
+    
     # Candidate events (offscreen)
     candidate_events: List[CandidateEvent] = Field(default_factory=list, description="候选事件列表")
     
@@ -351,6 +356,7 @@ def create_fallback_world_tick(
     return WorldTickProposal(
         time_delta_turns=1,
         time_description="时间缓缓流逝...",
+        elapsed_minutes=10,
         candidate_events=[],
         state_deltas=[],
         affected_entities=[],

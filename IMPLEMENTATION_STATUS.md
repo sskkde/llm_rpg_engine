@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-21
-**Current Phase**: V1.0 Complete — Release Ready
+**Last Updated**: 2026-05-23
+**Current Phase**: P10-A Complete — Immersion & Provider Routing
 
 ---
 
@@ -326,6 +326,74 @@ P9 transforms the P8 Complete codebase into a fully release-ready V1.0 product w
 
 ---
 
+## P10-A: Immersion & Provider Routing (Complete)
+
+P10-A adds four experience/architecture modules: SSE stage progress events, minute-precision dynamic world time, quest anti-spoiler gating, and per-asset-type provider routing. For detailed status, see `P10A_COMPLETION_REPORT.md` and `P10A_READINESS.md`.
+
+### Module 1 — Turn Stage Feedback
+
+| Deliverable | Status |
+|-------------|--------|
+| TurnProgressEvent model + emit_stage helper | Completed |
+| SSE Queue+Thread bridge + stage events | Completed |
+| TurnStageStatus frontend component | Completed |
+| useTurnStream stage event handling | Completed |
+
+### Module 2 — Dynamic World Time
+
+| Deliverable | Status |
+|-------------|--------|
+| WorldTime hour/minute/total_minutes/display_text extension | Completed |
+| derive_period/from_period methods | Completed |
+| TimeAdvanceProposal model | Completed |
+| TimeAdvanceValidator with category ranges | Completed |
+| 16 intent-to-time_category mappings | Completed |
+| _advance_world_time rewrite with elapsed_minutes | Completed |
+| Season rollover bug fix | Completed |
+| WorldTickProposal elapsed_minutes extension | Completed |
+| Turn service integration | Completed |
+
+### Module 3 — Quest Anti-Spoiler Gating
+
+| Deliverable | Status |
+|-------------|--------|
+| Migration 016 quest journal visibility | Completed |
+| QuestJournalService (reveal/list/filter) | Completed |
+| Player API visibility filtering | Completed |
+| Frontend toast notification | Completed |
+
+### Module 4 — Per-Asset-Type Provider Routing
+
+| Deliverable | Status |
+|-------------|--------|
+| Provider resolver with env var fallback chain | Completed |
+| media.py integration | Completed |
+| /debug/assets/providers/resolved endpoint | Completed |
+| Env var documentation | Completed |
+
+### Infrastructure
+
+| Deliverable | Status |
+|-------------|--------|
+| Makefile test-p10a-fast/test-p10a targets | Completed |
+| CI p10a-tests job | Completed |
+| P10A_EXECUTION_REPORT.md | Completed |
+| P10A_READINESS.md | Completed |
+
+**P10-A Gates**: `make test-p10a-fast`, `make test-p10a`
+
+**Test Coverage**: 3177 backend tests, 4 P10-A integration test files
+
+**SSE Events**: 8 stage events (stage_started/stage_completed for 4 core stages)
+
+**Time Precision**: Minute-precision world time with 9 time categories
+
+**Quest Gating**: Hidden quests excluded from Player API
+
+**Provider Routing**: Per-asset-type env var fallback chain
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -401,6 +469,10 @@ make test-p8                 # P8 quality gate (full)
 make test-p8-fast            # P8 fast gate
 make test-scenario-p8        # P8 scenario tests
 
+# P10-A specific targets
+make test-p10a               # P10-A quality gate (full)
+make test-p10a-fast          # P10-A fast gate
+
 # Frontend asset tests
 cd frontend && npm test -- __tests__/assets
 
@@ -427,4 +499,6 @@ cd backend && python3 -m pytest -q
 - P8 Readiness: `P8_READINESS.md`
 - V1 Completion: `V1_COMPLETION_REPORT.md`
 - V1 Readiness: `V1_READINESS.md`
+- P10-A Completion: `P10A_EXECUTION_REPORT.md`
+- P10-A Readiness: `P10A_READINESS.md`
 - AGENTS.md: Project commands and conventions

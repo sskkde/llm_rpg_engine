@@ -137,19 +137,11 @@ def get_rate_limiter(db: Session = Depends(get_db)) -> AssetRateLimiter:
 def _resolve_provider_name(asset_type: AssetType) -> str:
     """Resolve the provider name for a given asset type.
 
-    Checks ASSET_PROVIDER env var first, then falls back to
-    ProviderRegistry.get_available_provider(), then defaults to "mock".
+    Delegates to provider_resolver.resolve_asset_provider_name() which
+    uses per-type env var fallback chains with safe defaults.
     """
-    configured = os.getenv("ASSET_PROVIDER")
-    if configured:
-        return configured
-    try:
-        from llm_rpg.assets.provider_registry import ProviderRegistry
-        registry = ProviderRegistry()
-        provider = registry.get_available_provider(asset_type.value)
-        return provider or "mock"
-    except Exception:
-        return "mock"
+    from llm_rpg.assets.provider_resolver import resolve_asset_provider_name
+    return resolve_asset_provider_name(asset_type)
 
 
 def _enforce_rate_limit(

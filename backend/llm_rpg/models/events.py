@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EventType(str, Enum):
@@ -45,13 +45,77 @@ class PlayerInputEvent(GameEvent):
 
 
 class WorldTime(BaseModel):
+    """世界时间模型，支持时辰和精确小时/分钟表示。
+    
+    保持向后兼容：
+    - WorldTime(calendar="青岚历", season="春", day=1, period="辰时") 仍可工作
+    - hour/minute 自动从 period 推导（如果未显式设置）
+    """
+    # 12时辰列表（子时对应0-1时，丑时对应2-3时，依此类推）
+    PERIODS: ClassVar[list[str]] = [
+        "子时", "丑时", "寅时", "卯时", "辰时", "巳时",
+        "午时", "未时", "申时", "酉时", "戌时", "亥时"
+    ]
+    
     calendar: str = Field(..., description="历法名称")
     season: str = Field(..., description="季节")
-    day: int = Field(..., description="日")
+    day: int = Field(..., ge=1, description="日")
     period: str = Field(..., description="时段（如：辰时、酉时）")
+    hour: int = Field(default=7, ge=0, le=23, description="小时(0-23)")
+    minute: int = Field(default=0, ge=0, le=59, description="分钟(0-59)")
+    total_minutes: int = Field(default=420, description="从day 1 00:00起的总分钟数")
+    display_text: str | None = Field(default=None, description="格式化显示文本")
+    
+    @classmethod
+    def derive_period(cls, hour: int) -> str:
+        """从小时推导时辰。
+        
+        hour ∈ [0,2) → 子时, [2,4) → 丑时, ..., [22,24) → 亥时
+        """
+        period_index = hour // 2
+        return cls.PERIODS[period_index]
+    
+    @classmethod
+    def from_period(cls, period: str) -> int:
+        """从时辰推导起始小时。
+        
+        子时 → 0, 丑时 → 2, ..., 亥时 → 22
+        如果 period 无效，返回默认值 7
+        """
+        try:
+            return cls.PERIODS.index(period) * 2
+        except ValueError:
+            return 7
     
     def __str__(self) -> str:
-        return f"{self.calendar} {self.season} 第{self.day}日 {self.period}"
+        if self.display_text:
+            return self.display_text
+        return f"{self.calendar} {self.season} 第{self.day}日 {self.hour:02d}:{self.minute:02d}"
+    
+    @model_validator(mode='after')
+    def _sync_time_fields(self) -> 'WorldTime':
+        """自动同步 period、hour、minute、total_minutes 字段。
+        
+        规则：
+        1. 如果 period 设置但 hour 未显式设置，从 period 推导 hour
+        2. 如果 hour 设置但 period 不匹配，从 hour 更新 period
+        3. 自动计算 total_minutes
+        """
+        hour_explicitly_set = 'hour' in self.model_fields_set
+        
+        if not hour_explicitly_set:
+            derived_hour = self.from_period(self.period)
+            # Pydantic v2 validator中需用object.__setattr__修改字段
+            object.__setattr__(self, 'hour', derived_hour)
+        
+        correct_period = self.derive_period(self.hour)
+        if self.period != correct_period:
+            object.__setattr__(self, 'period', correct_period)
+        
+        computed_total = (self.day - 1) * 1440 + self.hour * 60 + self.minute
+        object.__setattr__(self, 'total_minutes', computed_total)
+        
+        return self
 
 
 class WorldTickEvent(GameEvent):

@@ -174,13 +174,15 @@ def _make_quest_step(db: Session, quest_template_id: str, step_no: int,
 
 def _make_quest_state(db: Session, session_id: str, quest_template_id: str,
                       status: str = "active", current_step_no: int = 1,
-                      progress_json: dict = None) -> SessionQuestStateModel:
+                      progress_json: dict = None,
+                      player_visibility: str = "discovered") -> SessionQuestStateModel:
     return SessionQuestStateRepository(db).create({
         "session_id": session_id,
         "quest_template_id": quest_template_id,
         "current_step_no": current_step_no,
         "status": status,
         "progress_json": progress_json or {},
+        "player_visibility": player_visibility,
     })
 
 

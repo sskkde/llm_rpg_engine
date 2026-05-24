@@ -249,9 +249,10 @@ class TestWorldCandidatesInTurnPipeline:
             
             assert response.status_code == 200
             data = response.json()
-            times.append(data["world_time"]["period"])
+            times.append(data["world_time"]["total_minutes"])
         
-        assert len(set(times)) > 1 or times[0] != times[-1]
+        assert times == sorted(times)
+        assert times[-1] > times[0]
 
     def test_turn_multiple_turns_with_world_candidates(
         self,

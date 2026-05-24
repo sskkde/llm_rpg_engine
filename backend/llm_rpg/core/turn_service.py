@@ -3773,12 +3773,17 @@ def _advance_world_time(world_time: Dict[str, Any], elapsed_minutes: Optional[in
 
 
 def _format_world_time(world_time: Dict[str, Any]) -> str:
-    return " ".join([
+    parts = [
         str(world_time.get("calendar", "修仙历")),
         str(world_time.get("season", "春")),
         str(world_time.get("day", "第1日")),
         str(world_time.get("period", "辰时")),
-    ])
+    ]
+    hour = world_time.get("hour")
+    minute = world_time.get("minute")
+    if hour is not None and minute is not None:
+        parts.append(f"{int(hour):02d}:{int(minute):02d}")
+    return " ".join(parts)
 
 
 def _get_player_state(

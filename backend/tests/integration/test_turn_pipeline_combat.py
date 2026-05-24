@@ -626,10 +626,11 @@ class TestCombatTurnBoundaryContract:
                 headers=auth_headers,
             )
             assert response.status_code == 200
-            times.append(response.json()["world_time"]["period"])
+            times.append(response.json()["world_time"]["total_minutes"])
 
-        # Time should change between turns
-        assert len(set(times)) > 1, f"Time periods did not change: {times}"
+        # Time should advance between turns even if the derived shichen period stays the same.
+        assert times == sorted(times), f"World time moved backwards: {times}"
+        assert times[-1] > times[0], f"World time did not advance: {times}"
 
     def test_combat_turn_transaction_id_is_unique(
         self, client, auth_headers, db_engine, sample_world_data

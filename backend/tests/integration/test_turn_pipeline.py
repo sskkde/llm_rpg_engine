@@ -177,10 +177,11 @@ class TestTurnExecution:
             
             assert response.status_code == 200
             data = response.json()
-            times.append(data["world_time"]["period"])
+            times.append(data["world_time"]["total_minutes"])
         
-        # Time should change between turns
-        assert len(set(times)) > 1 or times[0] != times[-1]
+        # Time should advance between turns even if the derived shichen period stays the same.
+        assert times == sorted(times)
+        assert times[-1] > times[0]
     
     def test_execute_turn_invalid_session(self, client, auth_headers):
         """Test turn execution with invalid session ID."""

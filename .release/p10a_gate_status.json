@@ -1,13 +1,28 @@
 {
   "phase": "P10-A",
   "status": "pass",
-  "commit": "1fcbda8",
-  "ran_at": "2026-05-23T11:33:45Z",
+  "commit": "c71bbce4f5c700904b19402306d93a1fc1628812",
+  "ran_at": "2026-05-24T00:00:00Z",
+  "closeout_items": {
+    "c1_makefile_strict": "completed",
+    "c2_sse_thread_safety": "completed",
+    "c3_quest_entry_anti_spoiler": "completed",
+    "c4_objective_truncation": "completed",
+    "c5_dynamic_time_docs": "completed",
+    "c6_docs_gate_marker": "completed",
+    "c7_ci_gate": "completed"
+  },
   "commands": {
+    "make test-p10a-streaming": "pass",
+    "make test-p10a-time": "pass",
+    "make test-p10a-quests": "pass",
+    "make test-p10a-providers": "pass",
     "make test-p10a-fast": "pass",
-    "backend tests": "pass",
+    "make test-p10a": "pass",
+    "make test-v1-release": "pass",
     "frontend build": "pass",
     "frontend lint": "pass",
     "frontend tsc": "pass"
-  }
+  },
+  "notes": "P10-A closeout complete: strict gates, thread-safe SSE bridge, quest entry/objective anti-spoiler fixes, explicit LLM gap documented. All gates pass."
 }

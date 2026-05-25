@@ -1,7 +1,7 @@
 # Implementation Status
 
 **Last Updated**: 2026-05-23
-**Current Phase**: P10-A Complete — Immersion & Provider Routing
+**Current Phase**: P10-A Closeout — Immersion & Provider Routing
 
 ---
 
@@ -380,6 +380,20 @@ P10-A adds four experience/architecture modules: SSE stage progress events, minu
 | P10A_EXECUTION_REPORT.md | Completed |
 | P10A_READINESS.md | Completed |
 
+### P10-A Closeout Fixes (2026-05-24)
+
+| Fix | Status | Detail |
+|-----|--------|--------|
+| C1: Makefile gate strict (`|| true` removed) | Completed | `Makefile` lines 240-250 |
+| C2: SSE bridge thread safety | Completed | `streaming.py` — `loop.call_soon_threadsafe`, independent worker DB session |
+| C3: Quest journal entry anti-spoiler | Completed | `QuestJournalEntryPoint.tsx` — conditional render only when visible quests exist |
+| C4: Quest objective truncation | Completed | `player_quests.py` — `_build_objectives()` filters by `last_revealed_step_no` |
+| C5: Dynamic time explicit LLM gap documented | Completed | `.env.example`, `.env.production.example`, `README.md`, `P10A_READINESS.md` |
+| C6: Documentation & gate marker updated | In Progress | `P10A_EXECUTION_REPORT.md`, `P10A_READINESS.md`, `IMPLEMENTATION_STATUS.md` |
+| C7: CI env vars for p10a-tests | Completed | `.github/workflows/ci.yml` — full provider env vars, no `continue-on-error` |
+
+**Pending**: Full gate verification run (`make test-p10a`, `make test-v1-release`, frontend build/lint/tsc).
+
 **P10-A Gates**: `make test-p10a-fast`, `make test-p10a`
 
 **Test Coverage**: 3177 backend tests, 4 P10-A integration test files
@@ -391,6 +405,51 @@ P10-A adds four experience/architecture modules: SSE stage progress events, minu
 **Quest Gating**: Hidden quests excluded from Player API
 
 **Provider Routing**: Per-asset-type env var fallback chain
+
+---
+
+## P10-B: Stage-Level LLM Routing — IN PROGRESS
+
+P10-B implements per-stage LLM configuration with environment variable fallback chain for all 5 LLM stages (input_intent, world, scene, npc, narration).
+
+### Deliverables
+
+| Module | File | Status |
+|--------|------|--------|
+| Stage routing models | `backend/llm_rpg/models/llm_stage_routing.py` | ✅ Complete |
+| Stage provider resolver | `backend/llm_rpg/llm/stage_provider_resolver.py` | ✅ Complete |
+| Three-layer extension | `turn_service.py` (dataclass) + `storage/models.py` (ORM) + `debug.py` (Pydantic) | ✅ Complete |
+| Alembic migration | `017_llm_stage_routing_fields.py` | ✅ Complete |
+| Turn service integration | `turn_service.py` (5 stage functions) | ✅ Complete |
+| Debug endpoint | `GET /debug/llm/stage-routing/resolved` | ✅ Complete |
+| Unit tests | `tests/unit/test_llm_stage_provider_resolver.py` | ✅ Complete |
+| Integration tests | `tests/integration/test_llm_stage_routing_turn.py` | 🔄 In progress |
+| Makefile/CI/env | Makefile targets, CI job, .env.example | 🔄 In progress |
+| Documentation | IMPLEMENTATION_STATUS, README, execution report | 🔄 In progress |
+
+### Key Features
+
+- **5 LLM stages** independently configurable (provider, model, temperature, max_tokens, timeout)
+- **Fallback chain**: stage env var → global env var → global settings → stage default
+- **input_intent** has unique defaults (15s timeout, 200 max_tokens, 0.3 temperature)
+- Other stages share defaults (30s timeout, 500 max_tokens, 0.8 temperature)
+- **Debug endpoint** exposes resolved config without API key leakage
+- **use_mock=True** forces mock provider for all stages
+
+### Deferred Items
+
+- DB provider profiles / Admin UI (future phase)
+- Cost-aware routing
+- Per-stage API key support
+
+### Test Commands
+
+```bash
+make test-p10b-resolver     # Resolver unit tests
+make test-p10b-routing      # Integration tests
+make test-p10b-fast         # All P10-B fast tests
+make test-p10b              # Full P10-B gate (includes frontend build)
+```
 
 ---
 

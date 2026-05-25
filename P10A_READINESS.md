@@ -36,9 +36,17 @@ npx tsc --noEmit
 
 ---
 
-## Gate Status: PASS
+## Gate Status: CONDITIONAL — Closeout In Progress
 
-All gates pass. P10-A is complete.
+P10-A core implementation complete. Closeout fixes applied:
+- Makefile P10-A gates strict (no `|| true`)
+- SSE bridge uses thread-safe queue handoff (`loop.call_soon_threadsafe`)
+- Worker thread uses independent DB session
+- Quest journal entry hidden until visible quests exist
+- Quest objectives filtered by `last_revealed_step_no`
+- Dynamic time explicit LLM gap documented
+
+Pending: verification run of all P10-A gates + frontend static checks.
 
 ---
 
@@ -188,9 +196,9 @@ All "Must NOT Have" items from P10-A plan verified absent:
 
 ### 1. TIME_ADVANCE_LLM_MODE=explicit Not Implemented
 
-**Status**: Config defined but LLM call not implemented
+**Status**: Config defined but LLM call not implemented; P10-A uses deterministic action-category defaults plus optional world-stage LLM reuse
 
-**Impact**: Time advance always uses "reuse" mode
+**Impact**: Time advance always uses "reuse" mode; explicit dedicated LLM time-advance calls are deferred to P10-B
 
 **Mitigation**: Deterministic fallbacks provide reasonable defaults
 
@@ -284,14 +292,26 @@ Before declaring P10-A complete:
 |----------|--------|-------|
 | Turn Stage Feedback | PASS | SSE events, frontend component |
 | Dynamic World Time | PASS | Minute precision, validation |
-| Quest Anti-Spoiler | PASS | Visibility gating, API filtering |
+| Quest Anti-Spoiler | PASS | Visibility gating, API filtering, objective truncation |
 | Provider Routing | PASS | Per-type resolution, debug endpoint |
-| Test Gate | PASS | All tests pass |
-| Documentation | PASS | All docs complete |
+| Test Gate | CONDITIONAL | Closeout fixes applied; pending verification run |
+| Documentation | PASS | All docs complete; explicit LLM gap documented |
 
-### Recommendation: **READY**
+### Closeout Verification
 
-All Must Have items complete. All test gates pass. Known gaps are documented and deferred to P10-B+. No blocking issues remain.
+| Item | Status | Evidence |
+|---|---|---|
+| Makefile P10-A gates strict, no `|| true` | Completed | `Makefile` |
+| SSE bridge uses thread-safe queue handoff | Completed | `streaming.py` |
+| Worker thread uses independent DB session | Completed | `streaming.py` |
+| Quest journal entry hidden until visible quests exist | Completed | `QuestJournalEntryPoint.tsx` |
+| Quest objectives filtered by revealed step | Completed | `player_quests.py` |
+| Dynamic time explicit LLM gap documented | Completed | `.env.example`, `README.md`, `P10A_READINESS.md` |
+| Final P10-A gate evidence recorded | Pending | `.release/p10a_gate_status.json` |
+
+### Recommendation: **PENDING VERIFICATION**
+
+All closeout fixes applied. Awaiting full gate verification run (`make test-p10a`, `make test-v1-release`, frontend build/lint/tsc) before final sign-off.
 
 ---
 

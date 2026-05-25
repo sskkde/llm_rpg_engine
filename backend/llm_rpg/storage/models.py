@@ -701,6 +701,10 @@ class LLMStageResultModel(Base):
     fallback_reason = Column(String, nullable=True)
     validation_errors_json = Column(JSON, nullable=True)
     latency_ms = Column(Integer, nullable=True)
+    provider_mode = Column(String, nullable=True)
+    default_model = Column(String, nullable=True)
+    config_source = Column(String, nullable=True)
+    fallback_used = Column(Boolean, nullable=True, default=False)
     created_at = Column(DateTime, nullable=False)
 
     transaction = relationship("TurnTransactionModel", back_populates="llm_stage_results")

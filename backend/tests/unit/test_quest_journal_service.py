@@ -336,3 +336,20 @@ class TestAutoPromoteCompletedFailed:
         result = service.reveal_quest("session-1", "quest-auto-3")
 
         assert result.revealed_at == existing_revealed
+
+
+class TestRevealObjectiveStepNo:
+    def test_reveal_objective_updates_last_revealed_step_no(self, service, quest_state_repo, db_session):
+        _create_quest_state(quest_state_repo, db_session, quest_template_id="quest-reveal-step-1")
+
+        result = service.reveal_objective("session-1", "quest-reveal-step-1", step_no=4)
+
+        assert result.last_revealed_step_no == 4
+
+    def test_reveal_objective_monotonic_increase(self, service, quest_state_repo, db_session):
+        _create_quest_state(quest_state_repo, db_session, quest_template_id="quest-reveal-step-2")
+
+        service.reveal_objective("session-1", "quest-reveal-step-2", step_no=3)
+        result = service.reveal_objective("session-1", "quest-reveal-step-2", step_no=1)
+
+        assert result.last_revealed_step_no == 3

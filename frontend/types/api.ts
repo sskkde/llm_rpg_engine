@@ -1464,3 +1464,32 @@ export interface RawPlayerLocation {
   is_current: boolean;
   danger_level: number;
 }
+
+// =============================================================================
+// Stage Routing Debug Types (P10-B)
+// =============================================================================
+
+export interface StageRoutingStageConfig {
+  provider_mode: string;
+  default_model: string | null;
+  temperature: number;
+  max_tokens: number;
+  timeout_seconds: number;
+  config_source: 'stage_env_var' | 'global_env_var' | 'global_settings' | 'stage_default';
+  fallback_used: boolean;
+  overrides: {
+    stage_env_vars: Record<string, 'set' | null>;
+  };
+}
+
+export interface StageRoutingResponse {
+  stages: {
+    input_intent: StageRoutingStageConfig;
+    world: StageRoutingStageConfig;
+    scene: StageRoutingStageConfig;
+    npc: StageRoutingStageConfig;
+    narration: StageRoutingStageConfig;
+  };
+  global_env_vars: Record<string, 'set' | null>;
+  global_settings: Record<string, unknown>;
+}

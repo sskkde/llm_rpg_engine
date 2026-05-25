@@ -21,6 +21,7 @@ import type {
   PrewarmPortraitsResponse, PrewarmStatusResponse,
   PlayerLocation, RawPlayerLocation, PlayerRelationship, RelationshipListResponse, RelationshipSummary, PlayerQuestSummary, PlayerQuestDetail,
   RawQuestDetail, PlayerInventoryItem, InventoryStats,
+  StageRoutingResponse,
 } from '@/types/api';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
@@ -718,6 +719,10 @@ export async function getContextBuildAudit(sessionId: string, buildId: string): 
 
 export async function getValidationAudit(sessionId: string, validationId: string): Promise<ValidationResultAuditResponse> {
   return fetchWithAuth<ValidationResultAuditResponse>(`/debug/sessions/${sessionId}/validations/${validationId}`);
+}
+
+export async function getStageRoutingResolved(): Promise<StageRoutingResponse> {
+  return fetchWithAuth<StageRoutingResponse>('/debug/llm/stage-routing/resolved');
 }
 
 // ── Media / Asset API ──────────────────────────────────────

@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..storage.database import get_db
+from ..storage.database import SessionLocal, get_db
 from ..storage.models import SessionModel, EventLogModel
 from ..storage.repositories import SessionRepository, LocationRepository, EventLogRepository
 
@@ -320,7 +320,6 @@ async def execute_turn_stream(
     game_id: str,
     turn_index: int,
     player_input: str,
-    db: Session,
     world_id: str,
     use_mock: bool = False,
     idempotency_key: Optional[str] = None,
@@ -334,20 +333,42 @@ async def execute_turn_stream(
     3. event_committed (after atomic commit)
     4. narration_delta (streaming text)
     5. turn_completed
+    
+    Thread safety:
+    - progress_callback uses loop.call_soon_threadsafe to safely put events
+      into the asyncio.Queue from the worker thread.
+    - The worker thread creates its own independent DB session via SessionLocal()
+      instead of reusing the request-scoped session.
+    - The sentinel is also delivered via loop.call_soon_threadsafe.
     """
     event_id = str(uuid.uuid4())
     _SENTINEL = object()
-    progress_queue: asyncio.Queue[TurnProgressEvent | object] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    progress_queue: asyncio.Queue[TurnProgressEvent | object] = asyncio.Queue(maxsize=100)
     thread_result: dict[str, Any] = {}
     thread_error: dict[str, Any] = {}
     
-    def progress_callback(event: TurnProgressEvent):
-        progress_queue.put_nowait(event)
+    def progress_callback(event: TurnProgressEvent) -> None:
+        def put_event() -> None:
+            try:
+                progress_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+        loop.call_soon_threadsafe(put_event)
     
-    def run_turn_in_thread():
+    def publish_sentinel() -> None:
+        def put_sentinel() -> None:
+            try:
+                progress_queue.put_nowait(_SENTINEL)
+            except asyncio.QueueFull:
+                pass
+        loop.call_soon_threadsafe(put_sentinel)
+    
+    def run_turn_in_thread() -> None:
+        worker_db = SessionLocal()
         try:
             result = execute_turn_service(
-                db=db,
+                db=worker_db,
                 session_id=session_id,
                 player_input=player_input,
                 use_mock=use_mock,
@@ -358,7 +379,8 @@ async def execute_turn_stream(
         except Exception as e:
             thread_error["value"] = e
         finally:
-            progress_queue.put_nowait(_SENTINEL)
+            worker_db.close()
+            publish_sentinel()
     
     # 1. Emit turn_started
     yield format_sse(
@@ -572,7 +594,6 @@ async def stream_turn(
             game_id=game_id,
             turn_index=turn_index,
             player_input=request.action,
-            db=db,
             world_id=session.world_id,
             idempotency_key=request.idempotency_key,
         ),
@@ -623,7 +644,6 @@ async def stream_turn_mock(
             game_id=game_id,
             turn_index=turn_index,
             player_input=request.action,
-            db=db,
             world_id=session.world_id,
             use_mock=True,
             idempotency_key=request.idempotency_key,

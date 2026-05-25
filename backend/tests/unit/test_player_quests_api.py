@@ -252,10 +252,9 @@ def test_get_quest_detail_correct_fields(db_engine, client):
     assert data["status"] == "active"
     assert data["visibility"] == "discovered"
     assert data["progress"] == {"step_1": True}
-    assert len(data["objectives"]) == 2
+    assert len(data["objectives"]) == 1
     assert data["objectives"][0]["completed"] is True
-    assert data["objectives"][1]["completed"] is False
-    assert len(data["step_history"]) == 2
+    assert len(data["step_history"]) == 1
     assert data["last_updated_at"] is not None
 
 

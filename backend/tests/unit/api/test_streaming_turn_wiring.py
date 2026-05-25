@@ -281,7 +281,6 @@ class TestStreamingCommitEventTiming:
                 game_id="test_game",
                 turn_index=0,
                 player_input="测试输入",
-                db=MagicMock(),
                 world_id="test_world",
             ):
                 events.append(event)
@@ -331,7 +330,6 @@ class TestStreamingCommitEventTiming:
                 game_id="test_game",
                 turn_index=0,
                 player_input="测试输入",
-                db=MagicMock(),
                 world_id="test_world",
             ):
                 events.append(event)

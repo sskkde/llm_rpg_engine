@@ -163,10 +163,10 @@ def seeded_session(db: Session) -> SessionModel:
 
 @pytest.fixture
 def client(db_engine, seeded_session: SessionModel):
-    SessionLocal = sessionmaker(bind=db_engine)
+    test_session_local = sessionmaker(bind=db_engine)
 
     def override_get_db():
-        db = SessionLocal()
+        db = test_session_local()
         try:
             yield db
         finally:
@@ -182,7 +182,8 @@ def client(db_engine, seeded_session: SessionModel):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_active_user] = override_current_user
-    with TestClient(app) as test_client:
+    with patch('llm_rpg.api.streaming.SessionLocal', test_session_local), \
+         TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 

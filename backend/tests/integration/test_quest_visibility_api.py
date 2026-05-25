@@ -143,15 +143,19 @@ def _make_quest_state(
     status: str = "active",
     player_visibility: str = "hidden",
     current_step_no: int = 1,
+    last_revealed_step_no: int = None,
 ) -> SessionQuestStateModel:
-    return SessionQuestStateRepository(db).create({
+    data = {
         "session_id": session_id,
         "quest_template_id": quest_template_id,
         "current_step_no": current_step_no,
         "status": status,
         "progress_json": {},
         "player_visibility": player_visibility,
-    })
+    }
+    if last_revealed_step_no is not None:
+        data["last_revealed_step_no"] = last_revealed_step_no
+    return SessionQuestStateRepository(db).create(data)
 
 
 def _get_token(client: TestClient, username: str, password: str = "testpass123") -> str:
@@ -606,3 +610,179 @@ class TestVisibilityStatusFilter:
             assert quest2.id not in quest_ids
         finally:
             db.close()
+
+
+# =============================================================================
+# Tests: Objective Truncation by last_revealed_step_no
+# =============================================================================
+
+class TestObjectiveTruncation:
+    """Test that objectives are filtered by last_revealed_step_no."""
+
+    def test_visible_quest_only_returns_revealed_objectives(self, client, db_engine):
+        db = _new_db(db_engine)
+        try:
+            user = _make_user(db, f"quest_user_{uuid.uuid4().hex[:6]}")
+            world = _make_world(db, f"quest_world_{uuid.uuid4().hex[:6]}", "Quest World")
+            session = _make_session(db, user.id, world.id)
+            quest = _make_quest_template(db, world.id, "reveal_obj_quest", "Reveal Obj Quest")
+            _make_quest_step(db, quest.id, 1, "First step")
+            _make_quest_step(db, quest.id, 2, "Second step")
+            _make_quest_step(db, quest.id, 3, "Third step")
+            _make_quest_state(
+                db, session.id, quest.id,
+                player_visibility="discovered",
+                last_revealed_step_no=1,
+            )
+            db.commit()
+
+            token = _get_token(client, user.username)
+            session_id = session.id
+            quest_id = quest.id
+        finally:
+            db.close()
+
+        resp = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        step_nos = [o["step_no"] for o in data["objectives"]]
+        assert step_nos == [1]
+
+    def test_future_objectives_are_not_returned(self, client, db_engine):
+        db = _new_db(db_engine)
+        try:
+            user = _make_user(db, f"quest_user_{uuid.uuid4().hex[:6]}")
+            world = _make_world(db, f"quest_world_{uuid.uuid4().hex[:6]}", "Quest World")
+            session = _make_session(db, user.id, world.id)
+            quest = _make_quest_template(db, world.id, "future_obj_quest", "Future Obj Quest")
+            for i in range(1, 6):
+                _make_quest_step(db, quest.id, i, f"Step {i}")
+            _make_quest_state(
+                db, session.id, quest.id,
+                player_visibility="discovered",
+                last_revealed_step_no=2,
+            )
+            db.commit()
+
+            token = _get_token(client, user.username)
+            session_id = session.id
+            quest_id = quest.id
+        finally:
+            db.close()
+
+        resp = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        step_nos = [o["step_no"] for o in data["objectives"]]
+        assert step_nos == [1, 2]
+        assert 3 not in step_nos
+        assert 4 not in step_nos
+        assert 5 not in step_nos
+
+    def test_reveal_objective_increases_visible_objective_count(self, client, db_engine):
+        db = _new_db(db_engine)
+        try:
+            user = _make_user(db, f"quest_user_{uuid.uuid4().hex[:6]}")
+            world = _make_world(db, f"quest_world_{uuid.uuid4().hex[:6]}", "Quest World")
+            session = _make_session(db, user.id, world.id)
+            quest = _make_quest_template(db, world.id, "inc_obj_quest", "Inc Obj Quest")
+            for i in range(1, 4):
+                _make_quest_step(db, quest.id, i, f"Step {i}")
+            _make_quest_state(
+                db, session.id, quest.id,
+                player_visibility="discovered",
+                last_revealed_step_no=1,
+            )
+            db.commit()
+
+            token = _get_token(client, user.username)
+            session_id = session.id
+            quest_id = quest.id
+        finally:
+            db.close()
+
+        resp_before = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_before.status_code == 200
+        assert len(resp_before.json()["objectives"]) == 1
+
+        db2 = _new_db(db_engine)
+        try:
+            service = QuestJournalService(db2)
+            service.reveal_objective(session_id, quest_id, step_no=3)
+            db2.commit()
+        finally:
+            db2.close()
+
+        resp_after = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp_after.status_code == 200
+        assert len(resp_after.json()["objectives"]) == 3
+
+    def test_hidden_quest_detail_returns_404(self, client, db_engine):
+        db = _new_db(db_engine)
+        try:
+            user = _make_user(db, f"quest_user_{uuid.uuid4().hex[:6]}")
+            world = _make_world(db, f"quest_world_{uuid.uuid4().hex[:6]}", "Quest World")
+            session = _make_session(db, user.id, world.id)
+            quest = _make_quest_template(db, world.id, "hidden_404_quest", "Hidden 404 Quest")
+            _make_quest_step(db, quest.id, 1, "First step")
+            _make_quest_state(db, session.id, quest.id, player_visibility="hidden")
+            db.commit()
+
+            token = _get_token(client, user.username)
+            session_id = session.id
+            quest_id = quest.id
+        finally:
+            db.close()
+
+        resp = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 404
+
+    def test_no_revealed_step_shows_only_first(self, client, db_engine):
+        db = _new_db(db_engine)
+        try:
+            user = _make_user(db, f"quest_user_{uuid.uuid4().hex[:6]}")
+            world = _make_world(db, f"quest_world_{uuid.uuid4().hex[:6]}", "Quest World")
+            session = _make_session(db, user.id, world.id)
+            quest = _make_quest_template(db, world.id, "no_reveal_quest", "No Reveal Quest")
+            _make_quest_step(db, quest.id, 1, "First step")
+            _make_quest_step(db, quest.id, 2, "Second step")
+            _make_quest_step(db, quest.id, 3, "Third step")
+            _make_quest_state(
+                db, session.id, quest.id,
+                player_visibility="discovered",
+            )
+            db.commit()
+
+            token = _get_token(client, user.username)
+            session_id = session.id
+            quest_id = quest.id
+        finally:
+            db.close()
+
+        resp = client.get(
+            f"/player/sessions/{session_id}/quests/{quest_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        step_nos = [o["step_no"] for o in data["objectives"]]
+        assert step_nos == [1]

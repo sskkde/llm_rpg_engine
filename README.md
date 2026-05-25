@@ -1148,7 +1148,7 @@ ASSET_PROVIDER_BGM=audio_placeholder    # BGM-specific override
 ASSET_PROVIDER_SFX=audio_placeholder    # SFX-specific override
 
 # Time Advance Configuration
-TIME_ADVANCE_LLM_MODE=reuse          # "reuse" or "explicit"
+TIME_ADVANCE_LLM_MODE=reuse          # "reuse" (P10-A default); "explicit" not yet implemented (P10-B scope)
 ```
 
 ### Quest Visibility
@@ -1181,6 +1181,137 @@ The following features are explicitly out of scope for P10-A:
 - **Real audio synthesis**: Music generation API
 
 For detailed status, see `P10A_EXECUTION_REPORT.md` and `P10A_READINESS.md`.
+
+## P10-B: Stage-Level LLM Routing
+
+This phase implements per-stage LLM configuration with environment variable fallback chain for all 5 LLM stages.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P10-B resolver unit tests
+make test-p10b-resolver
+
+# Run P10-B integration tests
+make test-p10b-routing
+
+# Run P10-B quality gate (fast)
+make test-p10b-fast
+
+# Run P10-B quality gate (full)
+make test-p10b
+
+# Verify no regression
+make test-v1-release
+```
+
+### Key Features
+
+- **5 LLM Stages**: input_intent, world, scene, npc, narration — each independently configurable
+- **Fallback Chain**: stage env var → global env var → global settings → stage default
+- **input_intent Defaults**: 15s timeout, 200 max_tokens, 0.3 temperature (optimized for quick intent parsing)
+- **Other Stage Defaults**: 30s timeout, 500 max_tokens, 0.8 temperature
+- **Debug Endpoint**: `GET /debug/llm/stage-routing/resolved` exposes resolved config without API key leakage
+- **Mock Mode**: `use_mock=True` forces mock provider for all stages
+
+### LLM Stages
+
+| Stage | Purpose | Default Timeout | Default Max Tokens | Default Temperature |
+|-------|---------|-----------------|-------------------|---------------------|
+| input_intent | Parse player input into structured intent | 15s | 200 | 0.3 |
+| world | World state evolution | 30s | 500 | 0.8 |
+| scene | Scene/location changes | 30s | 500 | 0.8 |
+| npc | NPC decision making | 30s | 500 | 0.8 |
+| narration | Narrative text generation | 30s | 500 | 0.8 |
+
+### New Environment Variables
+
+```bash
+# Per-Stage LLM Configuration
+# Each stage supports: PROVIDER_MODE, DEFAULT_MODEL, TEMPERATURE, MAX_TOKENS, TIMEOUT
+
+# input_intent stage (quick parsing)
+LLM_INPUT_INTENT_PROVIDER_MODE=openai
+LLM_INPUT_INTENT_DEFAULT_MODEL=gpt-4o-mini
+LLM_INPUT_INTENT_TEMPERATURE=0.3
+LLM_INPUT_INTENT_MAX_TOKENS=200
+LLM_INPUT_INTENT_TIMEOUT=15
+
+# world stage
+LLM_WORLD_PROVIDER_MODE=openai
+LLM_WORLD_DEFAULT_MODEL=gpt-4o
+LLM_WORLD_TEMPERATURE=0.8
+LLM_WORLD_MAX_TOKENS=500
+LLM_WORLD_TIMEOUT=30
+
+# scene stage
+LLM_SCENE_PROVIDER_MODE=openai
+LLM_SCENE_DEFAULT_MODEL=gpt-4o
+LLM_SCENE_TEMPERATURE=0.8
+LLM_SCENE_MAX_TOKENS=500
+LLM_SCENE_TIMEOUT=30
+
+# npc stage
+LLM_NPC_PROVIDER_MODE=openai
+LLM_NPC_DEFAULT_MODEL=gpt-4o
+LLM_NPC_TEMPERATURE=0.8
+LLM_NPC_MAX_TOKENS=500
+LLM_NPC_TIMEOUT=30
+
+# narration stage
+LLM_NARRATION_PROVIDER_MODE=openai
+LLM_NARRATION_DEFAULT_MODEL=gpt-4o
+LLM_NARRATION_TEMPERATURE=0.8
+LLM_NARRATION_MAX_TOKENS=500
+LLM_NARRATION_TIMEOUT=30
+
+# Global LLM fallback (used when stage-specific not set)
+LLM_PROVIDER_MODE=openai
+LLM_DEFAULT_MODEL=gpt-4o
+LLM_TEMPERATURE=0.8
+LLM_MAX_TOKENS=500
+LLM_TIMEOUT=30
+```
+
+### Debug Endpoint Response
+
+`GET /debug/llm/stage-routing/resolved` returns:
+
+```json
+{
+  "stages": {
+    "input_intent": {
+      "provider_mode": "openai",
+      "default_model": "gpt-4o-mini",
+      "temperature": 0.3,
+      "max_tokens": 200,
+      "timeout_seconds": 15,
+      "config_source": "stage_env_var",
+      "fallback_used": false,
+      "overrides": { "stage_env_vars": { "LLM_INPUT_INTENT_DEFAULT_MODEL": "set" } }
+    },
+    "world": { ... },
+    "scene": { ... },
+    "npc": { ... },
+    "narration": { ... }
+  },
+  "global_env_vars": { "LLM_PROVIDER_MODE": "set", "LLM_DEFAULT_MODEL": null },
+  "global_settings": { "provider_mode": "openai", "api_key": "***masked***" }
+}
+```
+
+### P10-C Deferred Items
+
+The following features are explicitly out of scope for P10-B:
+
+- **DB provider profiles**: Admin UI for managing provider configurations
+- **Cost-aware routing**: Route to cheaper/faster models based on cost constraints
+- **Per-stage API keys**: Different API keys for different stages
+
+For detailed status, see `P10B_EXECUTION_REPORT.md`.
 
 ## References
 

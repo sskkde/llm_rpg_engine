@@ -305,9 +305,10 @@ class TestPlayerQuestsIntegration:
         assert quest["description"] == "踏上修仙之旅"
         assert quest["stage"] == 2
         assert quest["status"] == "active"
-        assert len(quest["objectives"]) == 2
+        # Anti-spoiler: only objectives up to last_revealed_step_no are returned.
+        # Without last_revealed_step_no set, only step_no <= 1 is returned.
+        assert len(quest["objectives"]) == 1
         assert quest["objectives"][0]["completed"] is True
-        assert quest["objectives"][1]["completed"] is False
 
     def test_quests_empty_state_returns_empty_list(self, client, db_engine):
         db = _new_db(db_engine)

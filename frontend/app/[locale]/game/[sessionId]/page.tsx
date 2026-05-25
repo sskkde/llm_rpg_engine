@@ -15,6 +15,7 @@ import { InventoryPanel } from '@/components/game/InventoryPanel';
 import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
 import { TurnStageStatus } from '@/components/game/TurnStageStatus';
+import { QuestJournalEntryPoint } from '@/components/game/QuestJournalEntryPoint';
 import { QuestJournalPanel } from '@/components/game/QuestJournalPanel';
 import { RelationshipPanel } from '@/components/game/RelationshipPanel';
 import { SceneBackground } from '@/components/assets/SceneBackground';
@@ -246,15 +247,17 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
               </div>
             </CollapsibleSection>
 
-            <CollapsibleSection
-              id="mobile-quest-section"
-              title={t('questJournal')}
-              defaultOpen={false}
-            >
-              <div className="px-4 pb-4">
-                <QuestJournalPanel sessionId={sessionId} />
-              </div>
-            </CollapsibleSection>
+            <QuestJournalEntryPoint sessionId={sessionId}>
+              <CollapsibleSection
+                id="mobile-quest-section"
+                title={t('questJournal')}
+                defaultOpen={false}
+              >
+                <div className="px-4 pb-4">
+          <QuestJournalEntryPoint sessionId={sessionId} />
+                </div>
+              </CollapsibleSection>
+            </QuestJournalEntryPoint>
 
             <CollapsibleSection
               id="mobile-relationship-section"

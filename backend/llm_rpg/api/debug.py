@@ -46,6 +46,10 @@ from ..core.replay_report import (
 from ..observability.timeline import TimelineViewer, TurnTimeline, TimelineEntry
 from ..observability.npc_mind import NPCMindViewer, NPCMindView, ViewRole
 from .auth import get_current_active_user
+from ..llm.stage_provider_resolver import resolve_stage_llm_config
+from ..models.llm_stage_routing import (
+    LLMStageName, STAGE_ENV_VAR_MAP, GLOBAL_ENV_VAR_MAP,
+)
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -273,6 +277,10 @@ class LLMStageEvidenceResponse(BaseModel):
     fallback_reason: Optional[str] = None
     validation_errors: List[str] = []
     model_call_id: Optional[str] = None
+    provider_mode: Optional[str] = None
+    default_model: Optional[str] = None
+    config_source: Optional[str] = None
+    fallback_used: bool = False
 
 
 class ContextHashEntry(BaseModel):
@@ -2782,6 +2790,94 @@ def list_rate_limit_events(
             for e in events
         ],
     )
+
+
+# =============================================================================
+# LLM Stage Routing Debug Endpoints
+# =============================================================================
+
+def _mask_sensitive_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Mask sensitive fields in a dict (api_key, secret, token, password)."""
+    sensitive_patterns = ["api_key", "secret", "token", "password"]
+    result = {}
+    for key, value in data.items():
+        key_lower = key.lower()
+        is_sensitive = any(pattern in key_lower for pattern in sensitive_patterns)
+        if is_sensitive and value is not None:
+            result[key] = "***masked***"
+        elif isinstance(value, dict):
+            result[key] = _mask_sensitive_dict(value)
+        else:
+            result[key] = value
+    return result
+
+
+@router.get(
+    "/llm/stage-routing/resolved",
+    summary="Get resolved LLM config for all stages (admin)",
+)
+async def get_resolved_stage_routing(
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Get resolved LLM configuration for all 5 stages.
+
+    Returns the resolved config for each stage (input_intent, world, scene, npc, narration)
+    showing the fallback chain resolution: stage env var → global env var → global_settings → stage default.
+
+    Security:
+    - Requires admin role
+    - Env var values are never exposed (only "set" or null)
+    - API keys in global_settings are masked with "***masked***"
+    """
+    require_admin_role(current_user)
+
+    from ..services.settings import SystemSettingsService
+
+    settings_service = SystemSettingsService(db)
+    provider_config = settings_service.get_provider_config()
+
+    stages: Dict[str, Any] = {}
+    stage_names: List[LLMStageName] = ["input_intent", "world", "scene", "npc", "narration"]
+
+    for stage_name in stage_names:
+        resolved = resolve_stage_llm_config(stage_name, provider_config, use_mock=False)
+
+        # Build stage env var status (show "set" or null, never actual values)
+        stage_env_vars: Dict[str, Any] = {}
+        stage_env_map = STAGE_ENV_VAR_MAP[stage_name]
+        for param, env_var in stage_env_map.items():
+            env_val = os.getenv(env_var)
+            stage_env_vars[env_var] = "set" if env_val is not None and env_val != "" else None
+
+        stages[stage_name] = {
+            "provider_mode": resolved.provider_mode,
+            "default_model": resolved.default_model,
+            "temperature": resolved.temperature,
+            "max_tokens": resolved.max_tokens,
+            "timeout_seconds": resolved.timeout_seconds,
+            "config_source": resolved.config_source,
+            "fallback_used": resolved.fallback_used,
+            "overrides": {
+                "stage_env_vars": stage_env_vars,
+            },
+        }
+
+    # Build global env var status
+    global_env_vars: Dict[str, Any] = {}
+    for param, env_var in GLOBAL_ENV_VAR_MAP.items():
+        env_val = os.getenv(env_var)
+        global_env_vars[env_var] = "set" if env_val is not None and env_val != "" else None
+
+    # Mask sensitive fields in global_settings
+    masked_global_settings = _mask_sensitive_dict(provider_config)
+
+    return {
+        "stages": stages,
+        "global_env_vars": global_env_vars,
+        "global_settings": masked_global_settings,
+    }
 
 
 # =============================================================================

@@ -56,6 +56,8 @@ def db_engine():
 
 @pytest.fixture(scope="function")
 def client(db_engine):
+    test_session_local = sessionmaker(bind=db_engine)
+
     def override_get_db():
         SessionLocal = sessionmaker(bind=db_engine)
         db = SessionLocal()
@@ -65,7 +67,8 @@ def client(db_engine):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
+    with patch('llm_rpg.api.streaming.SessionLocal', test_session_local), \
+         TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 

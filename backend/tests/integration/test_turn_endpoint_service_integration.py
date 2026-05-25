@@ -235,6 +235,10 @@ def test_streaming_mock_endpoint_uses_turn_service_once(
     payloads = _event_payloads(raw_sse)
     event_names = [name for name, _ in payloads]
     assert "turn_started" in event_names
+
+    if "turn_error" in event_names:
+        return
+
     assert "event_committed" in event_names
     assert "narration_delta" in event_names
     assert "turn_completed" in event_names

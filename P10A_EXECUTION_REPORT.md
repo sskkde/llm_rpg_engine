@@ -267,7 +267,7 @@ Same pattern for SCENE and SFX.
 | ASSET_PROVIDER_AUDIO | Audio category (bgm, sfx) |
 | ASSET_PROVIDER_BGM | BGM-specific override |
 | ASSET_PROVIDER_SFX | SFX-specific override |
-| TIME_ADVANCE_LLM_MODE | "reuse" or "explicit" |
+| TIME_ADVANCE_LLM_MODE | "reuse" (P10-A default); "explicit" not yet implemented (P10-B) |
 
 ---
 
@@ -322,9 +322,9 @@ Same pattern for SCENE and SFX.
 
 ### 2. TIME_ADVANCE_LLM_MODE=explicit Not Implemented
 
-**Status**: Config defined but LLM call not implemented
+**Status**: Config defined but LLM call not implemented; P10-A uses deterministic action-category defaults plus optional world-stage LLM reuse only
 
-**Impact**: Time advance always uses "reuse" mode (extracts from world stage output)
+**Impact**: Time advance always uses "reuse" mode (extracts from world stage output); explicit dedicated LLM time-advance calls are deferred to P10-B
 
 **Mitigation**: Deterministic fallbacks provide reasonable defaults; explicit mode can be added later
 

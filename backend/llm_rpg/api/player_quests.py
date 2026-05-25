@@ -96,10 +96,22 @@ def _build_objectives(
     quest_template_id: str,
     progress_json: Dict[str, Any],
     db: DBSession,
+    last_revealed_step_no: Optional[int] = None,
 ) -> List[QuestObjective]:
-    """Build objective list with completion status from quest steps + progress."""
+    """Build objective list with completion status from quest steps + progress.
+
+    When last_revealed_step_no is provided, only steps with step_no <=
+    last_revealed_step_no are returned.  When it is None, only step_no <= 1
+    is returned (conservative default: show first step only).
+    """
     step_repo = QuestStepRepository(db)
     steps = step_repo.get_by_quest(quest_template_id)
+
+    if last_revealed_step_no is not None:
+        steps = [s for s in steps if s.step_no <= last_revealed_step_no]
+    else:
+        steps = [s for s in steps if s.step_no <= 1]
+
     objectives = []
     for step in steps:
         completed = progress_json.get(f"step_{step.step_no}", False) if progress_json else False
@@ -150,6 +162,7 @@ def list_quests(
             qs.quest_template_id,
             qs.progress_json or {},
             db,
+            last_revealed_step_no=qs.last_revealed_step_no,
         )
 
         result.append(QuestListItem(
@@ -205,7 +218,10 @@ def get_quest_detail(
         )
 
     progress = quest_state.progress_json or {}
-    objectives = _build_objectives(quest_id, progress, db)
+    objectives = _build_objectives(
+        quest_id, progress, db,
+        last_revealed_step_no=quest_state.last_revealed_step_no,
+    )
     step_history = objectives
 
     return QuestDetail(
@@ -268,7 +284,10 @@ def abandon_quest(
     template = template_repo.get_by_id(quest_id)
 
     progress = updated.progress_json or {}
-    objectives = _build_objectives(quest_id, progress, db)
+    objectives = _build_objectives(
+        quest_id, progress, db,
+        last_revealed_step_no=updated.last_revealed_step_no,
+    )
 
     return QuestDetail(
         quest_id=quest_id,

@@ -103,7 +103,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Stage names for LLM-enabled turn stages
-LLMStageName = Literal["narration", "scene", "npc", "world", "input_intent"]
+from ..models.llm_stage_routing import LLMStageName
 
 
 @dataclass
@@ -140,6 +140,10 @@ class LLMStageResult:
     fallback_reason: Optional[str] = None
     validation_errors: List[str] = field(default_factory=list)
     model_call_id: Optional[str] = None
+    provider_mode: Optional[str] = None  # Resolved provider mode
+    default_model: Optional[str] = None  # Resolved model name
+    config_source: Optional[str] = None  # Where config was resolved from
+    fallback_used: bool = False  # Whether any fallback was used
     
     def to_result_json_dict(self) -> Dict[str, Any]:
         """Convert LLMStageResult to a dict for storage in result_json."""
@@ -151,6 +155,10 @@ class LLMStageResult:
             "fallback_reason": self.fallback_reason,
             "validation_errors": self.validation_errors,
             "model_call_id": self.model_call_id,
+            "provider_mode": self.provider_mode,
+            "default_model": self.default_model,
+            "config_source": self.config_source,
+            "fallback_used": self.fallback_used,
         }
 
 
@@ -588,14 +596,13 @@ def _execute_input_intent_stage(
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
     
     stage_name: LLMStageName = "input_intent"
-    timeout = 15.0
     
     enabled = _is_input_intent_stage_enabled(db)
     if not enabled:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=False,
-            timeout=timeout,
+            timeout=15.0,
             accepted=False,
             fallback_reason="input_intent_stage_disabled",
         )
@@ -610,19 +617,28 @@ def _execute_input_intent_stage(
     
     try:
         from ..services.settings import SystemSettingsService
+        from ..llm.stage_provider_resolver import resolve_stage_llm_config
+        
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
+        stage_config = resolve_stage_llm_config(stage_name, provider_config, use_mock=use_mock)
+        
+        # Merge stage-level provider_mode/default_model into config for _create_llm_service_from_config
+        merged_config = dict(provider_config)
+        merged_config["provider_mode"] = stage_config.provider_mode
+        merged_config["default_model"] = stage_config.default_model
+        
         llm_service = _create_llm_service_from_config(
             db,
-            provider_config,
+            merged_config,
             force_mock=use_mock,
         )
         
         pipeline_config = ProposalConfig(
-            timeout_seconds=timeout,
-            max_tokens=provider_config.get("max_tokens", 200),
-            temperature=provider_config.get("temperature", 0.3),
+            timeout_seconds=stage_config.timeout_seconds,
+            max_tokens=stage_config.max_tokens,
+            temperature=stage_config.temperature,
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
@@ -633,7 +649,7 @@ def _execute_input_intent_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
@@ -655,7 +671,7 @@ def _execute_input_intent_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -671,7 +687,7 @@ def _execute_input_intent_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=fallback_reason,
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -690,17 +706,19 @@ def _execute_input_intent_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             raw_outcome=str(proposal)[:500],
             parsed_proposal=parsed_proposal,
             accepted=True,
+            config_source=stage_config.config_source,
+            fallback_used=stage_config.fallback_used,
         )
         
     except asyncio.TimeoutError:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason="timeout",
         )
@@ -709,7 +727,7 @@ def _execute_input_intent_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"error: {str(e)[:200]}",
         )
@@ -736,14 +754,13 @@ def _execute_world_stage(
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
 
     stage_name: LLMStageName = "world"
-    timeout = 30.0
 
     enabled = _is_world_stage_enabled(db)
     if not enabled:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=False,
-            timeout=timeout,
+            timeout=30.0,
             accepted=False,
             fallback_reason="world_stage_disabled",
         )
@@ -757,19 +774,28 @@ def _execute_world_stage(
 
     try:
         from ..services.settings import SystemSettingsService
+        from ..llm.stage_provider_resolver import resolve_stage_llm_config
+
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
 
+        stage_config = resolve_stage_llm_config(stage_name, provider_config, use_mock=use_mock)
+
+        # Merge stage-level provider_mode/default_model into config for _create_llm_service_from_config
+        merged_config = dict(provider_config)
+        merged_config["provider_mode"] = stage_config.provider_mode
+        merged_config["default_model"] = stage_config.default_model
+
         llm_service = _create_llm_service_from_config(
             db,
-            provider_config,
+            merged_config,
             force_mock=use_mock,
         )
 
         pipeline_config = ProposalConfig(
-            timeout_seconds=timeout,
-            max_tokens=provider_config.get("max_tokens", 500),
-            temperature=provider_config.get("temperature", 0.8),
+            timeout_seconds=stage_config.timeout_seconds,
+            max_tokens=stage_config.max_tokens,
+            temperature=stage_config.temperature,
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
 
@@ -780,7 +806,7 @@ def _execute_world_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
@@ -812,7 +838,7 @@ def _execute_world_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -828,7 +854,7 @@ def _execute_world_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=fallback_reason,
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -864,17 +890,19 @@ def _execute_world_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             raw_outcome=str(proposal)[:500],
             parsed_proposal=parsed_proposal,
             accepted=True,
+            config_source=stage_config.config_source,
+            fallback_used=stage_config.fallback_used,
         )
 
     except asyncio.TimeoutError:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason="timeout",
         )
@@ -883,7 +911,7 @@ def _execute_world_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"error: {str(e)[:200]}",
         )
@@ -1555,14 +1583,13 @@ def _execute_npc_stage(
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
     
     stage_name: LLMStageName = "npc"
-    timeout = 30.0
     
     enabled = _is_npc_stage_enabled(db)
     if not enabled:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=False,
-            timeout=timeout,
+            timeout=30.0,
             accepted=False,
             fallback_reason="npc_stage_disabled",
         )
@@ -1573,26 +1600,35 @@ def _execute_npc_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=30.0,
             accepted=True,
             parsed_proposal={"npc_reactions": []},
         )
     
     try:
         from ..services.settings import SystemSettingsService
+        from ..llm.stage_provider_resolver import resolve_stage_llm_config
+        
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
         
+        stage_config = resolve_stage_llm_config(stage_name, provider_config, use_mock=use_mock)
+        
+        # Merge stage-level provider_mode/default_model into config for _create_llm_service_from_config
+        merged_config = dict(provider_config)
+        merged_config["provider_mode"] = stage_config.provider_mode
+        merged_config["default_model"] = stage_config.default_model
+        
         llm_service = _create_llm_service_from_config(
             db,
-            provider_config,
+            merged_config,
             force_mock=use_mock,
         )
         
         pipeline_config = ProposalConfig(
-            timeout_seconds=timeout,
-            max_tokens=provider_config.get("max_tokens", 500),
-            temperature=provider_config.get("temperature", 0.8),
+            timeout_seconds=stage_config.timeout_seconds,
+            max_tokens=stage_config.max_tokens,
+            temperature=stage_config.temperature,
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
         
@@ -1603,7 +1639,7 @@ def _execute_npc_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
@@ -1720,10 +1756,12 @@ def _execute_npc_stage(
     return LLMStageResult(
         stage_name=stage_name,
         enabled=True,
-        timeout=timeout,
+        timeout=stage_config.timeout_seconds,
         raw_outcome=str(npc_reactions)[:500],
         parsed_proposal={"npc_reactions": npc_reactions},
         accepted=accepted_count > 0,
+        config_source=stage_config.config_source,
+        fallback_used=stage_config.fallback_used,
     )
 
 
@@ -1876,14 +1914,13 @@ def _execute_narration_stage(
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
     
     stage_name: LLMStageName = "narration"
-    timeout = 30.0
-    
+
     enabled = _is_narration_stage_enabled(db)
     if not enabled:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=False,
-            timeout=timeout,
+            timeout=30.0,
             accepted=False,
             fallback_reason="narration_stage_disabled",
         )
@@ -1916,22 +1953,31 @@ def _execute_narration_stage(
     
     try:
         from ..services.settings import SystemSettingsService
+        from ..llm.stage_provider_resolver import resolve_stage_llm_config
+
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
-        
+
+        stage_config = resolve_stage_llm_config(stage_name, provider_config, use_mock=use_mock)
+
+        # Merge stage-level provider_mode/default_model into config for _create_llm_service_from_config
+        merged_config = dict(provider_config)
+        merged_config["provider_mode"] = stage_config.provider_mode
+        merged_config["default_model"] = stage_config.default_model
+
         llm_service = _create_llm_service_from_config(
             db,
-            provider_config,
+            merged_config,
             force_mock=use_mock,
         )
-        
+
         pipeline_config = ProposalConfig(
-            timeout_seconds=timeout,
-            max_tokens=provider_config.get("max_tokens", 500),
-            temperature=provider_config.get("temperature", 0.8),
+            timeout_seconds=stage_config.timeout_seconds,
+            max_tokens=stage_config.max_tokens,
+            temperature=stage_config.temperature,
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
-        
+
     except LLMConfigurationError:
         raise
     except Exception as e:
@@ -1939,7 +1985,7 @@ def _execute_narration_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
@@ -1960,7 +2006,7 @@ def _execute_narration_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason="empty_narration_text",
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -1971,7 +2017,7 @@ def _execute_narration_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=f"forbidden_info_leak: {', '.join(forbidden_leaks[:3])}",
                 raw_outcome=narration_text[:500],
@@ -1987,7 +2033,7 @@ def _execute_narration_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=fallback_reason,
                 raw_outcome=narration_text[:500],
@@ -1996,17 +2042,19 @@ def _execute_narration_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             raw_outcome=narration_text[:500],
             parsed_proposal={"text": narration_text},
             accepted=True,
+            config_source=stage_config.config_source,
+            fallback_used=stage_config.fallback_used,
         )
         
     except asyncio.TimeoutError:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason="timeout",
         )
@@ -2015,7 +2063,7 @@ def _execute_narration_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"error: {str(e)[:200]}",
         )
@@ -2248,14 +2296,13 @@ def _execute_scene_stage(
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
     
     stage_name: LLMStageName = "scene"
-    timeout = 30.0
-    
+
     enabled = _is_scene_stage_enabled(db)
     if not enabled:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=False,
-            timeout=timeout,
+            timeout=30.0,
             accepted=False,
             fallback_reason="scene_stage_disabled",
         )
@@ -2273,22 +2320,31 @@ def _execute_scene_stage(
     
     try:
         from ..services.settings import SystemSettingsService
+        from ..llm.stage_provider_resolver import resolve_stage_llm_config
+
         settings_service = SystemSettingsService(db)
         provider_config = settings_service.get_provider_config()
-        
+
+        stage_config = resolve_stage_llm_config(stage_name, provider_config, use_mock=use_mock)
+
+        # Merge stage-level provider_mode/default_model into config for _create_llm_service_from_config
+        merged_config = dict(provider_config)
+        merged_config["provider_mode"] = stage_config.provider_mode
+        merged_config["default_model"] = stage_config.default_model
+
         llm_service = _create_llm_service_from_config(
             db,
-            provider_config,
+            merged_config,
             force_mock=use_mock,
         )
-        
+
         pipeline_config = ProposalConfig(
-            timeout_seconds=timeout,
-            max_tokens=provider_config.get("max_tokens", 500),
-            temperature=provider_config.get("temperature", 0.8),
+            timeout_seconds=stage_config.timeout_seconds,
+            max_tokens=stage_config.max_tokens,
+            temperature=stage_config.temperature,
         )
         pipeline = ProposalPipeline(llm_service=llm_service, config=pipeline_config)
-        
+
     except LLMConfigurationError:
         raise
     except Exception as e:
@@ -2296,7 +2352,7 @@ def _execute_scene_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
@@ -2320,7 +2376,7 @@ def _execute_scene_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
                 raw_outcome=str(proposal)[:500] if proposal else None,
@@ -2336,7 +2392,7 @@ def _execute_scene_stage(
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
-                timeout=timeout,
+                timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason=fallback_reason,
                 raw_outcome=str(proposal)[:500],
@@ -2361,17 +2417,19 @@ def _execute_scene_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             raw_outcome=str(proposal)[:500],
             parsed_proposal=parsed_proposal,
             accepted=True,
+            config_source=stage_config.config_source,
+            fallback_used=stage_config.fallback_used,
         )
         
     except asyncio.TimeoutError:
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason="timeout",
         )
@@ -2380,7 +2438,7 @@ def _execute_scene_stage(
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
-            timeout=timeout,
+            timeout=stage_config.timeout_seconds,
             accepted=False,
             fallback_reason=f"error: {str(e)[:200]}",
         )

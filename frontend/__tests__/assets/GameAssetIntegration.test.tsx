@@ -19,6 +19,7 @@ const mockListSessionNpcs = jest.fn();
 const mockGeneratePortrait = jest.fn();
 const mockCreatePortraitJob = jest.fn();
 const mockGetAssetJob = jest.fn();
+const mockGetPlayerQuests = jest.fn();
 
 jest.mock('@/lib/api', () => ({
   getSessionSnapshot: (...args: unknown[]) => mockGetSessionSnapshot(...args),
@@ -29,6 +30,7 @@ jest.mock('@/lib/api', () => ({
   generatePortrait: (...args: unknown[]) => mockGeneratePortrait(...args),
   createPortraitJob: (...args: unknown[]) => mockCreatePortraitJob(...args),
   getAssetJob: (...args: unknown[]) => mockGetAssetJob(...args),
+  getPlayerQuests: (...args: unknown[]) => mockGetPlayerQuests(...args),
 }));
 
 jest.mock('@/hooks/useAssetJob', () => ({
@@ -126,6 +128,7 @@ describe('GameAssetIntegration', () => {
     mockGenerateSceneAsset.mockReturnValue(new Promise(() => {}));
     mockGenerateBGM.mockReturnValue(new Promise(() => {}));
     mockGeneratePortrait.mockReturnValue(new Promise(() => {}));
+    mockGetPlayerQuests.mockResolvedValue([]);
     mockCreatePortraitJob.mockResolvedValue({
       job_id: 'job-portrait-1',
       asset_type: 'portrait',

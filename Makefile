@@ -11,6 +11,7 @@
         test-asset-provider-p8 test-asset-queue-p8 test-asset-cost-rate-p8 test-admin-audit-p8 test-frontend-p8-assets test-scenario-p8 test-p8-fast test-p8 \
         test-v1-rule-engine test-v1-game-ui test-v1-ops test-v1-playthrough test-v1-release \
         test-p10a-quests test-p10a-providers test-p10a-streaming test-p10a-time test-p10a-fast test-p10a \
+        test-p10b-resolver test-p10b-routing test-p10b-debug test-p10b-fast test-p10b \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -238,21 +239,40 @@ test-v1-release: ## V1.0 release gate: all V1 tests + test-p8-fast + frontend bu
 # === P10-A: Immersion Provider Routing ===
 
 test-p10a-quests:
-	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_quest_journal_service.py tests/integration/test_quest_visibility_api.py -q --tb=short || true
+	cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_quest_journal_service.py tests/integration/test_quest_visibility_api.py -q --tb=short
 
 test-p10a-providers:
-	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_asset_provider_resolver.py tests/integration/test_media_provider_routing.py -q --tb=short || true
+	cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_asset_provider_resolver.py tests/integration/test_media_provider_routing.py -q --tb=short
 
 test-p10a-streaming:
-	@cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_streaming_stage_events.py -q --tb=short || true
+	cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_streaming_stage_events.py -q --tb=short
 
 test-p10a-time:
-	@cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_time_advance_validator.py tests/integration/test_dynamic_world_time.py -q --tb=short || true
+	cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_time_advance_validator.py tests/integration/test_dynamic_world_time.py -q --tb=short
 
 test-p10a-fast: test-v1-release test-p10a-streaming test-p10a-time test-p10a-quests test-p10a-providers
 
 test-p10a:
 	$(MAKE) test-p10a-fast
+	cd frontend && npm run build
+	cd frontend && npm run lint
+	cd frontend && npx tsc --noEmit
+
+# === P10-B: Stage-Level LLM Routing ===
+
+test-p10b-resolver:
+	cd backend && APP_ENV=testing python3 -m pytest tests/unit/test_llm_stage_provider_resolver.py -q --tb=short
+
+test-p10b-routing:
+	cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_llm_stage_routing_turn.py -q --tb=short
+
+test-p10b-debug:
+	cd backend && APP_ENV=testing python3 -m pytest tests/integration/test_llm_stage_routing_turn.py -q -k "debug" --tb=short
+
+test-p10b-fast: test-p10b-resolver test-p10b-routing
+
+test-p10b:
+	$(MAKE) test-p10b-fast
 	cd frontend && npm run build
 	cd frontend && npm run lint
 	cd frontend && npx tsc --noEmit

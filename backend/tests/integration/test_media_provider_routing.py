@@ -18,6 +18,24 @@ from llm_rpg.assets.provider_resolver import (
 )
 
 
+_ASSET_PROVIDER_ENV_VARS = [
+    "ASSET_PROVIDER",
+    "ASSET_PROVIDER_DEFAULT",
+    "ASSET_PROVIDER_IMAGE",
+    "ASSET_PROVIDER_PORTRAIT",
+    "ASSET_PROVIDER_SCENE",
+    "ASSET_PROVIDER_AUDIO",
+    "ASSET_PROVIDER_BGM",
+    "ASSET_PROVIDER_SFX",
+]
+
+
+@pytest.fixture(autouse=True)
+def clear_asset_provider_env(monkeypatch):
+    for var in _ASSET_PROVIDER_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
 # =============================================================================
 # Tests: Per-Type Env Var Routing
 # =============================================================================

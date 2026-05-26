@@ -7,9 +7,16 @@ from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
 from ..storage.models import UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel, EventLogModel
-from ..storage.repositories import SessionRepository, SessionStateRepository, SessionPlayerStateRepository, EventLogRepository
+from ..storage.repositories import (
+    SessionRepository,
+    SessionStateRepository,
+    SessionPlayerStateRepository,
+    EventLogRepository,
+    StoryPackageVersionRepository,
+)
 from .auth import get_current_active_user
 from .turn_output import recommended_actions_from_result
+from ..core.feature_flags import story_package_instance_enabled
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -217,3 +224,75 @@ def get_adventure_log(
         )
         for entry in entries
     ]
+
+
+# =============================================================================
+# Player Story Package Instantiate
+# =============================================================================
+
+class PlayerInstantiateRequest(BaseModel):
+    story_package_id: str = Field(..., min_length=1)
+    config_json: Optional[Dict[str, Any]] = None
+
+
+class PlayerInstantiateResponse(BaseModel):
+    playthrough_instance_id: str
+    session_id: str
+
+
+@router.post(
+    "/instantiate",
+    response_model=PlayerInstantiateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def instantiate_story_package(
+    request: PlayerInstantiateRequest,
+    current_user: UserModel = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Instantiate the latest published StoryPackageVersion for a story_package_id.
+
+    Player-facing endpoint: only published versions are allowed, and the
+    latest published version by published_at is selected automatically.
+    The authenticated user becomes the owner of the playthrough/session.
+
+    Feature-gated by STORY_PACKAGE_INSTANCE_ENABLED.
+    """
+    if not story_package_instance_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Story package instantiation is not enabled",
+        )
+
+    spv_repo = StoryPackageVersionRepository(db)
+    latest_published = spv_repo.get_latest_published(request.story_package_id)
+
+    if latest_published is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No published version found for this story package",
+        )
+
+    from ..core.playthrough_instance_service import (
+        create_playthrough_from_version,
+        PlaythroughInstanceError,
+    )
+
+    try:
+        result = create_playthrough_from_version(
+            db,
+            version_id=latest_published.id,
+            user_id=current_user.id,
+            config_json=request.config_json,
+        )
+    except PlaythroughInstanceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    return PlayerInstantiateResponse(
+        playthrough_instance_id=result.playthrough_instance_id,
+        session_id=result.session_id,
+    )

@@ -193,6 +193,45 @@ class TestAdminContentPackPathValidation:
         
         assert response.status_code == 422
         assert "Path traversal not allowed" in response.json()["detail"]
+
+    def test_path_with_trailing_double_dot_rejected(self, client, db_engine, admin_user_data):
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+        headers = get_auth_header(client, admin_user_data)
+
+        response = client.post(
+            "/admin/content-packs/validate",
+            headers=headers,
+            json={"path": "content_packs/.."}
+        )
+
+        assert response.status_code == 422
+        assert "Path traversal not allowed" in response.json()["detail"]
+
+    def test_path_with_subdir_double_dot_rejected(self, client, db_engine, admin_user_data):
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+        headers = get_auth_header(client, admin_user_data)
+
+        response = client.post(
+            "/admin/content-packs/import",
+            headers=headers,
+            json={"path": "content_packs/qinglan_xianxia/.."}
+        )
+
+        assert response.status_code == 422
+        assert "Path traversal not allowed" in response.json()["detail"]
+
+    def test_publish_as_version_path_traversal_blocked(self, client, db_engine, admin_user_data):
+        create_user_in_db(db_engine, admin_user_data, is_admin=True)
+        headers = get_auth_header(client, admin_user_data)
+
+        response = client.post(
+            "/admin/content-packs/publish-as-version",
+            headers=headers,
+            json={"path": "content_packs/.."}
+        )
+
+        assert response.status_code == 422
+        assert "Path traversal not allowed" in response.json()["detail"]
     
     def test_valid_content_packs_path_accepted(self, client, db_engine, admin_user_data):
         create_user_in_db(db_engine, admin_user_data, is_admin=True)

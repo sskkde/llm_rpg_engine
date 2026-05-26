@@ -60,6 +60,10 @@ from .validation import (
     NPCKnowledgeValidator,
     NarrationLeakValidator,
 )
+from .post_commit_memory_writer import (
+    update_recall_stats_post_commit,
+    write_post_commit_memories,
+)
 from ..engines.scene_transition import SceneTransitionResolver
 from .perception import PerceptionResolver
 from .projections import (
@@ -1504,6 +1508,21 @@ def _build_npc_context(
     if npc_db_memories:
         context["npc_db_memories"] = npc_db_memories
     
+    # P10-C Phase 6: Enrich with retrieved private memories for major NPCs
+    if npc_template_id:
+        try:
+            from .npc_decision_adapter import enrich_major_npc_decision_context
+            context = enrich_major_npc_decision_context(
+                npc_context=context,
+                db=db,
+                session_id=session_id,
+                npc_template_id=npc_template_id,
+                query=player_input,
+                current_turn=canonical_state.world_state.current_turn if hasattr(canonical_state.world_state, 'current_turn') else 0,
+            )
+        except Exception:
+            pass  # Non-fatal: fall through with un-enriched context
+    
     return context
 
 
@@ -1680,6 +1699,24 @@ def _execute_npc_stage(
                 )
             )
             
+            # P10-C Phase 6: Normalize proposal (filter invalid used_memory_ids,
+            # validate new_memory_candidates) before validation/acceptance
+            normalized = None
+            if hasattr(proposal, "used_memory_ids"):
+                try:
+                    from .npc_decision_adapter import normalize_npc_action_proposal
+                    normalized = normalize_npc_action_proposal(
+                        proposal=proposal,
+                        db=db,
+                        session_id=session_id,
+                        npc_template_id=npc_template_id,
+                        available_memory_ids=npc_context.get("used_memory_ids"),
+                        current_turn=turn_no,
+                    )
+                    proposal = normalized.proposal
+                except Exception:
+                    pass  # Non-fatal: proceed with un-normalized proposal
+            
             is_valid, validation_errors = _validate_npc_action(proposal, npc_context)
             
             if not is_valid:
@@ -1716,12 +1753,19 @@ def _execute_npc_stage(
             reaction = {
                 "npc_id": npc_id,
                 "npc_name": npc_name,
+                "npc_template_id": npc_template_id,
                 "accepted": True,
                 "action_type": proposal.action_type,
                 "summary": proposal.summary,
                 "visible_to_player": visible_to_player,
                 "visible_motivation": getattr(proposal, "visible_motivation", ""),
             }
+            
+            # P10-C Phase 6: Carry memory fields through for post-commit writes
+            if hasattr(proposal, "used_memory_ids") and proposal.used_memory_ids:
+                reaction["used_memory_ids"] = list(proposal.used_memory_ids)
+            if hasattr(proposal, "new_memory_candidates") and proposal.new_memory_candidates:
+                reaction["new_memory_candidates"] = list(proposal.new_memory_candidates)
             
             if visible_to_player:
                 working_recent_actions.append({
@@ -4067,6 +4111,69 @@ def _persist_turn_memories(
                             confidence=0.8,
                         )
                         result["npc_beliefs_created"] += 1
+                    
+                    # P10-C Phase 6: Post-commit source-bound memory writes
+                    # for accepted major NPC proposals with new_memory_candidates
+                    npc_template_id = reaction.get("npc_template_id", npc_id)
+                    if reaction.get("new_memory_candidates"):
+                        try:
+                            from ..models.proposals import NPCActionProposal, ProposalAuditMetadata, ProposalType, ProposalSource
+                            write_proposal = NPCActionProposal(
+                                npc_id=npc_id,
+                                action_type=reaction.get("action_type", "idle"),
+                                summary=summary,
+                                new_memory_candidates=reaction["new_memory_candidates"],
+                                used_memory_ids=reaction.get("used_memory_ids", []),
+                                audit=ProposalAuditMetadata(
+                                    proposal_type=ProposalType.NPC_ACTION,
+                                    source_engine=ProposalSource.NPC_ENGINE,
+                                ),
+                            )
+                            write_result = write_post_commit_memories(
+                                db=db,
+                                session_id=session_id,
+                                npc_template_id=npc_template_id,
+                                proposal=write_proposal,
+                                committed_event_ids=[event_id],
+                                source_turn_no=turn_no,
+                            )
+                            result["p10c_private_memories_written"] = (
+                                result.get("p10c_private_memories_written", 0)
+                                + len(write_result.written_ids)
+                            )
+                            if write_result.errors:
+                                logger.warning(
+                                    "P10-C post-commit memory errors session=%s npc=%s: %s",
+                                    session_id, npc_id, write_result.errors,
+                                )
+                        except Exception as pcm_err:
+                            logger.warning(
+                                "P10-C post-commit memory write failed session=%s npc=%s: %s",
+                                session_id, npc_id, pcm_err,
+                            )
+
+                    # P10-C: Update recall stats for used memories after commit
+                    # (retrieval no longer auto-commits recall stats in hot path)
+                    used_mem_ids = reaction.get("used_memory_ids")
+                    if used_mem_ids:
+                        try:
+                            updated_count = update_recall_stats_post_commit(
+                                db=db,
+                                session_id=session_id,
+                                npc_template_id=npc_template_id,
+                                used_memory_ids=used_mem_ids,
+                                current_turn=turn_no,
+                            )
+                            if updated_count > 0:
+                                result["p10c_recall_stats_updated"] = (
+                                    result.get("p10c_recall_stats_updated", 0)
+                                    + updated_count
+                                )
+                        except Exception as recall_err:
+                            logger.warning(
+                                "P10-C recall stats update failed session=%s npc=%s: %s",
+                                session_id, npc_id, recall_err,
+                            )
         
         if world_progression:
             candidate_events = world_progression.get("candidate_events", [])

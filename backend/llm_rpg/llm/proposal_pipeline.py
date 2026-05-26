@@ -353,6 +353,9 @@ class ProposalPipeline:
                     visibility=data.get("visibility", "player_visible"),
                     confidence=data.get("confidence", 0.5),
                     alternatives=data.get("alternatives", []),
+                    used_memory_ids=data.get("used_memory_ids", []),
+                    new_memory_candidates=data.get("new_memory_candidates", []),
+                    decision_audit=data.get("decision_audit"),
                     audit=audit,
                     is_fallback=False,
                 )

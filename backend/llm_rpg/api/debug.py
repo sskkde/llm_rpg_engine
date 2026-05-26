@@ -2880,6 +2880,91 @@ async def get_resolved_stage_routing(
     }
 
 
+class RetrievedMemoryResponse(BaseModel):
+    memory_id: str
+    text: str
+    summary: Optional[str] = None
+    score: float
+    reason: str
+    signals: Dict[str, float] = Field(default_factory=dict)
+    memory_kind: Optional[str] = None
+    knowledge_source: Optional[str] = None
+    source_turn_no: Optional[int] = None
+    tags: List[str] = Field(default_factory=list)
+    entity_refs: List[str] = Field(default_factory=list)
+    location_id: Optional[str] = None
+
+
+class NPCMemoryRetrievalResponse(BaseModel):
+    session_id: str
+    npc_template_id: str
+    memories: List[RetrievedMemoryResponse]
+    used_memory_ids: List[str]
+    total_candidates: int
+    selected_count: int
+    retrieval_audit: Dict[str, Any]
+
+
+@router.get(
+    "/sessions/{session_id}/npcs/{npc_id}/memory-retrieval",
+    response_model=NPCMemoryRetrievalResponse,
+    summary="Inspect major NPC memory retrieval (admin)",
+)
+def get_npc_memory_retrieval_debug(
+    session_id: str,
+    npc_id: str,
+    query: Optional[str] = Query(None, description="Optional query for lexical scoring"),
+    current_turn: int = Query(0, ge=0, description="Current turn for recency scoring"),
+    budget: Optional[int] = Query(None, ge=1, le=100, description="Max memories to return"),
+    current_user: UserModel = Depends(require_debug_admin),
+    db: DBSession = Depends(get_db),
+):
+    """Inspect memory retrieval for a major NPC. Admin only. No secrets exposed."""
+    require_admin_role(current_user)
+
+    session_repo = SessionRepository(db)
+    session = session_repo.get_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    from ..core.npc_memory_retrieval_service import retrieve_major_npc_memories
+
+    result = retrieve_major_npc_memories(
+        db=db,
+        session_id=session_id,
+        npc_template_id=npc_id,
+        query=query or "",
+        current_turn=current_turn,
+        budget=budget,
+    )
+
+    return NPCMemoryRetrievalResponse(
+        session_id=result.session_id,
+        npc_template_id=result.npc_template_id,
+        memories=[
+            RetrievedMemoryResponse(
+                memory_id=rm.memory_id,
+                text=rm.text,
+                summary=rm.summary,
+                score=rm.score,
+                reason=rm.reason,
+                signals=rm.signals,
+                memory_kind=rm.memory_kind,
+                knowledge_source=rm.knowledge_source,
+                source_turn_no=rm.source_turn_no,
+                tags=rm.tags,
+                entity_refs=rm.entity_refs,
+                location_id=rm.location_id,
+            )
+            for rm in result.memories
+        ],
+        used_memory_ids=result.used_memory_ids,
+        total_candidates=result.total_candidates,
+        selected_count=result.selected_count,
+        retrieval_audit=result.retrieval_audit,
+    )
+
+
 # =============================================================================
 # Asset Detail Route (must be last to avoid conflicting with static paths)
 # =============================================================================

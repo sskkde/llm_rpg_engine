@@ -1,0 +1,174 @@
+"""
+NPC Decision Adapter (P10-C Phase 6).
+
+Additive adapter that:
+- Enriches major NPC decision context with retrieved private memories
+  when NPC_MEMORY_FIRST_ENABLED=true.
+- Normalizes NPCActionProposal to include used_memory_ids and
+  new_memory_candidates with safe defaults.
+- Validates used_memory_ids belong to the same session + NPC and were
+  available for that decision.
+- Filters out invalid/cross-session/cross-NPC memory IDs.
+
+Does not modify legacy proposal fields or behavior when flag is off.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
+
+from sqlalchemy.orm import Session as DBSession
+
+from ..models.proposals import NPCActionProposal
+from ..storage.models import NPCPrivateMemoryModel, NPCTemplateModel
+from ..storage.repositories import (
+    NPCPrivateMemoryRepository,
+    NPCTemplateRepository,
+)
+from .feature_flags import npc_memory_first_enabled
+from .npc_memory_retrieval_service import (
+    enrich_npc_context_with_memories,
+    retrieve_major_npc_memories,
+    RetrievalResult,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NormalizationResult:
+    proposal: NPCActionProposal
+    valid_used_memory_ids: List[str] = field(default_factory=list)
+    invalid_used_memory_ids: List[str] = field(default_factory=list)
+    filtered_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    dropped_candidates: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def enrich_major_npc_decision_context(
+    npc_context: Dict[str, Any],
+    db: DBSession,
+    session_id: str,
+    npc_template_id: str,
+    query: str = "",
+    current_turn: int = 0,
+    budget: Optional[int] = None,
+    update_recall_stats: bool = False,
+) -> Dict[str, Any]:
+    """Enrich NPC decision context with retrieved private memories.
+
+    Only enriches when NPC_MEMORY_FIRST_ENABLED=true and NPC is major.
+    Returns original context unchanged otherwise.
+    """
+    if not npc_memory_first_enabled():
+        return npc_context
+
+    npc_template_repo = NPCTemplateRepository(db)
+    npc_template = npc_template_repo.get_by_id(npc_template_id)
+    if npc_template is None or not npc_template.is_major_npc:
+        return npc_context
+
+    try:
+        return enrich_npc_context_with_memories(
+            npc_context=npc_context,
+            db=db,
+            session_id=session_id,
+            npc_template_id=npc_template_id,
+            query=query,
+            current_turn=current_turn,
+            budget=budget,
+            update_recall_stats=update_recall_stats,
+        )
+    except Exception as e:
+        logger.warning(
+            "Memory enrichment failed for session=%s npc=%s: %s",
+            session_id, npc_template_id, e,
+        )
+        return npc_context
+
+
+def normalize_npc_action_proposal(
+    proposal: NPCActionProposal,
+    db: DBSession,
+    session_id: str,
+    npc_template_id: str,
+    available_memory_ids: Optional[List[str]] = None,
+    current_turn: int = 0,
+) -> NormalizationResult:
+    """Normalize an NPCActionProposal to include Phase 6 fields.
+
+    - Ensures used_memory_ids and new_memory_candidates exist (default empty).
+    - Validates used_memory_ids: must belong to same session + NPC, must be
+      in available_memory_ids if provided.
+    - Filters new_memory_candidates: must have memory_text and source_type.
+    - Returns NormalizationResult with valid/invalid breakdown.
+    """
+    used_ids = list(proposal.used_memory_ids) if proposal.used_memory_ids else []
+    candidates = list(proposal.new_memory_candidates) if proposal.new_memory_candidates else []
+
+    if not npc_memory_first_enabled():
+        return NormalizationResult(
+            proposal=proposal,
+            valid_used_memory_ids=[],
+            invalid_used_memory_ids=[],
+            filtered_candidates=[],
+            dropped_candidates=[],
+        )
+
+    valid_ids: List[str] = []
+    invalid_ids: List[str] = []
+
+    if used_ids:
+        available_set: Optional[Set[str]] = set(available_memory_ids) if available_memory_ids else None
+        owned_ids = _fetch_owned_memory_ids(db, session_id, npc_template_id)
+
+        for mid in used_ids:
+            if mid not in owned_ids:
+                invalid_ids.append(mid)
+                continue
+            if available_set is not None and mid not in available_set:
+                invalid_ids.append(mid)
+                continue
+            valid_ids.append(mid)
+
+    filtered_cands: List[Dict[str, Any]] = []
+    dropped_cands: List[Dict[str, Any]] = []
+
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            dropped_cands.append(cand)
+            continue
+        memory_text = cand.get("memory_text")
+        if not memory_text or not str(memory_text).strip():
+            dropped_cands.append(cand)
+            continue
+        source_type = cand.get("source_type")
+        if not source_type or not str(source_type).strip():
+            dropped_cands.append(cand)
+            continue
+        filtered_cands.append(cand)
+
+    updated_proposal = proposal.model_copy(update={
+        "used_memory_ids": valid_ids,
+        "new_memory_candidates": filtered_cands,
+    })
+
+    return NormalizationResult(
+        proposal=updated_proposal,
+        valid_used_memory_ids=valid_ids,
+        invalid_used_memory_ids=invalid_ids,
+        filtered_candidates=filtered_cands,
+        dropped_candidates=dropped_cands,
+    )
+
+
+def _fetch_owned_memory_ids(
+    db: DBSession,
+    session_id: str,
+    npc_template_id: str,
+) -> Set[str]:
+    """Fetch all memory IDs owned by this session + NPC template."""
+    repo = NPCPrivateMemoryRepository(db)
+    rows = repo.get_by_npc_template(session_id, npc_template_id)
+    return {str(row.id) for row in rows}

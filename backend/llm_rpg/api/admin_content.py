@@ -15,7 +15,11 @@ from sqlalchemy.orm import Session as DBSession
 
 from ..storage.database import get_db
 from ..storage.models import UserModel, FactionModel, PlotBeatModel
-from ..storage.repositories import FactionRepository, PlotBeatRepository
+from ..storage.repositories import (
+    FactionRepository,
+    PlotBeatRepository,
+    StoryPackageVersionRepository,
+)
 from .admin import require_admin, require_admin_role
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -38,19 +42,23 @@ def validate_content_pack_path(path: str) -> Path:
     Raises:
         HTTPException: If path contains traversal or doesn't start with content_packs/
     """
-    if "../" in path:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Path traversal not allowed"
-        )
-    
     if not path.startswith("content_packs/"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Path must start with 'content_packs/'"
         )
-    
-    return Path(path)
+
+    repo_root = Path(__file__).resolve().parents[3]
+    content_packs_root = (repo_root / "content_packs").resolve()
+    resolved_path = (repo_root / path).resolve()
+
+    if resolved_path == content_packs_root or not resolved_path.is_relative_to(content_packs_root):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Path traversal not allowed"
+        )
+
+    return resolved_path
 
 
 # =============================================================================
@@ -201,6 +209,14 @@ class ContentPackImportResponse(BaseModel):
     dry_run: bool = False
     pack_id: Optional[str] = None
     pack_name: Optional[str] = None
+    version_id: Optional[str] = None
+    manifest_json: Optional[Dict[str, Any]] = None
+
+
+class ContentPackPublishAsVersionRequest(BaseModel):
+    path: str = Field(..., description="Path to content pack directory")
+    world_id: Optional[str] = None
+    publish: bool = Field(default=False, description="If true, publish the version immediately after creation")
 
 
 # =============================================================================
@@ -642,3 +658,242 @@ def import_content_pack(
             errors=[f"Import failed: {e}"],
             dry_run=dry_run,
         )
+
+
+@router.post("/content-packs/publish-as-version", response_model=ContentPackImportResponse)
+def publish_content_pack_as_version(
+    request: ContentPackPublishAsVersionRequest,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db)
+):
+    """
+    Import a content pack and create a StoryPackageVersion from it.
+
+    Imports factions and plot_beats (same as /content-packs/import),
+    then creates a draft StoryPackageVersion row with manifest built from
+    the loaded pack. Optionally publishes the version immediately.
+
+    Path must start with 'content_packs/' and cannot contain '../'.
+    Requires admin role.
+    """
+    require_admin_role(current_user)
+
+    pack_path = validate_content_pack_path(request.path)
+
+    try:
+        from ..content.importer import ContentImportService
+
+        service = ContentImportService(db)
+        report = service.import_pack_as_version(
+            pack_path,
+            world_id=request.world_id,
+            dry_run=False,
+        )
+
+        if request.publish and report.version_id:
+            from ..core.story_package_service import (
+                publish_story_package_version,
+                StoryPackageVersionError,
+            )
+            try:
+                publish_story_package_version(db, report.version_id)
+            except StoryPackageVersionError:
+                pass
+
+        return ContentPackImportResponse(
+            success=report.success,
+            imported_count=report.imported_count,
+            factions_imported=report.factions_imported,
+            plot_beats_imported=report.plot_beats_imported,
+            errors=report.errors,
+            warnings=report.warnings,
+            dry_run=report.dry_run,
+            pack_id=report.pack_id,
+            pack_name=report.pack_name,
+            version_id=report.version_id,
+            manifest_json=report.manifest_json,
+        )
+    except Exception as e:
+        return ContentPackImportResponse(
+            success=False,
+            errors=[f"Import/publish-as-version failed: {e}"],
+        )
+
+
+# =============================================================================
+# Story Package Version Pydantic Models
+# =============================================================================
+
+class StoryPackageVersionCreateRequest(BaseModel):
+    story_package_id: str = Field(..., min_length=1)
+    version: str = Field(..., min_length=1)
+    world_id: Optional[str] = None
+    manifest_json: Optional[Dict[str, Any]] = None
+    editor_schema_version: Optional[str] = None
+    source_hash: Optional[str] = None
+
+
+class StoryPackageVersionResponse(BaseModel):
+    id: str
+    story_package_id: str
+    version: str
+    status: str
+    world_id: Optional[str] = None
+    manifest_json: Dict[str, Any] = {}
+    editor_schema_version: Optional[str] = None
+    source_hash: Optional[str] = None
+    published_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class InstantiateRequest(BaseModel):
+    user_id: Optional[str] = None
+    config_json: Optional[Dict[str, Any]] = None
+
+
+class InstantiateResponse(BaseModel):
+    playthrough_instance_id: str
+    session_id: str
+    baseline_snapshot_id: Optional[str] = None
+
+
+# =============================================================================
+# Story Package Version Routes
+# =============================================================================
+
+@router.post(
+    "/story-package-versions",
+    response_model=StoryPackageVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_story_package_version(
+    request: StoryPackageVersionCreateRequest,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+
+    from ..core.story_package_service import (
+        create_story_package_version as svc_create,
+        StoryPackageVersionError,
+    )
+
+    try:
+        spv = svc_create(
+            db,
+            story_package_id=request.story_package_id,
+            version=request.version,
+            world_id=request.world_id,
+            manifest_json=request.manifest_json,
+            editor_schema_version=request.editor_schema_version,
+            source_hash=request.source_hash,
+        )
+    except StoryPackageVersionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+
+    return StoryPackageVersionResponse.model_validate(spv)
+
+
+@router.get(
+    "/story-package-versions/{version_id}",
+    response_model=StoryPackageVersionResponse,
+)
+def get_story_package_version(
+    version_id: str,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+
+    from ..core.story_package_service import get_story_package_version as svc_get
+
+    spv = svc_get(db, version_id)
+    if spv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Story package version not found",
+        )
+
+    return StoryPackageVersionResponse.model_validate(spv)
+
+
+@router.post(
+    "/story-package-versions/{version_id}/publish",
+    response_model=StoryPackageVersionResponse,
+)
+def publish_story_package_version(
+    version_id: str,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+
+    from ..core.story_package_service import (
+        publish_story_package_version as svc_publish,
+        StoryPackageVersionError,
+    )
+
+    try:
+        spv = svc_publish(db, version_id)
+    except StoryPackageVersionError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    return StoryPackageVersionResponse.model_validate(spv)
+
+
+@router.post(
+    "/story-package-versions/{version_id}/instantiate",
+    response_model=InstantiateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def instantiate_story_package_version(
+    version_id: str,
+    request: InstantiateRequest,
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    require_admin_role(current_user)
+
+    from ..core.playthrough_instance_service import (
+        create_playthrough_from_version,
+        PlaythroughInstanceError,
+    )
+
+    try:
+        result = create_playthrough_from_version(
+            db,
+            version_id=version_id,
+            user_id=request.user_id,
+            config_json=request.config_json,
+        )
+    except PlaythroughInstanceError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(e),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )
+
+    return InstantiateResponse(
+        playthrough_instance_id=result.playthrough_instance_id,
+        session_id=result.session_id,
+        baseline_snapshot_id=result.baseline_snapshot_id,
+    )

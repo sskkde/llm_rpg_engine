@@ -251,3 +251,12 @@ class ContentImportReport(BaseModel):
         default="",
         description="Name of the content pack"
     )
+    # P10-C Phase 3: version bridge fields (optional, additive)
+    version_id: Optional[str] = Field(
+        default=None,
+        description="ID of the StoryPackageVersion created (if any)"
+    )
+    manifest_json: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Manifest JSON of the created version (if any)"
+    )

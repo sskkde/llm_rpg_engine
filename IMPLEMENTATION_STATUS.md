@@ -1,7 +1,7 @@
 # Implementation Status
 
-**Last Updated**: 2026-05-23
-**Current Phase**: P10-A Closeout — Immersion & Provider Routing
+**Last Updated**: 2026-05-26
+**Current Phase**: P10-C Complete — Story Editor & NPC Memory-First
 
 ---
 
@@ -453,6 +453,61 @@ make test-p10b              # Full P10-B gate (includes frontend build)
 
 ---
 
+## P10-C: Story Editor & NPC Memory-First — COMPLETE
+
+P10-C delivers two major modules: Story Editor infrastructure with content pack versioning and NPC memory-first architecture with private memory storage and retrieval. For detailed status, see `P10C_EXECUTION_REPORT.md`.
+
+### Module 1 — NPC Memory-First
+
+| Deliverable | Status |
+|-------------|--------|
+| NPCPrivateMemoryModel + NPCMemoryScopeModel | Completed |
+| NPC memory retrieval service | Completed |
+| Turn service adapter/writer | Completed |
+| Feature flag `npc_memory_first_enabled` | Completed |
+| Integration tests | Completed |
+
+### Module 2 — Story Editor Fields
+
+| Deliverable | Status |
+|-------------|--------|
+| World/Location/NPC/Event/Prompt editor fields | Completed |
+| Schema foundation tests | Completed |
+| Story editor gap tests | Completed |
+
+### Module 3 — Content Pack Versioning
+
+| Deliverable | Status |
+|-------------|--------|
+| StoryPackageVersion model + repository | Completed |
+| Manifest builder | Completed |
+| Publish bridge | Completed |
+| Instance API | Completed |
+
+### Module 4 — Hallucination Leak Hardening
+
+| Deliverable | Status |
+|-------------|--------|
+| Validation hardening tests | Completed |
+
+### Infrastructure
+
+| Deliverable | Status |
+|-------------|--------|
+| Makefile test-p10c-fast/test-p10c/test-p10c-gate targets | Completed |
+| CI p10c-tests job | Completed |
+| P10C_EXECUTION_REPORT.md | Completed |
+
+**P10-C Gates**: `make test-p10c-fast`, `make test-p10c`, `make test-p10c-gate`
+
+**Test Coverage**: 11 P10-C test files (8 unit + 3 integration)
+
+**NPC Memory**: Private memory storage with retrieval and turn service integration
+
+**Story Editor**: ORM editor fields for story package versioning
+
+---
+
 ## Known Risks
 
 ### 1. Frontend Unit Tests (Pre-existing - Partially Resolved)
@@ -532,6 +587,22 @@ make test-scenario-p8        # P8 scenario tests
 make test-p10a               # P10-A quality gate (full)
 make test-p10a-fast          # P10-A fast gate
 
+# P10-B specific targets
+make test-p10b-resolver      # P10-B resolver unit tests
+make test-p10b-routing       # P10-B integration tests
+make test-p10b-debug         # P10-B debug tests
+make test-p10b-fast          # P10-B fast gate
+make test-p10b               # P10-B quality gate (full)
+
+# P10-C specific targets
+make test-p10c-npc-memory-unit    # P10-C NPC memory unit tests
+make test-p10c-story-editor-unit  # P10-C story editor unit tests
+make test-p10c-content-pack-unit  # P10-C content pack unit tests
+make test-p10c-integration        # P10-C integration tests
+make test-p10c-fast               # P10-C fast gate
+make test-p10c                    # P10-C quality gate (full)
+make test-p10c-gate               # P10-C quality gate (alias)
+
 # Frontend asset tests
 cd frontend && npm test -- __tests__/assets
 
@@ -560,4 +631,6 @@ cd backend && python3 -m pytest -q
 - V1 Readiness: `V1_READINESS.md`
 - P10-A Completion: `P10A_EXECUTION_REPORT.md`
 - P10-A Readiness: `P10A_READINESS.md`
+- P10-B Completion: `P10B_EXECUTION_REPORT.md`
+- P10-C Completion: `P10C_EXECUTION_REPORT.md`
 - AGENTS.md: Project commands and conventions

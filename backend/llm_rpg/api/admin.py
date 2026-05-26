@@ -83,6 +83,12 @@ class WorldListItem(BaseModel):
 
 class WorldDetail(WorldListItem):
     lore_summary: Optional[str] = None
+    story_package_version_id: Optional[str] = None
+    world_book_json: Optional[Dict[str, Any]] = None
+    calendar_json: Optional[Dict[str, Any]] = None
+    ruleset_json: Optional[Dict[str, Any]] = None
+    starter_location_id: Optional[str] = None
+    editor_metadata_json: Optional[Dict[str, Any]] = None
 
 
 class WorldUpdateRequest(BaseModel):
@@ -90,6 +96,12 @@ class WorldUpdateRequest(BaseModel):
     genre: Optional[str] = None
     lore_summary: Optional[str] = None
     status: Optional[str] = None
+    story_package_version_id: Optional[str] = None
+    world_book_json: Optional[Dict[str, Any]] = None
+    calendar_json: Optional[Dict[str, Any]] = None
+    ruleset_json: Optional[Dict[str, Any]] = None
+    starter_location_id: Optional[str] = None
+    editor_metadata_json: Optional[Dict[str, Any]] = None
 
 
 # ----- Chapter Models -----
@@ -108,12 +120,26 @@ class ChapterListItem(BaseModel):
 
 class ChapterDetail(ChapterListItem):
     start_conditions: Dict[str, Any] = {}
+    entry_conditions_json: Optional[Dict[str, Any]] = None
+    exit_conditions_json: Optional[Dict[str, Any]] = None
+    end_conditions_json: Optional[Dict[str, Any]] = None
+    timeline_json: Optional[Any] = None
+    tags_json: Optional[Any] = None
+    schema_json: Optional[Dict[str, Any]] = None
+    estimated_playtime_minutes: Optional[int] = None
 
 
 class ChapterUpdateRequest(BaseModel):
     name: Optional[str] = None
     summary: Optional[str] = None
     start_conditions: Optional[Dict[str, Any]] = None
+    entry_conditions_json: Optional[Dict[str, Any]] = None
+    exit_conditions_json: Optional[Dict[str, Any]] = None
+    end_conditions_json: Optional[Dict[str, Any]] = None
+    timeline_json: Optional[Any] = None
+    tags_json: Optional[Any] = None
+    schema_json: Optional[Dict[str, Any]] = None
+    estimated_playtime_minutes: Optional[int] = None
 
 
 # ----- Location Models -----
@@ -134,6 +160,11 @@ class LocationListItem(BaseModel):
 class LocationDetail(LocationListItem):
     description: Optional[str] = None
     access_rules: Dict[str, Any] = {}
+    parent_location_id: Optional[str] = None
+    location_type: Optional[str] = None
+    environment_json: Optional[Dict[str, Any]] = None
+    discovery_rules_json: Optional[Dict[str, Any]] = None
+    scene_hooks_json: Optional[Dict[str, Any]] = None
 
 
 class LocationUpdateRequest(BaseModel):
@@ -141,6 +172,11 @@ class LocationUpdateRequest(BaseModel):
     description: Optional[str] = None
     tags: Optional[List[str]] = None
     access_rules: Optional[Dict[str, Any]] = None
+    parent_location_id: Optional[str] = None
+    location_type: Optional[str] = None
+    environment_json: Optional[Dict[str, Any]] = None
+    discovery_rules_json: Optional[Dict[str, Any]] = None
+    scene_hooks_json: Optional[Dict[str, Any]] = None
 
 
 # ----- NPC Template Models -----
@@ -162,7 +198,21 @@ class NPCTemplateDetail(NPCTemplateListItem):
     hidden_identity: Optional[str] = None
     personality: Optional[str] = None
     speech_style: Optional[str] = None
+    appearance: Optional[str] = None
     goals: List[str] = []
+    is_major_npc: Optional[bool] = None
+    memory_profile_json: Optional[Dict[str, Any]] = None
+    seed_memory_bundle_json: Optional[List[Dict[str, Any]]] = None
+    appearance_json: Optional[Dict[str, Any]] = None
+    body_features_json: Optional[Dict[str, Any]] = None
+    baseline_stats_json: Optional[Dict[str, Any]] = None
+    speech_profile_json: Optional[Dict[str, Any]] = None
+    personality_traits_json: Optional[List[str]] = None
+    background_bio: Optional[str] = None
+    decision_profile_json: Optional[Dict[str, Any]] = None
+    initial_location_id: Optional[str] = None
+    faction_id: Optional[str] = None
+    portrait_asset_id: Optional[str] = None
 
 
 class NPCTemplateUpdateRequest(BaseModel):
@@ -172,7 +222,21 @@ class NPCTemplateUpdateRequest(BaseModel):
     hidden_identity: Optional[str] = None
     personality: Optional[str] = None
     speech_style: Optional[str] = None
+    appearance: Optional[str] = None
     goals: Optional[List[str]] = None
+    is_major_npc: Optional[bool] = None
+    memory_profile_json: Optional[Dict[str, Any]] = None
+    seed_memory_bundle_json: Optional[List[Dict[str, Any]]] = None
+    appearance_json: Optional[Dict[str, Any]] = None
+    body_features_json: Optional[Dict[str, Any]] = None
+    baseline_stats_json: Optional[Dict[str, Any]] = None
+    speech_profile_json: Optional[Dict[str, Any]] = None
+    personality_traits_json: Optional[List[str]] = None
+    background_bio: Optional[str] = None
+    decision_profile_json: Optional[Dict[str, Any]] = None
+    initial_location_id: Optional[str] = None
+    faction_id: Optional[str] = None
+    portrait_asset_id: Optional[str] = None
 
 
 # ----- Item Template Models -----
@@ -193,6 +257,17 @@ class ItemTemplateListItem(BaseModel):
 class ItemTemplateDetail(ItemTemplateListItem):
     description: Optional[str] = None
     effects: Dict[str, Any] = {}
+    # P10-C Story Editor authoring fields
+    stackable_flag: Optional[bool] = None
+    durability_max: Optional[int] = None
+    equip_slot: Optional[str] = None
+    stat_modifiers_json: Optional[Dict[str, Any]] = None
+    use_effects_json: Optional[Dict[str, Any]] = None
+    ownership_rules_json: Optional[Dict[str, Any]] = None
+    visibility_rules_json: Optional[Dict[str, Any]] = None
+    price_json: Optional[Dict[str, Any]] = None
+    crafting_json: Optional[Dict[str, Any]] = None
+    lore_text: Optional[str] = None
 
 
 class ItemTemplateUpdateRequest(BaseModel):
@@ -201,6 +276,17 @@ class ItemTemplateUpdateRequest(BaseModel):
     rarity: Optional[str] = None
     description: Optional[str] = None
     effects: Optional[Dict[str, Any]] = None
+    # P10-C Story Editor authoring fields
+    stackable_flag: Optional[bool] = None
+    durability_max: Optional[int] = None
+    equip_slot: Optional[str] = None
+    stat_modifiers_json: Optional[Dict[str, Any]] = None
+    use_effects_json: Optional[Dict[str, Any]] = None
+    ownership_rules_json: Optional[Dict[str, Any]] = None
+    visibility_rules_json: Optional[Dict[str, Any]] = None
+    price_json: Optional[Dict[str, Any]] = None
+    crafting_json: Optional[Dict[str, Any]] = None
+    lore_text: Optional[str] = None
 
 
 # ----- Quest Template Models -----
@@ -220,6 +306,15 @@ class QuestTemplateListItem(BaseModel):
 
 class QuestTemplateDetail(QuestTemplateListItem):
     summary: Optional[str] = None
+    # P10-C Story Editor authoring fields
+    trigger_conditions_json: Optional[Dict[str, Any]] = None
+    availability_conditions_json: Optional[Dict[str, Any]] = None
+    fail_conditions_json: Optional[Dict[str, Any]] = None
+    rewards_json: Optional[Dict[str, Any]] = None
+    branching_json: Optional[Dict[str, Any]] = None
+    deadline_json: Optional[Dict[str, Any]] = None
+    repeatable_flag: Optional[bool] = None
+    step_conditions_json: Optional[Dict[str, Any]] = None
 
 
 class QuestTemplateUpdateRequest(BaseModel):
@@ -227,6 +322,15 @@ class QuestTemplateUpdateRequest(BaseModel):
     quest_type: Optional[str] = None
     summary: Optional[str] = None
     visibility: Optional[str] = None
+    # P10-C Story Editor authoring fields
+    trigger_conditions_json: Optional[Dict[str, Any]] = None
+    availability_conditions_json: Optional[Dict[str, Any]] = None
+    fail_conditions_json: Optional[Dict[str, Any]] = None
+    rewards_json: Optional[Dict[str, Any]] = None
+    branching_json: Optional[Dict[str, Any]] = None
+    deadline_json: Optional[Dict[str, Any]] = None
+    repeatable_flag: Optional[bool] = None
+    step_conditions_json: Optional[Dict[str, Any]] = None
 
 
 # ----- Event Template Models -----
@@ -246,6 +350,9 @@ class EventTemplateListItem(BaseModel):
 class EventTemplateDetail(EventTemplateListItem):
     trigger_conditions: Dict[str, Any] = {}
     effects: Dict[str, Any] = {}
+    # P10-C Story Editor authoring fields
+    npc_memory_write_policy_json: Optional[Dict[str, Any]] = None
+    reveal_rules_json: Optional[Dict[str, Any]] = None
 
 
 class EventTemplateUpdateRequest(BaseModel):
@@ -253,6 +360,9 @@ class EventTemplateUpdateRequest(BaseModel):
     event_type: Optional[str] = None
     trigger_conditions: Optional[Dict[str, Any]] = None
     effects: Optional[Dict[str, Any]] = None
+    # P10-C Story Editor authoring fields
+    npc_memory_write_policy_json: Optional[Dict[str, Any]] = None
+    reveal_rules_json: Optional[Dict[str, Any]] = None
 
 
 # ----- Prompt Template Models -----
@@ -271,12 +381,18 @@ class PromptTemplateListItem(BaseModel):
 
 class PromptTemplateDetail(PromptTemplateListItem):
     content: str
+    # P10-C Story Editor authoring fields
+    editor_notes: Optional[str] = None
+    variable_schema_json: Optional[Dict[str, Any]] = None
 
 
 class PromptTemplateUpdateRequest(BaseModel):
     content: Optional[str] = None
     version: Optional[str] = None
     enabled_flag: Optional[bool] = None
+    # P10-C Story Editor authoring fields
+    editor_notes: Optional[str] = None
+    variable_schema_json: Optional[Dict[str, Any]] = None
 
 
 # =============================================================================

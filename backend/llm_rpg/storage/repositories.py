@@ -48,6 +48,9 @@ from .models import (
     AssetGenerationJobModel,
     AssetUsageLogModel,
     AssetRateLimitEventModel,
+    StoryPackageVersionModel,
+    PlaythroughInstanceModel,
+    InstanceSnapshotModel,
 )
 
 T = TypeVar("T")
@@ -986,10 +989,24 @@ class NPCMemoryScopeRepository(BaseRepository):
             )
         ).first()
 
+    def get_by_session_and_npc_template(self, session_id: str, npc_template_id: str) -> Optional[NPCMemoryScopeModel]:
+        return self.db.query(NPCMemoryScopeModel).filter(
+            and_(
+                NPCMemoryScopeModel.session_id == session_id,
+                NPCMemoryScopeModel.npc_template_id == npc_template_id
+            )
+        ).first()
+
     def create_or_update(self, data: Dict[str, Any]) -> NPCMemoryScopeModel:
         existing = self.get_by_session_and_npc(data["session_id"], data["npc_id"])
         if existing:
             return self.update(existing.id, data)
+        return self.create(data)
+
+    def idempotent_create(self, data: Dict[str, Any]) -> NPCMemoryScopeModel:
+        existing = self.get_by_session_and_npc(data["session_id"], data["npc_id"])
+        if existing:
+            return existing
         return self.create(data)
 
 
@@ -1053,6 +1070,35 @@ class NPCPrivateMemoryRepository(BaseRepository):
                 NPCPrivateMemoryModel.npc_id == npc_id
             )
         ).order_by(desc(NPCPrivateMemoryModel.created_turn)).limit(limit).all()
+
+    def get_active_memories(self, session_id: str, npc_id: str) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_id == npc_id,
+                or_(
+                    NPCPrivateMemoryModel.status == "active",
+                    NPCPrivateMemoryModel.status.is_(None),
+                ),
+            )
+        ).order_by(NPCPrivateMemoryModel.created_turn).all()
+
+    def has_seed_memories(self, session_id: str, npc_id: str) -> bool:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_id == npc_id,
+                NPCPrivateMemoryModel.memory_kind == "seed",
+            )
+        ).first() is not None
+
+    def get_by_npc_template(self, session_id: str, npc_template_id: str) -> List[NPCPrivateMemoryModel]:
+        return self.db.query(NPCPrivateMemoryModel).filter(
+            and_(
+                NPCPrivateMemoryModel.session_id == session_id,
+                NPCPrivateMemoryModel.npc_template_id == npc_template_id,
+            )
+        ).order_by(NPCPrivateMemoryModel.created_turn).all()
 
     def update_recall(self, memory_id: str, current_turn: int) -> Optional[NPCPrivateMemoryModel]:
         memory = self.get_by_id(memory_id)
@@ -1738,6 +1784,121 @@ class AssetRateLimitEventRepository(BaseRepository):
             .filter(AssetRateLimitEventModel.session_id == session_id)
             .order_by(desc(AssetRateLimitEventModel.created_at))
             .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+
+class StoryPackageVersionRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, StoryPackageVersionModel)
+
+    def get_latest_published(self, story_package_id: str) -> Optional[StoryPackageVersionModel]:
+        return (
+            self.db.query(StoryPackageVersionModel)
+            .filter(
+                and_(
+                    StoryPackageVersionModel.story_package_id == story_package_id,
+                    StoryPackageVersionModel.status == "published",
+                )
+            )
+            .order_by(desc(StoryPackageVersionModel.published_at))
+            .first()
+        )
+
+    def get_by_story_package_and_version(
+        self, story_package_id: str, version: str
+    ) -> Optional[StoryPackageVersionModel]:
+        return (
+            self.db.query(StoryPackageVersionModel)
+            .filter(
+                and_(
+                    StoryPackageVersionModel.story_package_id == story_package_id,
+                    StoryPackageVersionModel.version == version,
+                )
+            )
+            .first()
+        )
+
+    def list_by_story_package(self, story_package_id: str) -> List[StoryPackageVersionModel]:
+        return (
+            self.db.query(StoryPackageVersionModel)
+            .filter(StoryPackageVersionModel.story_package_id == story_package_id)
+            .order_by(desc(StoryPackageVersionModel.created_at))
+            .all()
+        )
+
+
+class PlaythroughInstanceRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, PlaythroughInstanceModel)
+
+    def get_by_root_session(self, session_id: str) -> Optional[PlaythroughInstanceModel]:
+        return (
+            self.db.query(PlaythroughInstanceModel)
+            .filter(PlaythroughInstanceModel.root_session_id == session_id)
+            .first()
+        )
+
+    def list_by_user(self, user_id: str) -> List[PlaythroughInstanceModel]:
+        return (
+            self.db.query(PlaythroughInstanceModel)
+            .filter(PlaythroughInstanceModel.user_id == user_id)
+            .order_by(desc(PlaythroughInstanceModel.updated_at))
+            .all()
+        )
+
+    def list_by_world(self, world_id: str) -> List[PlaythroughInstanceModel]:
+        return (
+            self.db.query(PlaythroughInstanceModel)
+            .filter(PlaythroughInstanceModel.world_id == world_id)
+            .order_by(desc(PlaythroughInstanceModel.updated_at))
+            .all()
+        )
+
+
+class InstanceSnapshotRepository(BaseRepository):
+    def __init__(self, db: Session):
+        super().__init__(db, InstanceSnapshotModel)
+
+    def get_latest_snapshot(self, playthrough_instance_id: str) -> Optional[InstanceSnapshotModel]:
+        return (
+            self.db.query(InstanceSnapshotModel)
+            .filter(InstanceSnapshotModel.playthrough_instance_id == playthrough_instance_id)
+            .order_by(desc(InstanceSnapshotModel.turn_no), desc(InstanceSnapshotModel.created_at))
+            .first()
+        )
+
+    def get_baseline_snapshot(self, playthrough_instance_id: str) -> Optional[InstanceSnapshotModel]:
+        return (
+            self.db.query(InstanceSnapshotModel)
+            .filter(
+                and_(
+                    InstanceSnapshotModel.playthrough_instance_id == playthrough_instance_id,
+                    InstanceSnapshotModel.snapshot_kind == "baseline",
+                )
+            )
+            .first()
+        )
+
+    def list_by_instance(
+        self, playthrough_instance_id: str, limit: int = 50
+    ) -> List[InstanceSnapshotModel]:
+        return (
+            self.db.query(InstanceSnapshotModel)
+            .filter(InstanceSnapshotModel.playthrough_instance_id == playthrough_instance_id)
+            .order_by(desc(InstanceSnapshotModel.turn_no), desc(InstanceSnapshotModel.created_at))
+            .limit(limit)
+            .all()
+        )
+
+    def list_by_session(
+        self, session_id: str, limit: int = 50
+    ) -> List[InstanceSnapshotModel]:
+        return (
+            self.db.query(InstanceSnapshotModel)
+            .filter(InstanceSnapshotModel.session_id == session_id)
+            .order_by(desc(InstanceSnapshotModel.created_at))
             .limit(limit)
             .all()
         )

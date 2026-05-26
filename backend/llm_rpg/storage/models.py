@@ -24,9 +24,16 @@ class WorldModel(Base):
     lore_summary = Column(Text, nullable=True)
     status = Column(String, default="active")
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Phase 3: Story Editor metadata fields (nullable, additive)
+    story_package_version_id = Column(String, ForeignKey("story_package_versions.id"), nullable=True)
+    world_book_json = Column(JSON, nullable=True)
+    calendar_json = Column(JSON, nullable=True)
+    ruleset_json = Column(JSON, nullable=True)
+    starter_location_id = Column(String, ForeignKey("locations.id"), nullable=True)
+    editor_metadata_json = Column(JSON, nullable=True)
 
     chapters = relationship("ChapterModel", back_populates="world")
-    locations = relationship("LocationModel", back_populates="world")
+    locations = relationship("LocationModel", back_populates="world", foreign_keys="LocationModel.world_id")
     npc_templates = relationship("NPCTemplateModel", back_populates="world")
     item_templates = relationship("ItemTemplateModel", back_populates="world")
     quest_templates = relationship("QuestTemplateModel", back_populates="world")
@@ -45,6 +52,14 @@ class ChapterModel(Base):
     summary = Column(Text, nullable=True)
     start_conditions = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Story Editor authoring fields (nullable, additive)
+    entry_conditions_json = Column(JSON, nullable=True)
+    exit_conditions_json = Column(JSON, nullable=True)
+    end_conditions_json = Column(JSON, nullable=True)
+    timeline_json = Column(JSON, nullable=True)
+    tags_json = Column(JSON, nullable=True)
+    schema_json = Column(JSON, nullable=True)
+    estimated_playtime_minutes = Column(Integer, nullable=True)
 
     world = relationship("WorldModel", back_populates="chapters")
     locations = relationship("LocationModel", back_populates="chapter")
@@ -64,8 +79,14 @@ class LocationModel(Base):
     description = Column(Text, nullable=True)
     access_rules = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Phase 3: Story Editor metadata fields (nullable, additive)
+    parent_location_id = Column(String, ForeignKey("locations.id"), nullable=True)
+    location_type = Column(String, nullable=True)
+    environment_json = Column(JSON, nullable=True)
+    discovery_rules_json = Column(JSON, nullable=True)
+    scene_hooks_json = Column(JSON, nullable=True)
 
-    world = relationship("WorldModel", back_populates="locations")
+    world = relationship("WorldModel", back_populates="locations", foreign_keys=[world_id])
     chapter = relationship("ChapterModel", back_populates="locations")
 
 
@@ -84,6 +105,21 @@ class NPCTemplateModel(Base):
     appearance = Column(Text, nullable=True)
     goals = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Phase 1: Memory-first foundation columns (nullable, default-safe)
+    is_major_npc = Column(Boolean, nullable=True, default=False)
+    memory_profile_json = Column(JSON, nullable=True)
+    seed_memory_bundle_json = Column(JSON, nullable=True)
+    # P10-C Phase 3: Story Editor metadata fields (nullable, additive)
+    appearance_json = Column(JSON, nullable=True)
+    body_features_json = Column(JSON, nullable=True)
+    baseline_stats_json = Column(JSON, nullable=True)
+    speech_profile_json = Column(JSON, nullable=True)
+    personality_traits_json = Column(JSON, nullable=True)
+    background_bio = Column(Text, nullable=True)
+    decision_profile_json = Column(JSON, nullable=True)
+    initial_location_id = Column(String, ForeignKey("locations.id"), nullable=True)
+    faction_id = Column(String, ForeignKey("factions.id"), nullable=True)
+    portrait_asset_id = Column(String, nullable=True)
 
     world = relationship("WorldModel", back_populates="npc_templates")
     session_npc_states = relationship("SessionNPCStateModel", back_populates="npc_template")
@@ -101,6 +137,17 @@ class ItemTemplateModel(Base):
     effects_json = Column(JSON, default=dict)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Story Editor authoring fields (nullable, additive)
+    stackable_flag = Column(Boolean, nullable=True)
+    durability_max = Column(Integer, nullable=True)
+    equip_slot = Column(String, nullable=True)
+    stat_modifiers_json = Column(JSON, nullable=True)
+    use_effects_json = Column(JSON, nullable=True)
+    ownership_rules_json = Column(JSON, nullable=True)
+    visibility_rules_json = Column(JSON, nullable=True)
+    price_json = Column(JSON, nullable=True)
+    crafting_json = Column(JSON, nullable=True)
+    lore_text = Column(Text, nullable=True)
 
     world = relationship("WorldModel", back_populates="item_templates")
     inventory_items = relationship("SessionInventoryItemModel", back_populates="item_template")
@@ -117,6 +164,15 @@ class QuestTemplateModel(Base):
     summary = Column(Text, nullable=True)
     visibility = Column(String, default="hidden")
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Story Editor authoring fields (nullable, additive)
+    trigger_conditions_json = Column(JSON, nullable=True)
+    availability_conditions_json = Column(JSON, nullable=True)
+    fail_conditions_json = Column(JSON, nullable=True)
+    rewards_json = Column(JSON, nullable=True)
+    branching_json = Column(JSON, nullable=True)
+    deadline_json = Column(JSON, nullable=True)
+    repeatable_flag = Column(Boolean, nullable=True)
+    step_conditions_json = Column(JSON, nullable=True)
 
     world = relationship("WorldModel", back_populates="quest_templates")
     quest_steps = relationship("QuestStepModel", back_populates="quest_template")
@@ -150,6 +206,9 @@ class EventTemplateModel(Base):
     trigger_conditions = Column(JSON, default=dict)
     effects = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Phase 3: Story Editor metadata fields (nullable, additive)
+    npc_memory_write_policy_json = Column(JSON, nullable=True)
+    reveal_rules_json = Column(JSON, nullable=True)
 
     scheduled_events = relationship("ScheduledEventModel", back_populates="event_template")
 
@@ -164,6 +223,9 @@ class PromptTemplateModel(Base):
     content = Column(Text, nullable=False)
     enabled_flag = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now)
+    # P10-C Phase 3: Story Editor metadata fields (nullable, additive)
+    editor_notes = Column(Text, nullable=True)
+    variable_schema_json = Column(JSON, nullable=True)
 
     world = relationship("WorldModel", back_populates="prompt_templates")
     llm_stage_results = relationship("LLMStageResultModel", back_populates="prompt_template")
@@ -254,6 +316,136 @@ class SessionModel(Base):
     npc_private_memories = relationship("NPCPrivateMemoryModel", back_populates="session")
     npc_secrets = relationship("NPCSecretModel", back_populates="session")
     npc_relationship_memories = relationship("NPCRelationshipMemoryModel", back_populates="session")
+    # P10-C Phase 1: lineage/owner metadata (nullable, additive)
+    playthrough_instance_id = Column(
+        String,
+        ForeignKey(
+            "playthrough_instances.id",
+            use_alter=True,
+            name="fk_sessions_playthrough_instance_id",
+        ),
+        nullable=True,
+    )
+    story_package_version_id = Column(String, ForeignKey("story_package_versions.id"), nullable=True)
+    entry_snapshot_id = Column(
+        String,
+        ForeignKey(
+            "instance_snapshots.id",
+            use_alter=True,
+            name="fk_sessions_entry_snapshot_id",
+        ),
+        nullable=True,
+    )
+    resume_snapshot_id = Column(
+        String,
+        ForeignKey(
+            "instance_snapshots.id",
+            use_alter=True,
+            name="fk_sessions_resume_snapshot_id",
+        ),
+        nullable=True,
+    )
+    session_type = Column(String, nullable=True)
+    runtime_status = Column(String, nullable=True)
+
+
+class StoryPackageVersionModel(Base):
+    __tablename__ = "story_package_versions"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    story_package_id = Column(String, nullable=False)
+    version = Column(String, nullable=False)
+    status = Column(String, default="draft")
+    world_id = Column(String, ForeignKey("worlds.id"), nullable=True)
+    manifest_json = Column(JSON, default=dict)
+    editor_schema_version = Column(String, nullable=True)
+    source_hash = Column(String, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint("story_package_id", "version"),
+        Index("idx_spv_story_package_id", "story_package_id"),
+        Index("idx_spv_status", "status"),
+    )
+
+
+class PlaythroughInstanceModel(Base):
+    __tablename__ = "playthrough_instances"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    story_package_version_id = Column(String, ForeignKey("story_package_versions.id"), nullable=True)
+    world_id = Column(String, ForeignKey("worlds.id"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    root_session_id = Column(
+        String,
+        ForeignKey(
+            "sessions.id",
+            use_alter=True,
+            name="fk_playthrough_instances_root_session_id",
+        ),
+        nullable=True,
+    )
+    baseline_snapshot_id = Column(
+        String,
+        ForeignKey(
+            "instance_snapshots.id",
+            use_alter=True,
+            name="fk_playthrough_instances_baseline_snapshot_id",
+        ),
+        nullable=True,
+    )
+    current_snapshot_id = Column(
+        String,
+        ForeignKey(
+            "instance_snapshots.id",
+            use_alter=True,
+            name="fk_playthrough_instances_current_snapshot_id",
+        ),
+        nullable=True,
+    )
+    current_turn_no = Column(Integer, default=0)
+    instance_status = Column(String, default="active")
+    config_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        Index("idx_pi_world_id", "world_id"),
+        Index("idx_pi_user_id", "user_id"),
+        Index("idx_pi_root_session_id", "root_session_id"),
+        Index("idx_pi_status", "instance_status"),
+    )
+
+
+class InstanceSnapshotModel(Base):
+    __tablename__ = "instance_snapshots"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    playthrough_instance_id = Column(String, ForeignKey("playthrough_instances.id"), nullable=False)
+    session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
+    snapshot_kind = Column(String, nullable=False)
+    turn_no = Column(Integer, default=0)
+    source_transaction_id = Column(
+        String,
+        ForeignKey(
+            "turn_transactions.id",
+            use_alter=True,
+            name="fk_instance_snapshots_source_transaction_id",
+        ),
+        nullable=True,
+    )
+    snapshot_json = Column(JSON, default=dict)
+    checksum = Column(String, nullable=True)
+    parent_snapshot_id = Column(String, ForeignKey("instance_snapshots.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("idx_is_playthrough_instance_id", "playthrough_instance_id"),
+        Index("idx_is_session_id", "session_id"),
+        Index("idx_is_snapshot_kind", "playthrough_instance_id", "snapshot_kind"),
+    )
 
 
 class SessionStateModel(Base):
@@ -745,12 +937,21 @@ class NPCMemoryScopeModel(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
     npc_id = Column(String, nullable=False)
+    npc_template_id = Column(String, ForeignKey("npc_templates.id"), nullable=True)
     profile_json = Column(JSON, nullable=True)
     forget_curve_json = Column(JSON, nullable=True)
+    # P10-C Phase 4: Memory-first retrieval bookkeeping (nullable, additive)
+    latest_summary_id = Column(String, nullable=True)
+    active_digest_text = Column(Text, nullable=True)
+    memory_count = Column(Integer, nullable=True, default=0)
+    last_compacted_turn = Column(Integer, nullable=True, default=0)
+    retrieval_profile_json = Column(JSON, nullable=True)
+    prompt_budget_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
     session = relationship("SessionModel", back_populates="npc_memory_scopes")
+    npc_template = relationship("NPCTemplateModel")
 
     __table_args__ = (
         UniqueConstraint("session_id", "npc_id"),
@@ -789,6 +990,8 @@ class NPCPrivateMemoryModel(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
     npc_id = Column(String, nullable=False)
+    npc_template_id = Column(String, ForeignKey("npc_templates.id"), nullable=True)
+    # Legacy fields (preserved for backward compatibility)
     memory_type = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     source_event_ids_json = Column(JSON, nullable=True)
@@ -801,13 +1004,39 @@ class NPCPrivateMemoryModel(Base):
     last_accessed_turn = Column(Integer, nullable=False)
     recall_count = Column(Integer, nullable=False, default=0)
     embedding = Column(JSON, nullable=True)
+    # P10-C Phase 4: First-person / source-bound fields (nullable, additive)
+    memory_kind = Column(String, nullable=True)
+    memory_text = Column(Text, nullable=True)
+    short_summary = Column(Text, nullable=True)
+    knowledge_source = Column(String, nullable=True)
+    source_id = Column(String, nullable=True)
+    source_ref = Column(String, nullable=True)
+    source_turn_no = Column(Integer, nullable=True)
+    salience = Column(Float, nullable=True)
+    visibility = Column(String, nullable=True)
+    status = Column(String, nullable=True, default="active")
+    tags_json = Column(JSON, nullable=True)
+    entity_refs_json = Column(JSON, nullable=True)
+    location_id = Column(String, ForeignKey("locations.id"), nullable=True)
+    world_time_text = Column(String, nullable=True)
+    world_time_json = Column(JSON, nullable=True)
+    checksum = Column(String, nullable=True)
+    superseded_by = Column(String, nullable=True)
+    contradicts_memory_ids_json = Column(JSON, nullable=True)
+    recall_policy_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=True, default=datetime.now)
+    updated_at = Column(DateTime, nullable=True, default=datetime.now, onupdate=datetime.now)
 
     session = relationship("SessionModel", back_populates="npc_private_memories")
+    npc_template = relationship("NPCTemplateModel")
+    location = relationship("LocationModel")
 
     __table_args__ = (
         Index("idx_npc_private_memories_session", "session_id"),
         Index("idx_npc_private_memories_npc", "session_id", "npc_id"),
         Index("idx_npc_private_memories_type", "session_id", "memory_type"),
+        Index("idx_npc_private_memories_kind_status", "session_id", "npc_id", "memory_kind", "status"),
+        Index("idx_npc_private_memories_source_turn", "session_id", "npc_id", "source_turn_no"),
     )
 
 

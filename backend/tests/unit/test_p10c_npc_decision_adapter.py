@@ -818,3 +818,222 @@ class TestPostCommitRecallStatsUpdate:
         db_session.refresh(m)
         assert m.recall_count == 1
         assert m.last_accessed_turn == 7
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# C3: used_memory_ids enforcement for major NPC non-trivial actions
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestMajorNPCNonTrivialActionEnforcement:
+    @pytest.mark.parametrize("action_type", [
+        "talk", "dialogue", "attack", "reveal", "cooperate", "refuse", "move", "interact",
+    ])
+    def test_major_npc_non_trivial_action_requires_memory_reference(
+        self, db_session, monkeypatch, action_type,
+    ):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            action_type=action_type,
+            summary=f"NPC does {action_type}",
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+            is_major_npc=True,
+        )
+        assert result.proposal.action_type == "observe"
+        assert "谨慎观察" in result.proposal.summary
+        assert result.proposal.decision_audit is not None
+        assert result.proposal.decision_audit.get("fallback_used") is True
+        assert result.proposal.decision_audit.get("fallback_reason") == "no_valid_memories_for_non_trivial_action"
+
+    @pytest.mark.parametrize("action_type", ["idle", "observe"])
+    def test_major_npc_idle_observe_allows_empty_memory_ids(
+        self, db_session, monkeypatch, action_type,
+    ):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            action_type=action_type,
+            summary=f"NPC does {action_type}",
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+            is_major_npc=True,
+        )
+        assert result.proposal.action_type == action_type
+        assert result.proposal.decision_audit is None
+
+    def test_major_npc_non_trivial_action_with_valid_memory_ids_passes(
+        self, db_session, monkeypatch,
+    ):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        own_mem = _add_private_memory(
+            db_session, session.id, major_npcs[0].id,
+            content="I remember the player", status="active", visibility="npc_private",
+        )
+
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            action_type="talk",
+            summary="NPC talks to player",
+            used_memory_ids=[own_mem.id],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+            is_major_npc=True,
+        )
+        assert result.proposal.action_type == "talk"
+        assert own_mem.id in result.valid_used_memory_ids
+        assert result.proposal.decision_audit is None
+
+    def test_non_major_npc_non_trivial_action_allows_empty_memory_ids(
+        self, db_session, monkeypatch,
+    ):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, _, minor_npcs = _make_world_session_npcs(
+            db_session, major_count=0, minor_count=1,
+        )
+
+        proposal = _make_proposal(
+            npc_id=minor_npcs[0].id,
+            action_type="talk",
+            summary="Minor NPC talks",
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, minor_npcs[0].id,
+            is_major_npc=False,
+        )
+        assert result.proposal.action_type == "talk"
+
+    def test_major_npc_rejects_cross_npc_memory_id(self, db_session, monkeypatch):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session, major_count=2)
+
+        other_mem = _add_private_memory(
+            db_session, session.id, major_npcs[1].id,
+            content="Other NPC memory", status="active", visibility="npc_private",
+        )
+
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            action_type="talk",
+            summary="NPC talks",
+            used_memory_ids=[other_mem.id],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+            is_major_npc=True,
+        )
+        assert result.proposal.action_type == "observe"
+        assert other_mem.id in result.invalid_used_memory_ids
+        assert len(result.valid_used_memory_ids) == 0
+
+    def test_major_npc_rejects_unavailable_memory_id(self, db_session, monkeypatch):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        own_mem = _add_private_memory(
+            db_session, session.id, major_npcs[0].id,
+            content="Own memory but unavailable", status="active", visibility="npc_private",
+        )
+
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            action_type="talk",
+            summary="NPC talks",
+            used_memory_ids=[own_mem.id],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+            available_memory_ids=["some-other-id"],
+            is_major_npc=True,
+        )
+        assert result.proposal.action_type == "observe"
+        assert own_mem.id in result.invalid_used_memory_ids
+        assert len(result.valid_used_memory_ids) == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# C2: Prompt memory-first rules and output fields
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestPromptMemoryFirstRules:
+    def test_prompt_includes_memory_first_rules(self):
+        from llm_rpg.llm.proposal_pipeline import ProposalPipeline
+        from llm_rpg.llm.proposal_pipeline import LLMMessage
+
+        pipeline = ProposalPipeline.__new__(ProposalPipeline)
+
+        import asyncio
+        messages = asyncio.get_event_loop().run_until_complete(
+            self._capture_messages(pipeline)
+        )
+
+        user_content = messages[-1].content
+        system_content = messages[0].content
+
+        assert "只能基于NPC当前可见事实和retrieved_private_memories做出决策" in system_content
+        assert "如果没有相关记忆，不得虚构经历" in system_content
+        assert "major NPC的非idle/observe行为必须引用至少一个used_memory_ids" in system_content
+        assert "new_memory_candidates必须使用第一人称视角" in system_content
+        assert "summary和visible_motivation不得泄露玩家不可见秘密" in system_content
+
+    def test_prompt_includes_used_memory_ids_output_field(self):
+        from llm_rpg.llm.proposal_pipeline import ProposalPipeline
+
+        pipeline = ProposalPipeline.__new__(ProposalPipeline)
+
+        import asyncio
+        messages = asyncio.get_event_loop().run_until_complete(
+            self._capture_messages(pipeline)
+        )
+
+        user_content = messages[-1].content
+
+        assert "used_memory_ids" in user_content
+        assert "new_memory_candidates" in user_content
+        assert "decision_audit" in user_content
+        assert "reasoning_basis" in user_content
+        assert "memory_count_used" in user_content
+        assert "fallback_used" in user_content
+        assert "memory_text" in user_content
+        assert "knowledge_source" in user_content
+
+    async def _capture_messages(self, pipeline):
+        captured = []
+
+        original_generate_proposal = pipeline.generate_proposal
+
+        async def fake_generate_proposal(**kwargs):
+            captured.extend(kwargs["prompt_messages"])
+            from llm_rpg.models.proposals import (
+                NPCActionProposal,
+                ProposalAuditMetadata,
+                ProposalType,
+                ProposalSource,
+            )
+            return NPCActionProposal(
+                npc_id="test",
+                action_type="idle",
+                summary="test",
+                audit=ProposalAuditMetadata(
+                    proposal_type=ProposalType.NPC_ACTION,
+                    source_engine=ProposalSource.NPC_ENGINE,
+                ),
+            )
+
+        pipeline.generate_proposal = fake_generate_proposal
+        await pipeline.generate_npc_action(
+            npc_id="test-npc",
+            npc_context={"profile": {"name": "Test"}},
+        )
+        return captured

@@ -280,28 +280,35 @@ test-p10b:
 
 # === P10-C: Story Editor & NPC Memory-First ===
 
+# Feature flags required for P10-C Memory-first & Story Instance behavior.
+# Each test target activates the relevant flags explicitly so that
+# the P10-C gate passes even with the flags defaulting to false in production.
+P10C_PACKAGE_FLAGS = STORY_PACKAGE_INSTANCE_ENABLED=true STORY_EDITOR_ENABLED=true
+P10C_MEMORY_FLAGS  = NPC_MEMORY_FIRST_ENABLED=true INSTANCE_SNAPSHOT_ENABLED=true
+P10C_FLAGS         = $(P10C_PACKAGE_FLAGS) $(P10C_MEMORY_FLAGS)
+
 test-p10c-npc-memory-unit:
-	cd backend && APP_ENV=testing python3 -m pytest \
+	cd backend && APP_ENV=testing $(P10C_MEMORY_FLAGS) python3 -m pytest \
 		tests/unit/test_p10c_npc_memory_schema.py \
 		tests/unit/test_p10c_npc_memory_retrieval.py \
 		tests/unit/test_p10c_npc_decision_adapter.py \
 		-q --tb=short
 
 test-p10c-story-editor-unit:
-	cd backend && APP_ENV=testing python3 -m pytest \
+	cd backend && APP_ENV=testing $(P10C_FLAGS) python3 -m pytest \
 		tests/unit/test_p10c_story_editor_fields.py \
 		tests/unit/test_p10c_story_editor_gaps.py \
 		tests/unit/test_p10c_schema_foundation.py \
 		-q --tb=short
 
 test-p10c-content-pack-unit:
-	cd backend && APP_ENV=testing python3 -m pytest \
+	cd backend && APP_ENV=testing $(P10C_PACKAGE_FLAGS) python3 -m pytest \
 		tests/unit/test_p10c_content_pack_version_manifest.py \
 		tests/unit/test_p10c_hallucination_leak_hardening.py \
 		-q --tb=short
 
 test-p10c-integration:
-	cd backend && APP_ENV=testing python3 -m pytest \
+	cd backend && APP_ENV=testing $(P10C_FLAGS) python3 -m pytest \
 		tests/integration/test_p10c_npc_memory_integration.py \
 		tests/integration/test_p10c_content_pack_publish_bridge.py \
 		tests/integration/test_p10c_story_package_instance_api.py \

@@ -468,3 +468,7 @@ jobs:
           ASSET_PROVIDER_AUDIO: audio_placeholder
           ASSET_PROVIDER_BGM: audio_placeholder
           ASSET_PROVIDER_SFX: audio_placeholder
+          NPC_MEMORY_FIRST_ENABLED: true
+          INSTANCE_SNAPSHOT_ENABLED: true
+          STORY_PACKAGE_INSTANCE_ENABLED: true
+          STORY_EDITOR_ENABLED: true

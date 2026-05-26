@@ -41,6 +41,8 @@ from llm_rpg.storage.models import (
     LocationModel,
     ItemTemplateModel,
     QuestTemplateModel,
+    NPCMemoryScopeModel,
+    NPCPrivateMemoryModel,
     generate_uuid,
 )
 from llm_rpg.storage.repositories import (
@@ -59,6 +61,8 @@ from llm_rpg.storage.repositories import (
     LocationRepository,
     ItemTemplateRepository,
     QuestTemplateRepository,
+    NPCMemoryScopeRepository,
+    NPCPrivateMemoryRepository,
 )
 from llm_rpg.core.instance_snapshot_service import (
     build_session_snapshot_json,
@@ -68,6 +72,7 @@ from llm_rpg.core.instance_snapshot_service import (
     apply_snapshot,
     restore_snapshot,
     SnapshotApplyError,
+    _SECRET_KEY_PATTERNS,
 )
 from llm_rpg.core.feature_flags import instance_snapshot_enabled
 
@@ -897,3 +902,197 @@ class TestComputeChecksum:
         p1 = {"npc_states": [{"npc_template_id": "x", "trust_score": 50}]}
         p2 = {"npc_states": [{"npc_template_id": "x", "trust_score": 50, "short_memory_summary": "memory"}]}
         assert compute_checksum(p1) != compute_checksum(p2)
+
+
+def _seed_npc_memory_scope(db: DBSession, session_id: str, npc_template_id: str, npc_id: str):
+    return NPCMemoryScopeRepository(db).create({
+        "session_id": session_id,
+        "npc_id": npc_id,
+        "npc_template_id": npc_template_id,
+        "profile_json": {"retention": "high"},
+        "forget_curve_json": {"decay_rate": 0.1},
+        "memory_count": 3,
+    })
+
+
+def _seed_npc_private_memory(db: DBSession, session_id: str, npc_template_id: str, npc_id: str):
+    return NPCPrivateMemoryRepository(db).create({
+        "session_id": session_id,
+        "npc_id": npc_id,
+        "npc_template_id": npc_template_id,
+        "memory_text": "Saw the player steal the artifact",
+        "content": "Saw the player steal the artifact",
+        "memory_type": "episodic",
+        "knowledge_source": "direct_observation",
+        "source_ref": "event-001",
+        "source_turn_no": 5,
+        "salience": 0.9,
+        "confidence": 0.8,
+        "tags_json": ["theft", "player"],
+        "memory_kind": "episodic",
+        "importance": 0.9,
+        "emotional_weight": 0.5,
+        "current_strength": 1.0,
+        "created_turn": 5,
+        "last_accessed_turn": 5,
+    })
+
+
+class TestNPCMemorySnapshot:
+    def test_snapshot_includes_npc_private_memories(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        npc_id = f"npc-{setup['npc_template'].id[:8]}"
+        _seed_npc_private_memory(db_session, setup["session"].id, setup["npc_template"].id, npc_id)
+
+        snapshot_json = build_session_snapshot_json(db_session, setup["session"].id)
+
+        assert "npc_private_memories" in snapshot_json
+        assert len(snapshot_json["npc_private_memories"]) == 1
+        mem = snapshot_json["npc_private_memories"][0]
+        assert mem["npc_id"] == npc_id
+        assert mem["memory_text"] == "Saw the player steal the artifact"
+        assert mem["memory_type"] == "episodic"
+        assert mem["knowledge_source"] == "direct_observation"
+        assert mem["source_ref"] == "event-001"
+        assert mem["source_turn_no"] == 5
+        assert mem["salience"] == 0.9
+        assert mem["confidence"] == 0.8
+        assert mem["tags_json"] == ["theft", "player"]
+        assert mem["memory_kind"] == "episodic"
+
+    def test_snapshot_includes_npc_memory_scopes(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        npc_id = f"npc-{setup['npc_template'].id[:8]}"
+        _seed_npc_memory_scope(db_session, setup["session"].id, setup["npc_template"].id, npc_id)
+
+        snapshot_json = build_session_snapshot_json(db_session, setup["session"].id)
+
+        assert "npc_memory_scopes" in snapshot_json
+        assert len(snapshot_json["npc_memory_scopes"]) == 1
+        scope = snapshot_json["npc_memory_scopes"][0]
+        assert scope["npc_id"] == npc_id
+        assert scope["profile_json"] == {"retention": "high"}
+        assert scope["forget_curve_json"] == {"decay_rate": 0.1}
+        assert scope["memory_count"] == 3
+
+    def test_apply_snapshot_restores_npc_private_memories(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        session_id = setup["session"].id
+        npc_id = f"npc-{setup['npc_template'].id[:8]}"
+        _seed_npc_private_memory(db_session, session_id, setup["npc_template"].id, npc_id)
+
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=session_id,
+        )
+
+        mem_repo = NPCPrivateMemoryRepository(db_session)
+        memories_before = mem_repo.get_by_npc_template(session_id, setup["npc_template"].id)
+        assert len(memories_before) == 1
+
+        mem_repo.delete(memories_before[0].id)
+
+        assert len(mem_repo.get_by_npc_template(session_id, setup["npc_template"].id)) == 0
+
+        apply_snapshot(db_session, snap.id)
+
+        memories_after = mem_repo.get_by_npc_template(session_id, setup["npc_template"].id)
+        assert len(memories_after) == 1
+        assert memories_after[0].memory_text == "Saw the player steal the artifact"
+        assert memories_after[0].knowledge_source == "direct_observation"
+        assert memories_after[0].salience == 0.9
+
+    def test_apply_snapshot_does_not_delete_event_logs(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+
+        event_repo = EventLogRepository(db_session)
+        event = event_repo.create({
+            "session_id": setup["session"].id,
+            "turn_no": 1,
+            "event_type": "player_action",
+            "input_text": "探索古墓",
+        })
+        event_id = event.id
+
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=setup["session"].id,
+        )
+
+        apply_snapshot(db_session, snap.id)
+
+        event_after = event_repo.get_by_id(event_id)
+        assert event_after is not None
+        assert event_after.event_type == "player_action"
+        assert event_after.input_text == "探索古墓"
+
+    def test_snapshot_checksum_changes_when_npc_memory_changes(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        session_id = setup["session"].id
+        npc_id = f"npc-{setup['npc_template'].id[:8]}"
+
+        snapshot1 = build_session_snapshot_json(db_session, session_id)
+        checksum1 = compute_checksum(snapshot1)
+
+        _seed_npc_private_memory(db_session, session_id, setup["npc_template"].id, npc_id)
+
+        snapshot2 = build_session_snapshot_json(db_session, session_id)
+        checksum2 = compute_checksum(snapshot2)
+
+        assert checksum1 != checksum2
+
+    def test_snapshot_scrubs_secret_fields_from_memory_payload(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        session_id = setup["session"].id
+        npc_id = f"npc-{setup['npc_template'].id[:8]}"
+
+        scope_repo = NPCMemoryScopeRepository(db_session)
+        scope_repo.create({
+            "session_id": session_id,
+            "npc_id": npc_id,
+            "npc_template_id": setup["npc_template"].id,
+            "profile_json": {"api_key": "sk-secret-key-123", "safe_field": "ok"},
+            "forget_curve_json": {"password": "hunter2", "decay_rate": 0.1},
+            "memory_count": 1,
+        })
+
+        snapshot_json = build_session_snapshot_json(db_session, session_id)
+
+        snapshot_str = str(snapshot_json)
+        for pattern in _SECRET_KEY_PATTERNS:
+            assert pattern not in snapshot_str.lower() or _no_secret_value_present(snapshot_json, pattern), \
+                f"Secret pattern '{pattern}' found in snapshot JSON"
+
+        scopes = snapshot_json.get("npc_memory_scopes", [])
+        if scopes:
+            assert "api_key" not in scopes[0].get("profile_json", {})
+            assert "password" not in scopes[0].get("forget_curve_json", {})
+
+
+def _no_secret_value_present(data, pattern):
+    """Check that while the key pattern might appear, no secret value is stored."""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if pattern in k.lower():
+                return False
+            if not _no_secret_value_present(v, pattern):
+                return False
+    elif isinstance(data, list):
+        for item in data:
+            if not _no_secret_value_present(item, pattern):
+                return False
+    return True

@@ -299,6 +299,7 @@ class TestProposalNormalizationDefaults:
         )
         assert len(result.filtered_candidates) == 1
         assert result.filtered_candidates[0]["memory_text"] == "I decided to help the player"
+        assert result.filtered_candidates[0]["knowledge_source"] == "decision"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -400,7 +401,7 @@ class TestCandidateValidation:
         assert len(result.filtered_candidates) == 0
         assert len(result.dropped_candidates) == 1
 
-    def test_candidate_without_source_type_dropped(self, db_session, monkeypatch):
+    def test_candidate_without_source_type_or_knowledge_source_dropped(self, db_session, monkeypatch):
         monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
         world, session, major_npcs, _ = _make_world_session_npcs(db_session)
 
@@ -413,6 +414,53 @@ class TestCandidateValidation:
         )
         assert len(result.filtered_candidates) == 0
         assert len(result.dropped_candidates) == 1
+
+    def test_candidate_with_knowledge_source_accepted(self, db_session, monkeypatch):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        cand = {"memory_text": "I learned something new", "knowledge_source": "observation"}
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            new_memory_candidates=[cand],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+        )
+        assert len(result.filtered_candidates) == 1
+        assert result.filtered_candidates[0]["knowledge_source"] == "observation"
+        assert len(result.dropped_candidates) == 0
+
+    def test_candidate_with_legacy_source_type_backward_compatible(self, db_session, monkeypatch):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        cand = {"memory_text": "Legacy candidate", "source_type": "decision"}
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            new_memory_candidates=[cand],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+        )
+        assert len(result.filtered_candidates) == 1
+        # Normalizer promotes source_type → knowledge_source
+        assert result.filtered_candidates[0]["knowledge_source"] == "decision"
+
+    def test_knowledge_source_takes_precedence_over_source_type(self, db_session, monkeypatch):
+        monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
+        world, session, major_npcs, _ = _make_world_session_npcs(db_session)
+
+        cand = {"memory_text": "Both fields", "knowledge_source": "observation", "source_type": "decision"}
+        proposal = _make_proposal(
+            npc_id=major_npcs[0].id,
+            new_memory_candidates=[cand],
+        )
+        result = normalize_npc_action_proposal(
+            proposal, db_session, session.id, major_npcs[0].id,
+        )
+        assert len(result.filtered_candidates) == 1
+        assert result.filtered_candidates[0]["knowledge_source"] == "observation"
 
     def test_non_dict_candidate_dropped(self, db_session, monkeypatch):
         monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")

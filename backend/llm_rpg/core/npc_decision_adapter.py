@@ -150,10 +150,12 @@ def normalize_npc_action_proposal(
         if not memory_text or not str(memory_text).strip():
             dropped_cands.append(cand)
             continue
-        source_type = cand.get("source_type")
-        if not source_type or not str(source_type).strip():
+        knowledge_source = cand.get("knowledge_source") or cand.get("source_type")
+        if not knowledge_source or not str(knowledge_source).strip():
             dropped_cands.append(cand)
             continue
+        cand = dict(cand)
+        cand["knowledge_source"] = knowledge_source
         filtered_cands.append(cand)
 
     update_fields: Dict[str, Any] = {

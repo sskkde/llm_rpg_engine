@@ -1715,6 +1715,7 @@ def _execute_npc_stage(
                         npc_template_id=npc_template_id,
                         available_memory_ids=npc_context.get("used_memory_ids"),
                         current_turn=turn_no,
+                        is_major_npc=npc.get("is_major_npc", False),
                     )
                     proposal = normalized.proposal
                 except Exception:

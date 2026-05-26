@@ -38,6 +38,8 @@ from ..storage.models import (
     SessionQuestStateModel,
     SessionInventoryItemModel,
     MemorySummaryModel,
+    NPCMemoryScopeModel,
+    NPCPrivateMemoryModel,
 )
 from ..storage.repositories import (
     InstanceSnapshotRepository,
@@ -49,6 +51,8 @@ from ..storage.repositories import (
     SessionQuestStateRepository,
     SessionInventoryItemRepository,
     MemorySummaryRepository,
+    NPCMemoryScopeRepository,
+    NPCPrivateMemoryRepository,
 )
 
 
@@ -97,7 +101,8 @@ def build_session_snapshot_json(
     Build a snapshot JSON payload for a session's current state.
 
     Captures: session metadata, session_state, player_state, npc_states,
-    quest_states, inventory items, and memory summary counts.
+    quest_states, inventory items, memory summary counts, NPC memory scopes,
+    and NPC private memories.
     All secret-bearing keys are scrubbed.
 
     Args:
@@ -204,6 +209,57 @@ def build_session_snapshot_json(
     memory_repo = MemorySummaryRepository(db)
     memory_summaries = memory_repo.get_by_session(session_id)
     snapshot["memory_summary_count"] = len(memory_summaries)
+
+    # NPC memory scopes and private memories (P10-C Memory-first)
+    npc_memory_scope_repo = NPCMemoryScopeRepository(db)
+    npc_private_memory_repo = NPCPrivateMemoryRepository(db)
+
+    npc_memory_scopes = []
+    npc_private_memories = []
+
+    for ns in npc_states:
+        # Memory scopes
+        scope = npc_memory_scope_repo.get_by_session_and_npc_template(
+            session_id, ns.npc_template_id
+        )
+        if scope:
+            npc_memory_scopes.append(_scrub_secrets({
+                "npc_id": scope.npc_id,
+                "npc_template_id": scope.npc_template_id,
+                "profile_json": scope.profile_json,
+                "forget_curve_json": scope.forget_curve_json,
+                "memory_count": scope.memory_count,
+            }))
+
+        # Private memories for this NPC
+        memories = npc_private_memory_repo.get_by_npc_template(
+            session_id, ns.npc_template_id
+        )
+        for m in memories:
+            npc_private_memories.append(_scrub_secrets({
+                "npc_id": m.npc_id,
+                "npc_template_id": m.npc_template_id,
+                "memory_text": m.memory_text,
+                "content": m.content,
+                "memory_type": m.memory_type,
+                "importance": m.importance,
+                "emotional_weight": m.emotional_weight,
+                "confidence": m.confidence,
+                "current_strength": m.current_strength,
+                "created_turn": m.created_turn,
+                "last_accessed_turn": m.last_accessed_turn,
+                "recall_count": m.recall_count,
+                "knowledge_source": m.knowledge_source,
+                "source_ref": m.source_ref,
+                "source_turn_no": m.source_turn_no,
+                "salience": m.salience,
+                "tags_json": m.tags_json,
+                "memory_kind": m.memory_kind,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }))
+
+    snapshot["npc_memory_scopes"] = npc_memory_scopes
+    snapshot["npc_private_memories"] = npc_private_memories
 
     return snapshot
 
@@ -316,8 +372,9 @@ def apply_snapshot(
     2. Verify checksum; reject on mismatch.
     3. Begin a nested transaction (savepoint).
     4. Create a pre-apply checkpoint snapshot of current state.
-    5. Overwrite mutable runtime tables from snapshot JSON:
-       session_state, player_state, npc_states, quest_states, inventory.
+     5. Overwrite mutable runtime tables from snapshot JSON:
+        session_state, player_state, npc_states, quest_states, inventory,
+        NPC memory scopes, NPC private memories.
     6. Update PlaythroughInstance.current_snapshot_id and
        SessionModel.resume_snapshot_id.
     7. Commit the nested transaction, then commit the outer transaction.
@@ -465,6 +522,52 @@ def apply_snapshot(
                 bound_flag=inv_data.get("bound_flag", False),
             ))
 
+        # NPC memory scopes and private memories (P10-C Memory-first)
+        for existing_scope in db.query(NPCMemoryScopeModel).filter(
+            NPCMemoryScopeModel.session_id == session_id
+        ).all():
+            db.delete(existing_scope)
+
+        for existing_mem in db.query(NPCPrivateMemoryModel).filter(
+            NPCPrivateMemoryModel.session_id == session_id
+        ).all():
+            db.delete(existing_mem)
+        db.flush()
+
+        for scope_data in payload.get("npc_memory_scopes", []):
+            db.add(NPCMemoryScopeModel(
+                session_id=session_id,
+                npc_id=scope_data["npc_id"],
+                npc_template_id=scope_data.get("npc_template_id"),
+                profile_json=scope_data.get("profile_json"),
+                forget_curve_json=scope_data.get("forget_curve_json"),
+                memory_count=scope_data.get("memory_count", 0),
+            ))
+
+        for mem_data in payload.get("npc_private_memories", []):
+            db.add(NPCPrivateMemoryModel(
+                session_id=session_id,
+                npc_id=mem_data["npc_id"],
+                npc_template_id=mem_data.get("npc_template_id"),
+                memory_text=mem_data.get("memory_text"),
+                content=mem_data.get("content", ""),
+                memory_type=mem_data.get("memory_type", "episodic"),
+                importance=mem_data.get("importance", 0.5),
+                emotional_weight=mem_data.get("emotional_weight", 0.0),
+                confidence=mem_data.get("confidence", 1.0),
+                current_strength=mem_data.get("current_strength", 1.0),
+                created_turn=mem_data.get("created_turn", 0),
+                last_accessed_turn=mem_data.get("last_accessed_turn", 0),
+                recall_count=mem_data.get("recall_count", 0),
+                knowledge_source=mem_data.get("knowledge_source"),
+                source_ref=mem_data.get("source_ref"),
+                source_turn_no=mem_data.get("source_turn_no"),
+                salience=mem_data.get("salience", 0.5),
+                tags_json=mem_data.get("tags_json"),
+                memory_kind=mem_data.get("memory_kind"),
+            ))
+        db.flush()
+
         pi = db.query(PlaythroughInstanceModel).filter(
             PlaythroughInstanceModel.id == pi_id
         ).first()
@@ -507,11 +610,18 @@ def restore_snapshot(
         SnapshotApplyError: If flag on and checksum mismatch or other apply error.
     """
     if instance_snapshot_enabled():
-        result = apply_snapshot(db, snapshot_id)
+        try:
+            result = apply_snapshot(db, snapshot_id)
+        except SnapshotApplyError as e:
+            if "not found" in str(e).lower():
+                raise ValueError(str(e))
+            raise
         snap_repo = InstanceSnapshotRepository(db)
         snap = snap_repo.get_by_id(snapshot_id)
         result["snapshot_kind"] = snap.snapshot_kind if snap else None
         result["turn_no"] = snap.turn_no if snap else None
+        result["checksum"] = snap.checksum if snap else None
+        result["snapshot_json"] = snap.snapshot_json if snap else None
         return result
 
     repo = InstanceSnapshotRepository(db)

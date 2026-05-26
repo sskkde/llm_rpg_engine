@@ -189,6 +189,47 @@ class TestProposalPipelineValidParsing:
         assert proposal.is_fallback == False
 
     @pytest.mark.asyncio
+    async def test_generate_scene_event_preserves_recommended_actions(self, pipeline):
+        valid_json = json.dumps({
+            "scene_id": "scene_001",
+            "candidate_events": [],
+            "recommended_actions": ["与师姐交谈", "探索后山", "前往藏经阁", "检查石碑"],
+            "confidence": 0.8,
+        })
+        
+        pipeline._llm_service._provider.responses = {"场景id": valid_json}
+        
+        proposal = await pipeline.generate_scene_event(
+            scene_id="scene_001",
+            scene_context={"location": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+        )
+        
+        assert isinstance(proposal, SceneEventProposal)
+        assert proposal.recommended_actions == ["与师姐交谈", "探索后山", "前往藏经阁", "检查石碑"]
+
+    @pytest.mark.asyncio
+    async def test_generate_scene_event_defaults_empty_recommended_actions(self, pipeline):
+        valid_json = json.dumps({
+            "scene_id": "scene_001",
+            "candidate_events": [],
+            "confidence": 0.6,
+        })
+        
+        pipeline._llm_service._provider.responses = {"场景id": valid_json}
+        
+        proposal = await pipeline.generate_scene_event(
+            scene_id="scene_001",
+            scene_context={"location": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+        )
+        
+        assert isinstance(proposal, SceneEventProposal)
+        assert proposal.recommended_actions == []
+
+    @pytest.mark.asyncio
     async def test_generate_npc_action_valid_json(self, pipeline):
         valid_json = json.dumps({
             "npc_id": "npc_001",

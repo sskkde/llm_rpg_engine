@@ -332,6 +332,7 @@ class ProposalPipeline:
                     affected_entities=data.get("affected_entities", []),
                     suggested_transition=data.get("suggested_transition"),
                     transition_reason=data.get("transition_reason"),
+                    recommended_actions=data.get("recommended_actions", []),
                     visibility=data.get("visibility", "player_visible"),
                     confidence=data.get("confidence", 0.5),
                     audit=audit,

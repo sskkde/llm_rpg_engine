@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -93,6 +93,53 @@ class ContentImportService:
             pack_id=pack.manifest.id,
             pack_name=pack.manifest.name,
         )
+
+    def import_pack_as_version(
+        self,
+        pack_dir: Path,
+        world_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> ContentImportReport:
+        """
+        Import a content pack AND create a StoryPackageVersion row.
+
+        Preserves the old import_pack behavior for factions/plot_beats,
+        then additionally creates a draft version row with a manifest
+        built from the loaded pack definition and a source hash.
+
+        When dry_run=True, validates and preview-imports but does NOT
+        create the version row.
+
+        Args:
+            pack_dir: Path to the content pack directory.
+            world_id: Optional world_id to link the version to.
+            dry_run: If true, validate without writing.
+
+        Returns:
+            ContentImportReport with version_id if a version was created.
+        """
+        base_report = self.import_pack(pack_dir, dry_run=dry_run)
+
+        if not base_report.success or dry_run:
+            return base_report
+
+        from llm_rpg.core.story_package_service import (
+            create_version_from_content_pack,
+            StoryPackageVersionError,
+        )
+
+        try:
+            spv = create_version_from_content_pack(
+                self.db,
+                pack_dir=Path(pack_dir),
+                world_id=world_id,
+            )
+            base_report.version_id = spv.id
+            base_report.manifest_json = spv.manifest_json
+        except StoryPackageVersionError as e:
+            base_report.warnings.append(f"Version creation skipped: {e}")
+
+        return base_report
 
     def _import_factions(self, factions: List[FactionDefinition]) -> int:
         count = 0

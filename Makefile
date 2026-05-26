@@ -12,6 +12,7 @@
         test-v1-rule-engine test-v1-game-ui test-v1-ops test-v1-playthrough test-v1-release \
         test-p10a-quests test-p10a-providers test-p10a-streaming test-p10a-time test-p10a-fast test-p10a \
         test-p10b-resolver test-p10b-routing test-p10b-debug test-p10b-fast test-p10b \
+        test-p10c-npc-memory-unit test-p10c-story-editor-unit test-p10c-content-pack-unit test-p10c-integration test-p10c-fast test-p10c test-p10c-gate \
         run-backend run-frontend \
         docker-up docker-down
 
@@ -276,6 +277,46 @@ test-p10b:
 	cd frontend && npm run build
 	cd frontend && npm run lint
 	cd frontend && npx tsc --noEmit
+
+# === P10-C: Story Editor & NPC Memory-First ===
+
+test-p10c-npc-memory-unit:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_p10c_npc_memory_schema.py \
+		tests/unit/test_p10c_npc_memory_retrieval.py \
+		tests/unit/test_p10c_npc_decision_adapter.py \
+		-q --tb=short
+
+test-p10c-story-editor-unit:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_p10c_story_editor_fields.py \
+		tests/unit/test_p10c_story_editor_gaps.py \
+		tests/unit/test_p10c_schema_foundation.py \
+		-q --tb=short
+
+test-p10c-content-pack-unit:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/unit/test_p10c_content_pack_version_manifest.py \
+		tests/unit/test_p10c_hallucination_leak_hardening.py \
+		-q --tb=short
+
+test-p10c-integration:
+	cd backend && APP_ENV=testing python3 -m pytest \
+		tests/integration/test_p10c_npc_memory_integration.py \
+		tests/integration/test_p10c_content_pack_publish_bridge.py \
+		tests/integration/test_p10c_story_package_instance_api.py \
+		-q --tb=short
+
+test-p10c-fast: test-p10b-fast test-p10c-npc-memory-unit test-p10c-story-editor-unit test-p10c-content-pack-unit test-p10c-integration
+
+test-p10c:
+	$(MAKE) test-p10c-fast
+	cd frontend && npm run build
+	cd frontend && npm run lint
+	cd frontend && npx tsc --noEmit
+
+test-p10c-gate: test-p10c
+	@echo "P10-C quality gate passed"
 
 # ── Run targets ───────────────────────────────────────────────
 

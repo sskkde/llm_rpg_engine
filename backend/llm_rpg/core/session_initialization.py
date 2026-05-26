@@ -36,6 +36,7 @@ from ..storage.repositories import (
     QuestTemplateRepository,
     LocationRepository,
 )
+from .npc_seed_memory_service import seed_major_npc_private_memories
 
 
 class SessionInitializationError(Exception):
@@ -149,6 +150,9 @@ def initialize_session_story_state(db: Session, session_id: str) -> None:
                 "progress_json": {},
                 "status": "active",
             })
+    
+    # P10-C Phase 4: Seed major NPC private memories when NPC_MEMORY_FIRST_ENABLED=true
+    seed_major_npc_private_memories(db, session_id, world_id)
 
 
 def backfill_historical_sessions(db: Session) -> int:

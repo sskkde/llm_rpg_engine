@@ -36,6 +36,10 @@ from .npc_memory_retrieval_service import (
 
 logger = logging.getLogger(__name__)
 
+_NON_TRIVIAL_ACTION_TYPES: Set[str] = {
+    "talk", "dialogue", "attack", "reveal", "cooperate", "refuse", "move", "interact",
+}
+
 
 @dataclass
 class NormalizationResult:
@@ -95,6 +99,7 @@ def normalize_npc_action_proposal(
     npc_template_id: str,
     available_memory_ids: Optional[List[str]] = None,
     current_turn: int = 0,
+    is_major_npc: bool = False,
 ) -> NormalizationResult:
     """Normalize an NPCActionProposal to include Phase 6 fields.
 
@@ -102,6 +107,8 @@ def normalize_npc_action_proposal(
     - Validates used_memory_ids: must belong to same session + NPC, must be
       in available_memory_ids if provided.
     - Filters new_memory_candidates: must have memory_text and source_type.
+    - Enforces memory grounding: major NPC non-trivial actions without valid
+      used_memory_ids fall back to observe.
     - Returns NormalizationResult with valid/invalid breakdown.
     """
     used_ids = list(proposal.used_memory_ids) if proposal.used_memory_ids else []
@@ -149,10 +156,29 @@ def normalize_npc_action_proposal(
             continue
         filtered_cands.append(cand)
 
-    updated_proposal = proposal.model_copy(update={
+    update_fields: Dict[str, Any] = {
         "used_memory_ids": valid_ids,
         "new_memory_candidates": filtered_cands,
-    })
+    }
+
+    if (
+        is_major_npc
+        and proposal.action_type in _NON_TRIVIAL_ACTION_TYPES
+        and len(valid_ids) == 0
+    ):
+        logger.warning(
+            "Major NPC non-trivial action without valid memories: "
+            "session=%s npc=%s action_type=%s — falling back to observe",
+            session_id, npc_template_id, proposal.action_type,
+        )
+        update_fields["action_type"] = "observe"
+        update_fields["summary"] = "NPC谨慎观察周围情况"
+        audit = dict(proposal.decision_audit) if proposal.decision_audit else {}
+        audit["fallback_used"] = True
+        audit["fallback_reason"] = "no_valid_memories_for_non_trivial_action"
+        update_fields["decision_audit"] = audit
+
+    updated_proposal = proposal.model_copy(update=update_fields)
 
     return NormalizationResult(
         proposal=updated_proposal,

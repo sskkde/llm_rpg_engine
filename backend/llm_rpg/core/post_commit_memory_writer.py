@@ -83,7 +83,7 @@ def write_post_commit_memories(
             continue
 
         memory_text = cand.get("memory_text")
-        source_type = cand.get("source_type")
+        source_type = cand.get("knowledge_source") or cand.get("source_type")
 
         if not memory_text or not str(memory_text).strip():
             dropped += 1

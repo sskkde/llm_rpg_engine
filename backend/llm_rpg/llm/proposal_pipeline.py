@@ -615,17 +615,34 @@ class ProposalPipeline:
         turn_no: int = 0,
     ) -> NPCActionProposal:
         """Generate NPCActionProposal for NPC decisions."""
+        memory_section = ""
+        retrieved_memories = npc_context.get("retrieved_private_memories")
+        if retrieved_memories:
+            memory_section = f"""
+NPC检索到的私有记忆:
+{retrieved_memories}
+
+"""
+
         messages = [
             LLMMessage(
                 role="system",
-                content="你是一个文字RPG游戏的NPC引擎。请根据NPC的上下文和记忆生成行动提案。"
+                content=(
+                    "你是一个文字RPG游戏的NPC引擎。请根据NPC的上下文和记忆生成行动提案。\n"
+                    "\n"
+                    "【记忆优先规则 - 必须严格遵守】\n"
+                    "1. 只能基于NPC当前可见事实和retrieved_private_memories做出决策\n"
+                    "2. 如果没有相关记忆，不得虚构经历\n"
+                    "3. major NPC的非idle/observe行为必须引用至少一个used_memory_ids\n"
+                    "4. new_memory_candidates必须使用第一人称视角\n"
+                    "5. summary和visible_motivation不得泄露玩家不可见秘密"
+                ),
             ),
             LLMMessage(
                 role="user",
                 content=f"""NPC ID: {npc_id}
 NPC上下文: {npc_context}
-
-请严格按照以下JSON格式输出NPC行动提案，不要添加任何额外字段：
+{memory_section}请严格按照以下JSON格式输出NPC行动提案，不要添加任何额外字段：
 {{
   "npc_id": "{npc_id}",
   "action_type": "interact|observe|move|idle|dialogue|attack",
@@ -633,8 +650,24 @@ NPC上下文: {npc_context}
   "summary": "NPC行动的简短描述（一句话）",
   "visible_motivation": "玩家可见的动机说明",
   "visibility": "player_visible|hidden|gm_only",
-  "confidence": 0.0到1.0之间的数值
-}}"""
+  "confidence": 0.0到1.0之间的数值,
+  "used_memory_ids": ["本次决策引用的记忆ID列表"],
+  "new_memory_candidates": [
+    {{
+      "memory_text": "第一人称视角的新记忆文本",
+      "knowledge_source": "记忆来源类型",
+      "source_turn_no": 当前回合号,
+      "salience": 0.0到1.0之间的显著度,
+      "confidence": 0.0到1.0之间的置信度,
+      "tags": ["标签列表"]
+    }}
+  ],
+  "decision_audit": {{
+    "reasoning_basis": "决策推理依据",
+    "memory_count_used": 引用的记忆数量,
+    "fallback_used": false
+  }}
+}}""",
             ),
         ]
         

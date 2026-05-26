@@ -1311,8 +1311,11 @@ def _get_active_npcs_at_location(
             "role_type": npc_template.role_type,
             "personality": npc_template.personality,
             "goals": npc_template.goals or [],
-            "trust_score": npc_state.trust_score,
-            "suspicion_score": npc_state.suspicion_score,
+            # NOTE: trust_score/suspicion_score intentionally excluded from
+            # NPC decision context — P10-C Memory-first: NPC decisions must be
+            # driven by first-person memories, not numeric relationship scores.
+            # These fields remain in DB for mood derivation and player API.
+            "is_major_npc": getattr(npc_template, "is_major_npc", False),
             "mood": status_flags.get("mood", "neutral"),
             "current_location_id": npc_state.current_location_id,
         })
@@ -1340,7 +1343,6 @@ def _build_npc_context(
     
     Context includes:
     - NPC public identity, personality, goals
-    - Relationship scores (trust, suspicion)
     - Current location
     - Perceived events (filtered by NPCVisibleProjectionBuilder)
     - Perception constraints
@@ -1352,6 +1354,7 @@ def _build_npc_context(
     - hidden_identity from NPCTemplateModel
     - hidden_plan_state from SessionNPCStateModel
     - private_payload from events
+    - trust_score / suspicion_score (P10-C Memory-first: decisions driven by memories, not scores)
     """
     from ..models.events import GameEvent, EventType
     from ..models.perspectives import NPCPerspective
@@ -1388,8 +1391,8 @@ def _build_npc_context(
     }
     
     if npc_state:
-        context["trust_score"] = npc_state.trust_score
-        context["suspicion_score"] = npc_state.suspicion_score
+        # trust_score/suspicion_score intentionally excluded from NPC
+        # decision context — P10-C Memory-first architecture
         status_flags = npc_state.status_flags or {}
         context["mood"] = status_flags.get("mood", "neutral")
         context["current_location_id"] = npc_state.current_location_id

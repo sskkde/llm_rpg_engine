@@ -270,6 +270,11 @@ class NPCActionProposal(BaseModel):
     # Alternatives considered
     alternatives: List[str] = Field(default_factory=list, description="考虑过的备选方案")
     
+    # P10-C Phase 6: Memory-first fields (optional, additive)
+    used_memory_ids: List[str] = Field(default_factory=list, description="本次决策引用的私有记忆ID列表")
+    new_memory_candidates: List[Dict[str, Any]] = Field(default_factory=list, description="提议新增的第一人称记忆候选列表")
+    decision_audit: Optional[Dict[str, Any]] = Field(None, description="决策审计元数据(含记忆检索信息)")
+    
     # Audit metadata
     audit: ProposalAuditMetadata = Field(..., description="审计元数据")
     

@@ -1303,7 +1303,7 @@ LLM_TIMEOUT=30
 }
 ```
 
-### P10-C Deferred Items
+### P10-B Deferred Items
 
 The following features are explicitly out of scope for P10-B:
 
@@ -1312,6 +1312,56 @@ The following features are explicitly out of scope for P10-B:
 - **Per-stage API keys**: Different API keys for different stages
 
 For detailed status, see `P10B_EXECUTION_REPORT.md`.
+
+## P10-C: Story Editor & NPC Memory-First
+
+This phase delivers two major modules: Story Editor infrastructure with content pack versioning and NPC memory-first architecture with private memory storage and retrieval.
+
+### Quick Test Commands
+
+```bash
+# Show all available targets
+make help
+
+# Run P10-C NPC memory unit tests
+make test-p10c-npc-memory-unit
+
+# Run P10-C story editor unit tests
+make test-p10c-story-editor-unit
+
+# Run P10-C content pack unit tests
+make test-p10c-content-pack-unit
+
+# Run P10-C integration tests
+make test-p10c-integration
+
+# Run P10-C quality gate (fast)
+make test-p10c-fast
+
+# Run P10-C quality gate (full)
+make test-p10c
+
+# Run P10-C quality gate (alias)
+make test-p10c-gate
+```
+
+### Key Features
+
+- **NPC Memory-First**: Private memory storage per major NPC with retrieval and turn service integration
+- **Story Editor Fields**: ORM editor fields for story package versioning (World, Location, NPC, Event, Prompt)
+- **Content Pack Versioning**: StoryPackageVersion with manifest snapshots and publish bridge
+- **Hallucination Leak Hardening**: Stricter validation for LLM outputs
+
+### P10-C Deferred Items
+
+The following features are explicitly out of scope for P10-C:
+
+- **Story Editor UI**: Admin UI for story package versioning
+- **NPC Memory UI**: Debug UI for viewing NPC private memories
+- **Memory Decay Integration**: ForgetCurve integration with private memories
+- **Cross-Session Memory**: Memory sharing across sessions for same NPC
+
+For detailed status, see `P10C_EXECUTION_REPORT.md`.
 
 ## References
 

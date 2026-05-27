@@ -12,7 +12,9 @@ Events are emitted in order:
 
 import asyncio
 import json
+import os
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any, Optional, List, List
@@ -344,11 +346,24 @@ async def execute_turn_stream(
     event_id = str(uuid.uuid4())
     _SENTINEL = object()
     loop = asyncio.get_running_loop()
-    progress_queue: asyncio.Queue[TurnProgressEvent | object] = asyncio.Queue(maxsize=100)
+    progress_queue: asyncio.Queue[TurnProgressEvent | dict | object] = asyncio.Queue(maxsize=100)
     thread_result: dict[str, Any] = {}
     thread_error: dict[str, Any] = {}
     
+    # Heartbeat and hard deadline configuration
+    HEARTBEAT_INTERVAL = int(os.getenv("STREAMING_HEARTBEAT_INTERVAL_SECONDS", "12"))
+    HARD_DEADLINE = int(os.getenv("STREAMING_HARD_DEADLINE_SECONDS", "180"))
+    
     def progress_callback(event: TurnProgressEvent) -> None:
+        def put_event() -> None:
+            try:
+                progress_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+        loop.call_soon_threadsafe(put_event)
+    
+    def turn_event_callback(event: dict) -> None:
+        """Bridge worker-thread dict events into the async SSE loop."""
         def put_event() -> None:
             try:
                 progress_queue.put_nowait(event)
@@ -374,6 +389,7 @@ async def execute_turn_stream(
                 use_mock=use_mock,
                 idempotency_key=idempotency_key,
                 progress_callback=progress_callback,
+                turn_event_callback=turn_event_callback,
             )
             thread_result["value"] = result
         except Exception as e:
@@ -394,26 +410,46 @@ async def execute_turn_stream(
         event_id=f"{event_id}_start"
     )
     
+    loop_start_time = time.monotonic()
+    deadline = loop_start_time + HARD_DEADLINE
+    heartbeat_seq = 0
+    streamed_narration_chunks = False
+    
     thread = threading.Thread(target=run_turn_in_thread, daemon=True)
     thread.start()
     
     try:
         while True:
-            try:
-                event = await asyncio.wait_for(progress_queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 yield format_sse(
                     "turn_error",
                     {
                         "session_id": session_id,
                         "turn_index": turn_index,
                         "error_type": "turn_timeout",
-                        "message": "Turn execution timeout",
+                        "message": "Turn execution hard deadline exceeded",
                         "timestamp": datetime.now().isoformat(),
                     },
                     event_id=f"{event_id}_error"
                 )
                 break
+            
+            wait_timeout = min(HEARTBEAT_INTERVAL, remaining)
+            try:
+                event = await asyncio.wait_for(progress_queue.get(), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                heartbeat_seq += 1
+                yield format_sse(
+                    "heartbeat",
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "elapsed_seconds": int(time.monotonic() - loop_start_time),
+                        "sequence": heartbeat_seq,
+                    },
+                    event_id=f"{event_id}_heartbeat_{heartbeat_seq}"
+                )
+                continue
             
             if isinstance(event, TurnProgressEvent):
                 sse_event_type = "stage_started" if event.phase == "started" else "stage_completed"
@@ -427,6 +463,16 @@ async def execute_turn_stream(
                         "progress": event.progress,
                     },
                     event_id=f"{event_id}_{event.stage}_{event.phase}"
+                )
+            elif isinstance(event, dict):
+                event_type = event.get("event", "")
+                event_data = event.get("data", {})
+                if event_type == "narration_delta":
+                    streamed_narration_chunks = True
+                yield format_sse(
+                    event_type,
+                    event_data,
+                    event_id=f"{event_id}_{event_type}"
                 )
             else:
                 break
@@ -522,7 +568,8 @@ async def execute_turn_stream(
     
     await asyncio.sleep(0.05)
     
-    if result.narration:
+    # Emit full narration delta only if no chunks were streamed during turn execution
+    if result.narration and not streamed_narration_chunks:
         yield format_sse(
             "narration_delta",
             {

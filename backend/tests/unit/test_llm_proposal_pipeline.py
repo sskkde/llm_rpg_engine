@@ -33,7 +33,7 @@ from llm_rpg.llm.proposal_pipeline import (
     ProposalTimeoutError,
     create_proposal_pipeline,
 )
-from llm_rpg.llm.service import LLMService, LLMMessage, LLMResponse, MockLLMProvider
+from llm_rpg.llm.service import LLMService, LLMMessage, LLMResponse, MockLLMProvider, StreamingNotSupportedError
 from llm_rpg.llm.repair import RetryRepairHandler
 
 
@@ -574,3 +574,127 @@ class TestProposalTypeMapping:
     def test_narration_source_engine(self, pipeline):
         source = pipeline._get_source_engine(ProposalType.NARRATION)
         assert source == ProposalSource.NARRATION_ENGINE
+
+
+class TestGenerateNarrationStreaming:
+    """Tests for generate_narration_streaming method."""
+
+    @pytest.fixture
+    def streaming_pipeline(self):
+        class StreamingMockProvider(MockLLMProvider):
+            async def stream_generate(self, messages, template_id=None, session_id=None, turn_no=None, temperature=0.8, max_tokens=500):
+                chunks = ["凌月站在", "试炼堂门口"]
+                for chunk in chunks:
+                    yield chunk
+                    await asyncio.sleep(0.01)
+
+        provider = StreamingMockProvider()
+        llm_service = LLMService(provider=provider)
+        return ProposalPipeline(llm_service=llm_service)
+
+    @pytest.mark.asyncio
+    async def test_accumulates_chunks(self, streaming_pipeline):
+        deltas = []
+
+        proposal = await streaming_pipeline.generate_narration_streaming(
+            visible_context={"scene": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+            on_delta=lambda chunk: deltas.append(chunk),
+        )
+
+        assert isinstance(proposal, NarrationProposal)
+        assert proposal.text == "凌月站在试炼堂门口"
+        assert deltas == ["凌月站在", "试炼堂门口"]
+        assert proposal.is_fallback == False
+
+    @pytest.fixture
+    def non_streaming_pipeline(self):
+        class NonStreamingProvider(MockLLMProvider):
+            async def stream_generate(self, messages, template_id=None, session_id=None, turn_no=None, temperature=0.8, max_tokens=500):
+                raise StreamingNotSupportedError("NonStreamingProvider does not support streaming")
+                yield  # noqa: unreachable — makes this an async generator
+
+        provider = NonStreamingProvider()
+        llm_service = LLMService(provider=provider)
+        return ProposalPipeline(llm_service=llm_service)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_unsupported(self, non_streaming_pipeline):
+        valid_json = json.dumps({
+            "text": "晨雾散去，山门广场显得格外宁静。",
+            "confidence": 0.8,
+        })
+        non_streaming_pipeline._llm_service._provider.responses = {"可见上下文": valid_json}
+
+        proposal = await non_streaming_pipeline.generate_narration_streaming(
+            visible_context={"scene": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+        )
+
+        assert isinstance(proposal, NarrationProposal)
+        assert proposal.text == "晨雾散去，山门广场显得格外宁静。"
+        assert proposal.is_fallback == False
+
+    @pytest.mark.asyncio
+    async def test_stream_fallback_event_emitted(self, non_streaming_pipeline):
+        valid_json = json.dumps({
+            "text": "晨雾散去，山门广场显得格外宁静。",
+            "confidence": 0.8,
+        })
+        non_streaming_pipeline._llm_service._provider.responses = {"可见上下文": valid_json}
+
+        events = []
+        proposal = await non_streaming_pipeline.generate_narration_streaming(
+            visible_context={"scene": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+            on_event=lambda e: events.append(e),
+        )
+
+        assert isinstance(proposal, NarrationProposal)
+        assert len(events) == 1
+        assert events[0]["event"] == "stream_fallback"
+        assert "message" in events[0]["data"]
+
+    @pytest.mark.asyncio
+    async def test_no_stream_fallback_event_without_callback(self, non_streaming_pipeline):
+        valid_json = json.dumps({
+            "text": "晨雾散去，山门广场显得格外宁静。",
+            "confidence": 0.8,
+        })
+        non_streaming_pipeline._llm_service._provider.responses = {"可见上下文": valid_json}
+
+        proposal = await non_streaming_pipeline.generate_narration_streaming(
+            visible_context={"scene": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+        )
+
+        assert isinstance(proposal, NarrationProposal)
+        assert proposal.text == "晨雾散去，山门广场显得格外宁静。"
+
+    @pytest.fixture
+    def empty_streaming_pipeline(self):
+        class EmptyStreamingMockProvider(MockLLMProvider):
+            async def stream_generate(self, messages, template_id=None, session_id=None, turn_no=None, temperature=0.8, max_tokens=500):
+                yield ""
+                yield ""
+                await asyncio.sleep(0.01)
+
+        provider = EmptyStreamingMockProvider()
+        llm_service = LLMService(provider=provider)
+        return ProposalPipeline(llm_service=llm_service)
+
+    @pytest.mark.asyncio
+    async def test_empty_text_fallback(self, empty_streaming_pipeline):
+        proposal = await empty_streaming_pipeline.generate_narration_streaming(
+            visible_context={"scene": "山门广场"},
+            session_id="session_001",
+            turn_no=1,
+        )
+
+        assert isinstance(proposal, NarrationProposal)
+        assert proposal.is_fallback == True
+        assert proposal.audit.fallback_reason == "Streaming produced empty text"

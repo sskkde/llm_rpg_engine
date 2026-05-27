@@ -8,6 +8,8 @@ Tests:
 """
 
 import json
+import os
+import time
 import pytest
 import uuid
 from unittest.mock import patch, MagicMock
@@ -332,3 +334,120 @@ class TestSSEStageEventsIntegration:
         )
 
         assert response.status_code == 404
+
+    @pytest.mark.slow
+    def test_heartbeat_during_long_turn(self, client, db_engine):
+        """When turn execution takes time, heartbeat events should appear before completion."""
+        from llm_rpg.api import streaming as streaming_module
+
+        original_execute = streaming_module.execute_turn_service
+
+        def delayed_execute(*args, **kwargs):
+            time.sleep(3)  # Enough for 3+ heartbeats at 1s interval
+            return original_execute(*args, **kwargs)
+
+        session_id, token = _create_session_via_api(client, db_engine)
+
+        with patch.object(streaming_module, 'execute_turn_service', side_effect=delayed_execute), \
+             patch.dict(os.environ, {
+                 "STREAMING_HEARTBEAT_INTERVAL_SECONDS": "1",
+                 "STREAMING_HARD_DEADLINE_SECONDS": "30",
+             }):
+            response = client.post(
+                f"/streaming/sessions/{session_id}/turn/mock",
+                json={"action": "观察四周"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert response.status_code == 200
+        raw_sse = response.content.decode("utf-8")
+        events = _parse_sse_events(raw_sse)
+
+        event_names = [name for name, _ in events]
+
+        heartbeat_events = [(name, data) for name, data in events if name == "heartbeat"]
+        assert len(heartbeat_events) >= 1, (
+            f"Expected at least 1 heartbeat during long turn, got {len(heartbeat_events)}. "
+            f"Events: {event_names}"
+        )
+
+        assert "turn_completed" in event_names, (
+            f"turn_completed missing from events: {event_names}"
+        )
+
+        timeout_errors = [data for name, data in events
+                          if name == "turn_error" and data.get("error_type") == "turn_timeout"]
+        assert len(timeout_errors) == 0, (
+            f"Unexpected turn_timeout error during long turn: {timeout_errors}"
+        )
+
+    def test_no_duplicate_narration_delta(self, client, db_engine):
+        """When narration_delta is emitted via turn_event_callback, post-commit should not duplicate it."""
+        session_id, token = _create_session_via_api(client, db_engine)
+
+        response = client.post(
+            f"/streaming/sessions/{session_id}/turn/mock",
+            json={"action": "观察四周"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        raw_sse = response.content.decode("utf-8")
+        events = _parse_sse_events(raw_sse)
+
+        event_names = [name for name, _ in events]
+
+        # Find event_committed position — post-commit narration_delta would appear after it
+        committed_indices = [i for i, name in enumerate(event_names) if name == "event_committed"]
+        committed_idx = committed_indices[0] if committed_indices else -1
+
+        # Count narration_delta events BEFORE event_committed (streamed by turn_event_callback)
+        pre_commit_deltas = sum(
+            1 for i, name in enumerate(events)
+            if name[0] == "narration_delta" and (committed_idx == -1 or i < committed_idx)
+        )
+
+        # Count narration_delta events AFTER event_committed (would be the duplicate post-commit one)
+        post_commit_deltas = sum(
+            1 for i, name in enumerate(events)
+            if name[0] == "narration_delta" and committed_idx >= 0 and i > committed_idx
+        )
+
+        assert pre_commit_deltas >= 1, (
+            f"Expected at least 1 narration_delta before event_committed, got {pre_commit_deltas}. "
+            f"Events: {event_names}"
+        )
+
+        # streamed_narration_chunks flag prevents post-commit duplicate
+        assert post_commit_deltas == 0, (
+            f"Expected 0 narration_delta after event_committed (post-commit guard), "
+            f"got {post_commit_deltas}. Events: {event_names}"
+        )
+
+    def test_narration_delta_in_turn_completed(self, client, db_engine):
+        """turn_completed should always contain the full narration."""
+        session_id, token = _create_session_via_api(client, db_engine)
+
+        response = client.post(
+            f"/streaming/sessions/{session_id}/turn/mock",
+            json={"action": "观察四周"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        raw_sse = response.content.decode("utf-8")
+        events = _parse_sse_events(raw_sse)
+
+        completed_events = [data for name, data in events if name == "turn_completed"]
+        assert len(completed_events) >= 1, (
+            f"Expected at least 1 turn_completed event, got {len(completed_events)}. "
+            f"Event names: {[name for name, _ in events]}"
+        )
+
+        completed_data = completed_events[0]
+        assert "narration" in completed_data, (
+            f"turn_completed event missing 'narration' key. Keys: {list(completed_data.keys())}"
+        )
+        assert completed_data["narration"], (
+            f"turn_completed 'narration' should be non-empty, got: {completed_data['narration']!r}"
+        )

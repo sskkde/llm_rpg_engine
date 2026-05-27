@@ -14,6 +14,7 @@ interface TurnState {
   streamingDuration: number;
   currentStage: TurnStageState | null;
   stageHistory: TurnStageState[];
+  streamFallbackNotice: string | null;
 }
 
 function generateIdempotencyKey(): string {
@@ -31,6 +32,7 @@ export function useTurnStream(sessionId: string | null) {
     streamingDuration: 0,
     currentStage: null,
     stageHistory: [],
+    streamFallbackNotice: null,
   });
   const streamRef = useRef<{ abort(): void } | null>(null);
   const pendingKeyRef = useRef<string | null>(null);
@@ -96,6 +98,7 @@ export function useTurnStream(sessionId: string | null) {
         streamingDuration: 0,
         currentStage: null,
         stageHistory: [],
+        streamFallbackNotice: null,
       });
       return response;
     } catch (err: unknown) {
@@ -113,6 +116,7 @@ export function useTurnStream(sessionId: string | null) {
         streamingDuration: 0,
         currentStage: null,
         stageHistory: [],
+        streamFallbackNotice: null,
       });
       return null;
     }
@@ -134,6 +138,7 @@ export function useTurnStream(sessionId: string | null) {
       streamingDuration: 0,
       currentStage: null,
       stageHistory: [],
+      streamFallbackNotice: null,
     });
 
     try {
@@ -175,7 +180,9 @@ export function useTurnStream(sessionId: string | null) {
             case 'stage_completed':
               setState((prev) => ({
                 ...prev,
-                currentStage: null,
+                currentStage: prev.currentStage
+                  ? { ...prev.currentStage, phase: 'completed' }
+                  : null,
               }));
               break;
 
@@ -203,9 +210,22 @@ export function useTurnStream(sessionId: string | null) {
                 streamingDuration: 0,
                 currentStage: null,
                 stageHistory: [],
+                streamFallbackNotice: null,
               });
               return turnResponse;
             }
+
+            case 'heartbeat':
+              // Heartbeat is intentionally ignored - keeps connection alive
+              break;
+
+            case 'stream_fallback':
+              setState((prev) => ({
+                ...prev,
+                usedFallback: true,
+                streamFallbackNotice: event.message,
+              }));
+              break;
 
             case 'turn_error':
               if (pendingKeyRef.current !== idempotencyKey) return null;
@@ -220,6 +240,9 @@ export function useTurnStream(sessionId: string | null) {
                 currentStage: null,
               }));
               return null;
+
+            default:
+              break;
           }
         }
       } catch (err) {
@@ -235,6 +258,7 @@ export function useTurnStream(sessionId: string | null) {
         usedFallback: true,
         streamingDuration: 0,
         currentStage: null,
+        streamFallbackNotice: null,
       }));
       return fallbackTurn(action, idempotencyKey);
     } catch {

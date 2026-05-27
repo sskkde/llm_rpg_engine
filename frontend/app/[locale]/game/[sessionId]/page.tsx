@@ -14,7 +14,7 @@ import { LocationMapPanel } from '@/components/game/LocationMapPanel';
 import { InventoryPanel } from '@/components/game/InventoryPanel';
 import { ConnectionStatus } from '@/components/game/ConnectionStatus';
 import { TurnErrorPanel } from '@/components/game/TurnErrorPanel';
-import { TurnStageStatus } from '@/components/game/TurnStageStatus';
+
 import { QuestJournalEntryPoint } from '@/components/game/QuestJournalEntryPoint';
 import { QuestJournalPanel } from '@/components/game/QuestJournalPanel';
 import { RelationshipPanel } from '@/components/game/RelationshipPanel';
@@ -56,7 +56,8 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
   const [selectedLogEntryId, setSelectedLogEntryId] = useState<string | null>(null);
   const [recommendedActions, setRecommendedActions] = useState<string[]>([]);
 
-  const { isStreaming, isPending, isComplete, narration, error, usedFallback, streamingDuration, currentStage, submitTurn, clearError } = useTurnStream(sessionId);
+  const { isStreaming, isPending, isComplete, narration, error, usedFallback, streamingDuration, currentStage, streamFallbackNotice, submitTurn, clearError } = useTurnStream(sessionId);
+  const stageLabel = currentStage?.label ?? null;
   const t = useTranslations('Game');
 
   const defaultRecommendedActions = useCallback(() => [
@@ -186,8 +187,8 @@ export function GameSessionContent({ sessionId }: { sessionId: string }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
         <div className="lg:col-span-2 space-y-4">
-          <NarrationPanel narration={currentNarration} isStreaming={isStreaming} isComplete={isComplete} streamingDuration={streamingDuration} />
-          <TurnStageStatus currentStage={currentStage} />
+          <NarrationPanel narration={currentNarration} isStreaming={isStreaming} isComplete={isComplete} streamingDuration={streamingDuration} stageLabel={stageLabel} fallbackNotice={streamFallbackNotice} />
+          {/* TurnStageStatus removed - stage display is now integrated into NarrationPanel */}
           <RecommendedActions
             actions={recommendedActions}
             onSelect={handleAction}

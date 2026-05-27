@@ -179,7 +179,9 @@ export type SSEEventType =
   | 'stage_started'
   | 'stage_completed'
   | 'turn_completed'
-  | 'turn_error';
+  | 'turn_error'
+  | 'heartbeat'
+  | 'stream_fallback';
 
 export interface TurnStartedEvent {
   event: 'turn_started';
@@ -269,6 +271,19 @@ export interface TurnErrorEvent {
   timestamp: string;
 }
 
+export interface HeartbeatEvent {
+  event: 'heartbeat';
+  timestamp: string;
+  elapsed_seconds: number;
+  sequence: number;
+}
+
+export interface StreamFallbackEvent {
+  event: 'stream_fallback';
+  message: string;
+  turn_index?: number;
+}
+
 export type SSEEventData = 
   | TurnStartedEvent 
   | EventCommittedEvent 
@@ -276,7 +291,9 @@ export type SSEEventData =
   | StageStartedEvent
   | StageCompletedEvent
   | TurnCompletedEvent 
-  | TurnErrorEvent;
+  | TurnErrorEvent
+  | HeartbeatEvent
+  | StreamFallbackEvent;
 
 // =============================================================================
 // World Types

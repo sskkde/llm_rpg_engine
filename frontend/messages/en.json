@@ -138,6 +138,7 @@
     "goToSaves": "Go to Saves",
     "narration": "Narration",
     "storyUnfolds": "The story unfolds...",
+    "processingTurn": "Processing current turn...",
     "enterActionToBegin": "Enter an action to begin your adventure...",
     "whatDoYouDo": "What do you do?",
     "send": "Send",

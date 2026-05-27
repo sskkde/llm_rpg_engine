@@ -138,6 +138,7 @@
     "goToSaves": "前往存档",
     "narration": "叙事",
     "storyUnfolds": "故事展开中...",
+    "processingTurn": "正在处理当前回合……",
     "enterActionToBegin": "输入一个行动来开始您的冒险...",
     "whatDoYouDo": "您要做什么？",
     "send": "发送",

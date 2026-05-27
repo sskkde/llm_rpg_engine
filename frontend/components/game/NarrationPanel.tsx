@@ -9,6 +9,8 @@ interface NarrationPanelProps {
   isComplete?: boolean;
   streamingDuration?: number;
   streamingProgress?: number;
+  stageLabel?: string | null;
+  fallbackNotice?: string | null;
 }
 
 function TypingIndicator() {
@@ -61,6 +63,8 @@ export function NarrationPanel({
   isComplete = false,
   streamingDuration = 0,
   streamingProgress,
+  stageLabel,
+  fallbackNotice,
 }: NarrationPanelProps) {
   const t = useTranslations('Game');
   const charCount = narration.length;
@@ -84,8 +88,16 @@ export function NarrationPanel({
         <div className="flex flex-col items-center justify-center py-8 gap-3">
           <TypingIndicator />
           <span className="text-sm text-slate-500 dark:text-slate-400">
-            {t('storyUnfolds')}
+            {stageLabel || t('processingTurn')}
           </span>
+        </div>
+      )}
+
+      {fallbackNotice && (
+        <div className="mb-3 px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+          <p className="text-sm text-amber-700 dark:text-amber-400">
+            {fallbackNotice}
+          </p>
         </div>
       )}
 

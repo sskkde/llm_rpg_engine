@@ -15,7 +15,7 @@ Key features:
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel, ValidationError
 
@@ -37,7 +37,7 @@ from ..models.proposals import (
     create_fallback_npc_action,
     create_fallback_narration,
 )
-from .service import LLMService, LLMMessage, LLMResponse
+from .service import LLMService, LLMMessage, LLMResponse, StreamingNotSupportedError
 from .parsers import OutputParser
 from .repair import RetryRepairHandler, RepairAuditRecord, RepairStatus as RepairHandlerStatus
 
@@ -717,6 +717,103 @@ NPC上下文: {npc_context}
             turn_no=turn_no,
             context=visible_context,
         )
+    
+    async def generate_narration_streaming(
+        self,
+        visible_context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+        on_delta: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
+    ) -> NarrationProposal:
+        """
+        Generate NarrationProposal with streaming text chunks.
+        
+        Uses LLMService.stream_generate() to yield chunks as they become
+        available. Accumulates all chunks into full text, then builds and
+        validates a normal NarrationProposal with the same leak/empty checks.
+        
+        If the provider does not support streaming (StreamingNotSupportedError),
+        falls back to the non-streaming generate_narration() method and emits
+        a ``stream_fallback`` event via ``on_event`` if provided.
+        
+        Args:
+            visible_context: Player-visible context dict
+            prompt_template_id: Optional prompt template ID
+            session_id: Game session ID for audit
+            turn_no: Turn number for audit
+            on_delta: Optional callback invoked for each text chunk.
+                      Each chunk is a string. The callback is called
+                      synchronously (not awaited) to avoid reordering.
+            on_event: Optional callback invoked with dict events during streaming.
+                      Emitted events: ``{"event": "stream_fallback", "data": {"message": ...}}``
+        
+        Returns:
+            NarrationProposal (validated, with full text)
+        """
+        messages = [
+            LLMMessage(
+                role="system",
+                content="你是一个文字RPG游戏的叙事引擎。请根据已提交的事实生成叙事文本。注意：只能描述玩家可见的信息，不能泄露隐藏的秘密。"
+            ),
+            LLMMessage(
+                role="user",
+                content=f"""可见上下文: {visible_context}
+
+请严格按照以下JSON格式输出叙事提案，不要添加任何额外字段：
+{{
+  "text": "叙事文本内容（一段生动的中文描述，100-300字）",
+  "confidence": 0.0到1.0之间的数值
+}}"""
+            ),
+        ]
+        
+        accumulated_chunks: list[str] = []
+        
+        try:
+            async for chunk in self._llm_service.stream_generate(
+                messages=messages,
+                template_id=prompt_template_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                temperature=self._config.temperature,
+                max_tokens=self._config.max_tokens,
+            ):
+                accumulated_chunks.append(chunk)
+                if on_delta:
+                    on_delta(chunk)
+        except StreamingNotSupportedError:
+            if on_event:
+                on_event({
+                    "event": "stream_fallback",
+                    "data": {"message": "Provider does not support streaming, using fallback generation"},
+                })
+            return await self.generate_narration(
+                visible_context=visible_context,
+                prompt_template_id=prompt_template_id,
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        
+        full_text = "".join(accumulated_chunks)
+        
+        if not full_text.strip():
+            # Empty streaming result - use fallback
+            return create_fallback_narration(reason="Streaming produced empty text")
+        
+        proposal = NarrationProposal(
+            text=full_text,
+            confidence=1.0,  # Confidence is unknown for streaming
+            audit=ProposalAuditMetadata(
+                proposal_type=ProposalType.NARRATION,
+                source_engine=ProposalSource.NARRATION_ENGINE,
+                prompt_template_id=prompt_template_id,
+                validation_status=ValidationStatus.PASSED,
+            ),
+        )
+        
+        return proposal
 
 
 def create_proposal_pipeline(

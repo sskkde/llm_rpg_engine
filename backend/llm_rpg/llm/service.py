@@ -7,8 +7,10 @@ This module provides:
 - Prompt template management
 - Output parsing integration
 - Support for both sync and streaming responses
+- stream_generate() async iterator contract with StreamingNotSupportedError
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -53,6 +55,11 @@ class LLMCallLog(BaseModel):
     created_at: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
+class StreamingNotSupportedError(Exception):
+    """Raised when the LLM provider does not support streaming generation."""
+    pass
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
     
@@ -77,6 +84,25 @@ class LLMProvider(ABC):
     ) -> AsyncGenerator[str, None]:
         """Generate a streaming response."""
         pass
+
+    async def stream_generate(
+        self,
+        messages: List[LLMMessage],
+        template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: Optional[int] = None,
+        temperature: float = 0.8,
+        max_tokens: int = 500,
+    ) -> AsyncGenerator[str, None]:
+        """Stream generation from the LLM provider.
+
+        Yields text chunks as they become available.
+        Raises StreamingNotSupportedError if provider cannot stream.
+        """
+        raise StreamingNotSupportedError(
+            f"{type(self).__name__} does not support streaming"
+        )
+        yield  # noqa: unreachable — makes this an async generator
 
 
 class OpenAIProvider(LLMProvider):
@@ -232,6 +258,25 @@ class MockLLMProvider(LLMProvider):
         words = content.split()
         for word in words:
             yield word + " "
+
+    async def stream_generate(
+        self,
+        messages: List[LLMMessage],
+        template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: Optional[int] = None,
+        temperature: float = 0.8,
+        max_tokens: int = 500,
+    ) -> AsyncGenerator[str, None]:
+        full_text = (
+            "凌月站在试炼堂门口，目光如炬。\n\n"
+            "她缓缓开口：\"师弟，你终于来了。\"\n\n"
+            "周围的灵气开始涌动。"
+        )
+        chunk_size = 10
+        for i in range(0, len(full_text), chunk_size):
+            yield full_text[i:i + chunk_size]
+            await asyncio.sleep(0.01)
 
 
 class PromptTemplate:
@@ -654,6 +699,32 @@ class LLMService:
             self._persist_call_log(log)
             
             raise
+    
+    async def stream_generate(
+        self,
+        messages: List[LLMMessage],
+        template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: Optional[int] = None,
+        temperature: float = 0.8,
+        max_tokens: int = 500,
+    ) -> AsyncGenerator[str, None]:
+        """Generate text via streaming from the LLM provider.
+
+        Delegates to the underlying provider's stream_generate.
+        Raises StreamingNotSupportedError if provider cannot stream.
+        """
+        if self._provider is None:
+            raise ValueError("No LLM provider configured")
+        async for chunk in self._provider.stream_generate(
+            messages=messages,
+            template_id=template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
     
     async def generate_with_template(
         self,

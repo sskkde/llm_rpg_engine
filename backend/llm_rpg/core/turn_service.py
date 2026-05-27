@@ -1826,6 +1826,7 @@ def _execute_llm_stages(
     use_mock: bool = False,
     transaction_id: Optional[str] = None,
     progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
+    turn_event_callback: Optional[Callable[[dict], None]] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1860,6 +1861,10 @@ def _execute_llm_stages(
     def _emit(stage: str, phase: str, **kw):
         if progress_callback:
             progress_callback(emit_stage(stage, phase, **kw))
+    
+    def _emit_turn_event(event: dict) -> None:
+        if turn_event_callback:
+            turn_event_callback(event)
     
     results: List[LLMStageResult] = []
     
@@ -1933,6 +1938,17 @@ def _execute_llm_stages(
     )
     results.append(narration_result)
     _emit("narration", "completed")
+    
+    if narration_result.accepted and narration_result.parsed_proposal:
+        narration_text = narration_result.parsed_proposal.get("text", "")
+        if narration_text:
+            _emit_turn_event({
+                "event": "narration_delta",
+                "data": {
+                    "delta": narration_text,
+                    "turn_no": turn_no,
+                },
+            })
     
     return results
 
@@ -2568,6 +2584,7 @@ def execute_turn_service(
     idempotency_key: Optional[str] = None,
     use_mock: bool = False,
     progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
+    turn_event_callback: Optional[Callable[[dict], None]] = None,
 ) -> TurnResult:
     """
     Execute a turn with full transaction support.
@@ -2590,6 +2607,9 @@ def execute_turn_service(
         session_id: The session ID
         player_input: The player's input text
         idempotency_key: Optional idempotency key for retries
+        turn_event_callback: Optional callback invoked with dict events during narration streaming.
+            Each dict has the shape: {"event": "narration_delta", "data": {"delta": chunk_text}}
+            Can be used by streaming endpoint to forward narration chunks as SSE events.
         
     Returns:
         TurnResult with narration, recommended_actions, state_deltas, turn_no
@@ -2602,6 +2622,10 @@ def execute_turn_service(
     def _emit(stage: str, phase: str, **kw):
         if progress_callback:
             progress_callback(emit_stage(stage, phase, **kw))
+    
+    def _emit_turn_event(event: dict) -> None:
+        if turn_event_callback:
+            turn_event_callback(event)
     
     # Step 1: Verify session exists
     session_repo = SessionRepository(db)
@@ -3088,6 +3112,7 @@ def execute_turn_service(
             use_mock=use_mock,
             transaction_id=transaction_id,
             progress_callback=progress_callback,
+            turn_event_callback=turn_event_callback,
         )
         
         # Step 14b: Validate all proposals before committing
@@ -3374,6 +3399,13 @@ def execute_turn_service(
                     final_narration = stage_result.parsed_proposal["text"]
                     event_log_repo = EventLogRepository(db)
                     event_log_repo.update(event.id, {"narrative_text": final_narration})
+                    _emit_turn_event({
+                        "event": "narration_delta",
+                        "data": {
+                            "delta": final_narration,
+                            "turn_no": turn_no,
+                        },
+                    })
         
         # Step 16b: Create game_events for world_tick, scene, NPC, and narration
         if world_progression:

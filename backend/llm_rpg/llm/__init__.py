@@ -21,6 +21,7 @@ from .service import (
     LLMProvider as ServiceLLMProvider,
     OpenAIProvider as ServiceOpenAIProvider,
     MockLLMProvider,
+    StreamingNotSupportedError,
     LLMCallLog,
     PromptTemplate as ServicePromptTemplate,
     get_llm_service,

@@ -985,22 +985,25 @@ class TestNPCStageInLLMStages:
             location_states={}, npc_states={}, quest_states={}, faction_states={},
         )
 
+        narration_context = {}
         results = _execute_llm_stages(
             db=db, session_id="s1", turn_no=1,
             canonical_state=state, player_input="测试",
             action_type="action", current_location_id="loc1",
+            narration_context_out=narration_context,
         )
 
         stage_names = [r.stage_name for r in results]
-        assert "scene" in stage_names
-        assert "npc" in stage_names
-        assert "narration" in stage_names
+        assert {"world", "scene", "npc"}.issubset(stage_names)
+        assert "narration" not in stage_names
+        assert narration_context["current_location_id"] == "loc1"
 
         npc_result = next(r for r in results if r.stage_name == "npc")
         assert npc_result.enabled is True
 
-    def test_npc_reactions_passed_to_narration(self, db):
-        from llm_rpg.core.turn_service import _execute_llm_stages
+    def test_npc_reactions_passed_to_narration(self, db, monkeypatch):
+        from llm_rpg.core import turn_service as service
+        from llm_rpg.core.turn_service import LLMStageResult, _execute_llm_stages
         from llm_rpg.models.states import CanonicalState, WorldState, PlayerState, CurrentSceneState
         from llm_rpg.models.events import WorldTime
 
@@ -1015,19 +1018,50 @@ class TestNPCStageInLLMStages:
             location_states={}, npc_states={}, quest_states={}, faction_states={},
         )
 
+        expected_reactions = [{
+            "npc_id": "npc_t1",
+            "npc_name": "柳师姐",
+            "action_type": "talk",
+            "summary": "向你点头",
+            "visible_to_player": True,
+            "accepted": True,
+        }]
+
+        def _accepted_npc_stage(**kwargs):
+            return LLMStageResult(
+                stage_name="npc",
+                enabled=True,
+                timeout=30.0,
+                parsed_proposal={"npc_reactions": expected_reactions},
+                accepted=True,
+            )
+
+        monkeypatch.setattr(service, "_execute_npc_stage", _accepted_npc_stage)
+        narration_context = {}
         results = _execute_llm_stages(
             db=db, session_id="s1", turn_no=1,
             canonical_state=state, player_input="测试",
             action_type="action", current_location_id="loc1",
+            narration_context_out=narration_context,
         )
 
+        assert "narration" not in [result.stage_name for result in results]
         npc_result = next(r for r in results if r.stage_name == "npc")
-        narration_result = next(r for r in results if r.stage_name == "narration")
-
-        if npc_result.accepted and npc_result.parsed_proposal:
-            npc_reactions = npc_result.parsed_proposal.get("npc_reactions", [])
-            if npc_reactions:
-                assert narration_result.fallback_reason != "narration_stage_disabled"
+        assert npc_result.accepted is True
+        assert npc_result.parsed_proposal is not None
+        npc_reactions = npc_result.parsed_proposal.get("npc_reactions", [])
+        visible_reactions = [
+            {
+                "npc_name": reaction.get("npc_name"),
+                "action_type": reaction.get("action_type"),
+                "summary": reaction.get("summary"),
+                "visible_to_player": reaction.get("visible_to_player", True),
+            }
+            for reaction in npc_reactions
+            if reaction.get("visible_to_player", True) and reaction.get("accepted", False)
+        ]
+        assert visible_reactions
+        assert narration_context["npc_reactions"] == visible_reactions
 
 
 if __name__ == "__main__":

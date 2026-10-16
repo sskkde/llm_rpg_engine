@@ -3,7 +3,8 @@ Unit tests for turn_event_callback plumbing in execute_turn_service.
 
 Tests:
 - test_turn_event_callback_omitted_backward_compat: verifies existing callers work without the new callback
-- test_turn_event_callback_receives_narration_event: verifies callback receives narration_delta dict events
+- test_turn_event_callback_does_not_emit_uncommitted_narration: verifies facts stay out of the service callback
+- progress_callback continues to receive execution progress events
 """
 
 import json
@@ -270,7 +271,7 @@ class TestTurnEventCallbackBackwardCompat:
 
 
 class TestTurnEventCallbackReceivesEvents:
-    def test_callback_receives_narration_delta_event(
+    def test_callback_does_not_emit_fact_narration_before_commit(
         self,
         db: Session,
         test_session: SessionModel,
@@ -289,9 +290,13 @@ class TestTurnEventCallbackReceivesEvents:
         real_llm_service = LLMService(provider=mock_provider, db_session=db)
 
         collected_events: list[dict] = []
+        progress_events = []
 
         def collector(event: dict) -> None:
             collected_events.append(event)
+
+        def progress_collector(event) -> None:
+            progress_events.append(event)
 
         with patch(
             "llm_rpg.core.turn_service._is_narration_stage_enabled",
@@ -314,25 +319,16 @@ class TestTurnEventCallbackReceivesEvents:
                 session_id=test_session.id,
                 player_input="我观察四周",
                 turn_event_callback=collector,
+                progress_callback=progress_collector,
             )
 
         assert result.turn_no == 1
         assert result.validation_passed is True
 
-        narration_events = [
-            e for e in collected_events if e.get("event") == "narration_delta"
-        ]
-        assert len(narration_events) >= 1, (
-            f"Expected at least 1 narration_delta event, got {collected_events}"
-        )
-
-        for evt in narration_events:
-            assert "data" in evt
-            assert "delta" in evt["data"]
-            assert isinstance(evt["data"]["delta"], str)
-            assert len(evt["data"]["delta"]) > 0
-            assert "turn_no" in evt["data"]
-            assert evt["data"]["turn_no"] == result.turn_no
+        assert result.narration == narration_text
+        assert not any(e.get("event") == "narration_delta" for e in collected_events)
+        assert progress_events, "progress_callback should continue receiving stage progress"
+        assert all(event.phase in {"started", "completed"} for event in progress_events)
 
     def test_callback_does_not_affect_result(
         self,
@@ -353,9 +349,13 @@ class TestTurnEventCallbackReceivesEvents:
         real_llm_service = LLMService(provider=mock_provider, db_session=db)
 
         collected_events: list[dict] = []
+        progress_events = []
 
         def collector(event: dict) -> None:
             collected_events.append(event)
+
+        def progress_collector(event) -> None:
+            progress_events.append(event)
 
         with patch(
             "llm_rpg.core.turn_service._is_narration_stage_enabled",
@@ -378,8 +378,10 @@ class TestTurnEventCallbackReceivesEvents:
                 session_id=test_session.id,
                 player_input="我观察四周",
                 turn_event_callback=collector,
+                progress_callback=progress_collector,
             )
 
         assert result_with.turn_no == 1
-        assert result_with.narration is not None
-        assert len(collected_events) >= 1
+        assert result_with.narration == narration_text
+        assert not any(e.get("event") == "narration_delta" for e in collected_events)
+        assert progress_events, "progress_callback should continue receiving stage progress"

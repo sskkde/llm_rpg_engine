@@ -324,7 +324,12 @@ class TestTurnTraceAggregation:
         """Test complete trace chain across multiple turns."""
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
 
-        actions = ["观察四周", "等待", "移动"]
+        # NOTE (phase-1 completion, W4-A): a bare movement keyword ("移动") is now
+        # defined as a zero-time clarification turn, which deliberately writes no
+        # game_events; this test asserts that every turn in the trace chain has at
+        # least one game event, so the sample action was changed to a non-ambiguous
+        # one. The assertions themselves are unchanged.
+        actions = ["观察四周", "等待", "检查四周"]
         for action in actions:
             turn_response = client.post(
                 f"/game/sessions/{session_id}/turn",

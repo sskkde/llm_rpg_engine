@@ -244,6 +244,7 @@ class TestGameEndpointCallsExecuteTurnService:
         mock_result = MagicMock()
         mock_result.turn_no = 1
         mock_result.transaction_id = "txn_test"
+        mock_result.idempotency_key = None
         mock_result.events_committed = 0
         mock_result.actions_committed = 0
         mock_result.world_time = {"calendar": "修仙历", "season": "春", "day": 1, "period": "辰时"}

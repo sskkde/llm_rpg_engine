@@ -382,7 +382,7 @@ class TestSSEStageEventsIntegration:
         )
 
     def test_no_duplicate_narration_delta(self, client, db_engine):
-        """When narration_delta is emitted via turn_event_callback, post-commit should not duplicate it."""
+        """Narration streams once after commit and matches turn_completed."""
         session_id, token = _create_session_via_api(client, db_engine)
 
         response = client.post(
@@ -397,31 +397,47 @@ class TestSSEStageEventsIntegration:
 
         event_names = [name for name, _ in events]
 
-        # Find event_committed position — post-commit narration_delta would appear after it
         committed_indices = [i for i, name in enumerate(event_names) if name == "event_committed"]
-        committed_idx = committed_indices[0] if committed_indices else -1
+        assert committed_indices, f"Expected event_committed, got {event_names}"
+        committed_idx = committed_indices[0]
 
-        # Count narration_delta events BEFORE event_committed (streamed by turn_event_callback)
-        pre_commit_deltas = sum(
-            1 for i, name in enumerate(events)
-            if name[0] == "narration_delta" and (committed_idx == -1 or i < committed_idx)
-        )
+        deltas = [(i, data) for i, (name, data) in enumerate(events) if name == "narration_delta"]
+        pre_commit_deltas = sum(1 for i, _ in deltas if i < committed_idx)
+        post_commit_deltas = sum(1 for i, _ in deltas if i > committed_idx)
 
-        # Count narration_delta events AFTER event_committed (would be the duplicate post-commit one)
-        post_commit_deltas = sum(
-            1 for i, name in enumerate(events)
-            if name[0] == "narration_delta" and committed_idx >= 0 and i > committed_idx
-        )
-
-        assert pre_commit_deltas >= 1, (
-            f"Expected at least 1 narration_delta before event_committed, got {pre_commit_deltas}. "
+        # Plan T3 QA: “更新旧流测试为正确后提交断言，不删除‘不重复’覆盖。”
+        assert pre_commit_deltas == 0, (
+            f"Expected no narration_delta before event_committed, got {pre_commit_deltas}. "
             f"Events: {event_names}"
         )
+        # Exactly one post-commit delta is the updated no-duplicate coverage.
+        assert post_commit_deltas == 1, (
+            f"Expected exactly 1 narration_delta after event_committed, got {post_commit_deltas}. "
+            f"Events: {event_names}"
+        )
+        completed = [data for name, data in events if name == "turn_completed"]
+        assert len(completed) == 1
+        assert completed[0]["narration"] == deltas[0][1]["delta"], (
+            "turn_completed narration must equal the single narration_delta without appending it twice"
+        )
 
-        # streamed_narration_chunks flag prevents post-commit duplicate
-        assert post_commit_deltas == 0, (
-            f"Expected 0 narration_delta after event_committed (post-commit guard), "
-            f"got {post_commit_deltas}. Events: {event_names}"
+    def test_fact_narration_delta_is_emitted_after_event_committed(self, client, db_engine):
+        """T0 contract: fact-bearing narration cannot escape before durable commit."""
+        session_id, token = _create_session_via_api(client, db_engine)
+        response = client.post(
+            f"/streaming/sessions/{session_id}/turn/mock",
+            json={"action": "观察四周"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        events = _parse_sse_events(response.content.decode("utf-8"))
+        names = [name for name, _ in events]
+        committed_idx = names.index("event_committed") if "event_committed" in names else -1
+        delta_indices = [i for i, name in enumerate(names) if name == "narration_delta"]
+        assert committed_idx >= 0 and delta_indices, f"Expected commit and narration events, got {names}"
+        assert all(committed_idx < i for i in delta_indices), (
+            "T0 post-commit narration contract: every narration_delta must follow event_committed; "
+            f"event order was {names}"
         )
 
     def test_narration_delta_in_turn_completed(self, client, db_engine):

@@ -135,6 +135,10 @@ class InputIntentProposal(BaseModel):
     # Audit metadata
     audit: ProposalAuditMetadata = Field(..., description="审计元数据")
     
+    # Clarification metadata (optional for backwards compatibility)
+    needs_clarification: bool = Field(default=False, description="是否需要向玩家澄清")
+    clarification_question: Optional[str] = Field(None, description="面向玩家的澄清问题")
+
     # Fallback flag
     is_fallback: bool = Field(default=False, description="是否为回退结果")
 

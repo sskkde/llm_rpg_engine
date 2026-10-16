@@ -49,11 +49,45 @@ class QuestProgress:
 
 
 @dataclass
+class QuestStatePlan:
+    """A planned (not yet applied) ``session_quest_states`` update.
+
+    Produced by ``advance_quest_step`` in plan mode. It carries the exact column
+    values the direct write used to set — ``current_step_no`` / ``status`` /
+    ``progress_json`` — plus the row identity, so the caller can apply the very
+    same update inside its final authoritative transaction.
+    """
+    quest_state_id: str
+    quest_template_id: str
+    current_step_no: int
+    status: str
+    progress_json: Dict[str, Any]
+
+
+@dataclass
 class QuestProgressionResult:
     """Result of quest progression check."""
     triggered: bool
     quest_progress: Optional[QuestProgress] = None
     message: Optional[str] = None
+
+
+def effective_quest_status(
+    quest_state: SessionQuestStateModel,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+) -> str:
+    """Return the status a quest row has once planned writes are applied.
+
+    Readers that used to observe the already-written row (because quest
+    progression committed during preparation) must use this instead of
+    ``quest_state.status`` while the write is still pending, or they would see the
+    pre-advance status.
+    """
+    if planned_quests:
+        plan = planned_quests.get(quest_state.id)
+        if plan is not None:
+            return plan.status
+    return quest_state.status
 
 
 class QuestProgressionError(Exception):
@@ -90,7 +124,10 @@ def get_visible_quests(db: Session, session_id: str) -> List[SessionQuestStateMo
 def advance_quest_step(
     db: Session,
     session_id: str,
-    quest_template_id: str
+    quest_template_id: str,
+    defer_write: bool = False,
+    plan_out: Optional[List[QuestStatePlan]] = None,
+    planned_state: Optional[SessionQuestStateModel] = None,
 ) -> Optional[QuestProgress]:
     """
     Advance a quest to the next step.
@@ -102,6 +139,13 @@ def advance_quest_step(
         db: SQLAlchemy database session
         session_id: The session ID
         quest_template_id: The quest template ID
+        defer_write: Plan mode. When true the ``session_quest_states`` row is left
+            untouched — no attribute assignment, no ``db.commit()`` and no
+            ``db.refresh()`` — and the pending update is appended to ``plan_out``.
+            The returned ``QuestProgress`` still reports the post-advance values, so
+            the caller can apply the plan in its final transaction. When false the
+            original write path (assignment + commit + refresh) is used verbatim.
+        plan_out: Optional list that receives the ``QuestStatePlan`` in plan mode.
         
     Returns:
         QuestProgress with updated state, or None if quest not found
@@ -111,7 +155,7 @@ def advance_quest_step(
     
     quest_state = quest_state_repo.get_by_session_and_quest(
         session_id, quest_template_id
-    )
+    ) or planned_state
     
     if quest_state is None:
         return None
@@ -125,18 +169,42 @@ def advance_quest_step(
     max_step = max((s.step_no for s in all_steps), default=1)
     
     if current_step_no >= max_step:
-        quest_state.status = "completed"
+        new_status = "completed"
+        new_step_no = current_step_no
         new_progress = dict(quest_state.progress_json)
         new_progress["completed_at_step"] = current_step_no
-        quest_state.progress_json = new_progress
     else:
-        quest_state.current_step_no = current_step_no + 1
+        new_status = quest_state.status
+        new_step_no = current_step_no + 1
         new_progress = dict(quest_state.progress_json)
         new_progress["last_advanced"] = True
+
+    if defer_write:
+        # Plan only: the row is written by the caller's final transaction.
+        if plan_out is not None:
+            plan_out.append(QuestStatePlan(
+                quest_state_id=quest_state.id,
+                quest_template_id=quest_template_id,
+                current_step_no=new_step_no,
+                status=new_status,
+                progress_json=new_progress,
+            ))
+        step_no = new_step_no
+        progress_json = new_progress
+        status = new_status
+    else:
+        if current_step_no >= max_step:
+            quest_state.status = new_status
+        else:
+            quest_state.current_step_no = new_step_no
         quest_state.progress_json = new_progress
-    
-    db.commit()
-    db.refresh(quest_state)
+
+        db.commit()
+        db.refresh(quest_state)
+
+        step_no = quest_state.current_step_no
+        progress_json = quest_state.progress_json
+        status = quest_state.status
     
     quest_template = db.query(QuestTemplateModel).filter(
         QuestTemplateModel.id == quest_template_id
@@ -146,16 +214,19 @@ def advance_quest_step(
         quest_id=quest_state.id,
         quest_template_id=quest_template_id,
         quest_name=quest_template.name if quest_template else "Unknown",
-        step_no=quest_state.current_step_no,
-        progress=quest_state.progress_json,
-        status=quest_state.status,
+        step_no=step_no,
+        progress=progress_json,
+        status=status,
     )
 
 
 def check_quest_progression(
     db: Session,
     session_id: str,
-    action_context: Dict[str, Any]
+    action_context: Dict[str, Any],
+    defer_write: bool = False,
+    plan_out: Optional[List[QuestStatePlan]] = None,
+    planned_quest_states: Optional[List[SessionQuestStateModel]] = None,
 ) -> List[QuestProgressionResult]:
     """
     Check if an action triggers quest progression.
@@ -170,6 +241,9 @@ def check_quest_progression(
             - action_type: "movement" | "npc_interaction" | etc.
             - target_location_code: For movement actions
             - target_npc_id: For NPC interactions
+        defer_write: Plan mode; see ``advance_quest_step``. The return value keeps
+            the same structure and semantics either way.
+        plan_out: Optional list that receives the planned state updates.
             
     Returns:
         List of QuestProgressionResult for any triggered progressions
@@ -182,7 +256,10 @@ def check_quest_progression(
         target_location = action_context.get("target_location_code")
         
         if target_location == "trial_hall":
-            result = _check_trial_hall_progression(db, session_id)
+            result = _check_trial_hall_progression(
+                db, session_id, defer_write=defer_write, plan_out=plan_out,
+                planned_quest_states=planned_quest_states,
+            )
             if result:
                 results.append(result)
     
@@ -200,7 +277,10 @@ def check_quest_progression(
 
 def _check_trial_hall_progression(
     db: Session,
-    session_id: str
+    session_id: str,
+    defer_write: bool = False,
+    plan_out: Optional[List[QuestStatePlan]] = None,
+    planned_quest_states: Optional[List[SessionQuestStateModel]] = None,
 ) -> Optional[QuestProgressionResult]:
     """
     Check if movement to trial_hall advances the first_trial quest.
@@ -208,6 +288,8 @@ def _check_trial_hall_progression(
     Args:
         db: SQLAlchemy database session
         session_id: The session ID
+        defer_write: Plan mode; see ``advance_quest_step``.
+        plan_out: Optional list that receives the planned state updates.
         
     Returns:
         QuestProgressionResult if progression triggered, None otherwise
@@ -240,6 +322,8 @@ def _check_trial_hall_progression(
     quest_state = quest_state_repo.get_by_session_and_quest(
         session_id, first_trial_template.id
     )
+    if quest_state is None:
+        quest_state = next((row for row in (planned_quest_states or []) if row.quest_template_id == first_trial_template.id), None)
     
     if quest_state is None:
         return None
@@ -248,7 +332,14 @@ def _check_trial_hall_progression(
         return None
     
     if quest_state.current_step_no == 1:
-        progress = advance_quest_step(db, session_id, first_trial_template.id)
+        progress = advance_quest_step(
+            db,
+            session_id,
+            first_trial_template.id,
+            defer_write=defer_write,
+            plan_out=plan_out,
+            planned_state=quest_state,
+        )
         
         if progress:
             return QuestProgressionResult(

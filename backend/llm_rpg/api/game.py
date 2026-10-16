@@ -31,6 +31,9 @@ from ..core.turn_service import (
     execute_turn_service,
     SessionNotFoundError as TurnServiceSessionNotFoundError,
     TurnServiceError,
+    TurnBudgetExceededError,
+    TurnClaimConflictError,
+    TurnRecoveryIncompleteError,
     TurnValidationError as TurnServiceValidationError,
     LLMConfigurationError,
     _create_llm_service_from_config,
@@ -108,6 +111,7 @@ def get_or_create_orchestrator(game_id: str, db: Session) -> TurnOrchestrator:
 class TurnRequest(BaseModel):
     action: str = Field(..., description="Player action input")
     idempotency_key: Optional[str] = Field(None, description="Idempotency key for deduplication")
+    request_fingerprint: Optional[str] = Field(None, description="Canonical request fingerprint")
 
 
 class TurnResponse(BaseModel):
@@ -120,6 +124,7 @@ class TurnResponse(BaseModel):
     actions_committed: int
     validation_passed: bool
     transaction_id: str
+    idempotency_key: Optional[str] = None
     time_advance_result: Optional[Dict[str, Any]] = None
 
 
@@ -278,6 +283,7 @@ def execute_turn(
             session_id=session_id,
             player_input=request.action,
             idempotency_key=request.idempotency_key,
+            request_fingerprint=request.request_fingerprint,
         )
 
         return TurnResponse(
@@ -290,7 +296,28 @@ def execute_turn(
             actions_committed=result.actions_committed,
             validation_passed=result.validation_passed,
             transaction_id=result.transaction_id or "",
+            idempotency_key=result.idempotency_key,
             time_advance_result=result.time_advance_result,
+        )
+    except TurnClaimConflictError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": e.code, "message": str(e)},
+        )
+    except TurnBudgetExceededError as e:
+        # 504 rather than 408: the request was received in full and was valid, so the
+        # client is not the slow party. The server acts as a gateway to the model
+        # providers, and its configured service-level turn budget elapsed while waiting
+        # on that upstream work; the turn is refused before any uncommitted result is
+        # persisted, and the same idempotency key can be retried later.
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={"code": e.code, "message": str(e)},
+        )
+    except TurnRecoveryIncompleteError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": e.code, "message": str(e)},
         )
     except LLMConfigurationError as e:
         raise HTTPException(

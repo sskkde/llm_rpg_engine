@@ -26,9 +26,12 @@ Note: runtime/turn_orchestrator.py is DEPRECATED and for reference only.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections.abc import Callable
@@ -39,20 +42,33 @@ from datetime import datetime
 
 TIME_ADVANCE_LLM_MODE = os.getenv("TIME_ADVANCE_LLM_MODE", "reuse")
 
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, sessionmaker
+from fastapi.encoders import jsonable_encoder
 
-from .session_initialization import initialize_session_story_state, SessionInitializationError
+from .turn_concurrency import acquire_turn_lock
+
+from .session_initialization import (
+    initialize_session_story_state, plan_session_story_state, apply_session_story_state,
+    SessionStoryStatePlan, SessionInitializationError,
+)
+from .turn_unit_of_work import TurnUnitOfWork, is_managed
 from .state_reconstruction import reconstruct_canonical_state, StateReconstructionError
 from .turn_allocation import (
     allocate_turn,
-    commit_turn,
     get_current_turn_number,
     TurnAllocationError,
     TurnConflictError,
 )
+from .turn_preparation import TurnWriteBuffer
 from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
-from .quest_progression import check_quest_progression, QuestProgressionError
+from .quest_progression import (
+    check_quest_progression,
+    effective_quest_status,
+    QuestProgressionError,
+    QuestStatePlan,
+)
 from .validator import Validator, ValidationContext
 from .validation import (
     MovementValidator,
@@ -60,6 +76,7 @@ from .validation import (
     NPCKnowledgeValidator,
     NarrationLeakValidator,
 )
+from .validation.narration_leak_validator import ForbiddenNarrationFact
 from .post_commit_memory_writer import (
     update_recall_stats_post_commit,
     write_post_commit_memories,
@@ -73,7 +90,23 @@ from .projections import (
 )
 from ..engines.scheduled_event_processor import ScheduledEventProcessor
 
-from ..storage.models import SessionModel, EventLogModel, MemorySummaryModel, MemoryFactModel
+from ..storage.models import (
+    SessionModel, SessionStateModel, SessionPlayerStateModel, SessionNPCStateModel,
+    SessionInventoryItemModel, SessionQuestStateModel, SessionEventFlagModel,
+    ScheduledEventModel, MemoryFactModel, NPCBeliefModel, NPCPrivateMemoryModel, NPCTemplateModel,
+    GameEventModel,
+    NPCRelationshipMemoryModel, EventLogModel, MemorySummaryModel, TurnTransactionModel,
+)
+from . import turn_claim
+from .turn_claim import (
+    ClaimRejected,
+    ClaimStatus,
+    abort_claim,
+    commit_claim,
+    compute_request_fingerprint,
+    create_or_resume_claim,
+)
+from .turn_claim_runtime import DEFAULT_TURN_BUDGET_SECONDS, ClaimHeartbeat, TurnBudget
 from ..storage.repositories import (
     SessionRepository,
     SessionStateRepository,
@@ -100,6 +133,17 @@ from ..models.states import CanonicalState
 from ..llm.service import LLMService, MockLLMProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _end_read_transaction(db: Session) -> None:
+    """Close a read-only preparation transaction before waiting on a model.
+
+    The UoW guards commit but does not guard rollback. At these call sites W2-A1/A2/A3
+    have moved all preparation writes into plans/buffers, so there are no pending writes
+    to discard; rollback only releases the read transaction and its connection state.
+    """
+    if db.in_transaction():
+        db.rollback()
 
 
 # =============================================================================
@@ -168,11 +212,51 @@ class LLMStageResult:
 
 class TurnServiceError(Exception):
     """Base exception for turn service errors."""
-    
+
     def __init__(self, message: str, session_id: Optional[str] = None, turn_no: Optional[int] = None):
         self.session_id = session_id
         self.turn_no = turn_no
         super().__init__(message)
+
+
+class TurnClaimConflictError(TurnServiceError):
+    """A request cannot claim the current turn under its idempotency key."""
+
+    def __init__(self, code: str, session_id: str):
+        self.code = code
+        super().__init__(f"Turn claim rejected: {code}", session_id=session_id)
+
+
+class TurnBudgetExceededError(TurnServiceError):
+    """The service-level turn budget expired before the authoritative commit.
+
+    The budget bounds the whole turn, including the model-call wait, for every
+    channel that enters ``execute_turn_service``. An overrun turn is never
+    committed: this error is raised at the last check before the final write
+    transaction, so no uncommitted result may reach the database.
+    """
+
+    code = "turn_budget_exceeded"
+
+    def __init__(
+        self,
+        session_id: str,
+        turn_no: Optional[int] = None,
+        total_seconds: Optional[float] = None,
+    ):
+        self.total_seconds = total_seconds
+        detail = "" if total_seconds is None else f" ({total_seconds:g}s budget)"
+        super().__init__(
+            f"Turn budget exceeded before commit{detail}",
+            session_id=session_id,
+            turn_no=turn_no,
+        )
+
+
+class TurnRecoveryIncompleteError(TurnServiceError):
+    """A committed claim cannot be reconstructed from its persisted event snapshot."""
+
+    code = "recovery_incomplete"
 
 
 class SessionNotFoundError(TurnServiceError):
@@ -233,6 +317,9 @@ class TurnResult:
     is_new_turn: bool = True
     llm_stage_results: List[LLMStageResult] = field(default_factory=list)
     time_advance_result: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
+    recovery_status: Optional[str] = None
+    presentation_version: int = 0
 
 
 def _run_async_safe(coro):
@@ -377,7 +464,7 @@ def _build_input_intent_context(
     }
     
     session_state_repo = SessionStateRepository(db)
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = _get_session_state_with_plan(db, session_id)
     
     if session_state:
         context["current_location_id"] = current_location_id or session_state.current_location_id
@@ -422,6 +509,8 @@ def _build_world_context_for_turn(
     session_id: str,
     canonical_state: CanonicalState,
     current_location_id: Optional[str] = None,
+    planned_events: Optional[List[Any]] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
 ) -> Dict[str, Any]:
     """
     Build world context from committed state for world progression candidates.
@@ -439,7 +528,7 @@ def _build_world_context_for_turn(
     }
 
     session_state_repo = SessionStateRepository(db)
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = _get_session_state_with_plan(db, session_id)
 
     if session_state:
         context["world_time"] = _get_world_time(session_state)
@@ -466,10 +555,10 @@ def _build_world_context_for_turn(
                 "code": location.code,
             }
 
-    active_quests = _get_active_quests(db, session_id)
+    active_quests = _get_active_quests(db, session_id, planned_quests=planned_quests)
     context["active_quests"] = active_quests
 
-    recent_events = _get_recent_events(db, session_id, limit=3)
+    recent_events = _get_recent_events(db, session_id, limit=3, planned_events=planned_events)
     context["recent_events"] = recent_events
 
     return context
@@ -572,8 +661,10 @@ def _validate_input_intent_proposal(
             errors.append(f"invalid risk_level: {proposal.risk_level}")
     
     if hasattr(proposal, "intent_type") and proposal.intent_type == "move":
+        needs_clarification = getattr(proposal, "needs_clarification", False) is True
         if not hasattr(proposal, "target") or not proposal.target:
-            errors.append("move intent requires a target")
+            if not needs_clarification:
+                errors.append("move intent requires a target")
     
     return (len(errors) == 0, errors)
 
@@ -659,6 +750,9 @@ def _execute_input_intent_stage(
         )
     
     try:
+        # input_context and provider configuration are plain data; no ORM attributes
+        # are needed after ending the read transaction.
+        _end_read_transaction(db)
         proposal = _run_async_safe(
             pipeline.generate_input_intent(
                 raw_input=raw_input,
@@ -705,6 +799,9 @@ def _execute_input_intent_stage(
             "raw_tokens": getattr(proposal, "raw_tokens", []),
             "confidence": getattr(proposal, "confidence", 0.5),
             "parameters": getattr(proposal, "parameters", {}),
+            "needs_clarification": getattr(proposal, "needs_clarification", False),
+            "clarification_question": getattr(proposal, "clarification_question", None),
+            "visibility": getattr(proposal, "visibility", "player_visible"),
         }
         
         return LLMStageResult(
@@ -745,6 +842,8 @@ def _execute_world_stage(
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
     transaction_id: Optional[str] = None,
+    write_buffer: Optional[TurnWriteBuffer] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
 ) -> LLMStageResult:
     """
     Execute the world progression LLM stage.
@@ -774,6 +873,8 @@ def _execute_world_stage(
         session_id=session_id,
         canonical_state=canonical_state,
         current_location_id=current_location_id,
+        planned_events=write_buffer.planned_event_logs() if write_buffer else None,
+        planned_quests=planned_quests,
     )
 
     try:
@@ -816,6 +917,8 @@ def _execute_world_stage(
         )
 
     try:
+        # world_context and stage configuration are plain data, not ORM objects.
+        _end_read_transaction(db)
         proposal = _run_async_safe(
             pipeline.generate_world_tick(
                 world_context=world_context,
@@ -838,6 +941,7 @@ def _execute_world_stage(
                     target_ref_id=None,
                     is_valid=False,
                     errors_json=validation_errors,
+                    buffer=write_buffer,
                 )
             return LLMStageResult(
                 stage_name=stage_name,
@@ -921,6 +1025,27 @@ def _execute_world_stage(
         )
 
 
+def _load_frozen_narration_forbidden_facts(
+    db: Session,
+    session_id: str,
+    canonical_state: CanonicalState,
+    story_plan: Optional[SessionStoryStatePlan] = None,
+) -> List[ForbiddenNarrationFact]:
+    """Load this turn's forbidden facts once, including baseline NPC overlays."""
+    validator = NarrationLeakValidator()
+    facts = validator._load_db_forbidden_facts(db, session_id, canonical_state, None)
+    planned_npc_ids = [
+        row.get("npc_template_id")
+        for row in (story_plan.npc_states if story_plan is not None else [])
+        if row.get("npc_template_id")
+    ]
+    if planned_npc_ids:
+        for npc in db.query(NPCTemplateModel).filter(NPCTemplateModel.id.in_(planned_npc_ids)).all():
+            if validator._is_checkable_text(npc.hidden_identity):
+                facts.append(ForbiddenNarrationFact(npc.hidden_identity, f"hidden_identity:{npc.id}"))
+    return validator._deduplicate_facts(facts)
+
+
 def _build_narration_context(
     db: Session,
     session_id: str,
@@ -931,6 +1056,9 @@ def _build_narration_context(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     npc_reactions: Optional[List[Dict[str, Any]]] = None,
+    planned_events: Optional[List[Any]] = None,
+    planned_game_events: Optional[List[Any]] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
 ) -> Dict[str, Any]:
     """
     Build narration context from committed state only.
@@ -956,6 +1084,11 @@ def _build_narration_context(
         movement_result: Optional movement result from this turn
         state_deltas: Optional state deltas from this turn
         current_location_id: The current location ID after any movement
+        planned_events: This turn's planned event-log rows (not yet written by the
+            final transaction); merged so the context matches the pre-W2 behaviour
+            where they were already flushed.
+        planned_game_events: This turn's planned game events, merged into the same
+            projection the database rows feed.
         
     Returns:
         Dict with narration context for LLM (private_payload excluded)
@@ -977,7 +1110,7 @@ def _build_narration_context(
     }
     
     session_state_repo = SessionStateRepository(db)
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = _get_session_state_with_plan(db, session_id)
     
     if session_state:
         context["world_time"] = _get_world_time(session_state)
@@ -1023,11 +1156,16 @@ def _build_narration_context(
     if state_deltas and "quest_progression" in state_deltas:
         context["quest_progression"] = state_deltas["quest_progression"]
     
-    active_quests = _get_active_quests(db, session_id)
+    active_quests = _get_active_quests(db, session_id, planned_quests=planned_quests)
     context["active_quests"] = active_quests
     
     game_event_repo = GameEventRepository(db)
-    recent_event_models = game_event_repo.get_by_session(session_id, limit=10)
+    planned_game_event_rows = [event for event in (planned_game_events or []) if event is not None]
+    recent_event_models = _merge_planned_game_events(
+        game_event_repo.get_by_session(session_id, limit=10 + len(planned_game_event_rows)),
+        planned_game_event_rows,
+        limit=10,
+    )
     
     if recent_event_models:
         recent_game_events = []
@@ -1078,10 +1216,14 @@ def _build_narration_context(
             
             context["narration_events"] = narration_events
         else:
-            recent_events = _get_recent_events(db, session_id, limit=5)
+            recent_events = _get_recent_events(
+                db, session_id, limit=5, planned_events=planned_events
+            )
             context["recent_events"] = recent_events
     else:
-        recent_events = _get_recent_events(db, session_id, limit=5)
+        recent_events = _get_recent_events(
+            db, session_id, limit=5, planned_events=planned_events
+        )
         context["recent_events"] = recent_events
     
     if npc_reactions:
@@ -1110,6 +1252,16 @@ def _build_narration_context(
     return context
 
 
+def _get_session_state_with_plan(db: Session, session_id: str) -> Any:
+    """Use the read-only baseline overlay only when the durable row is absent."""
+    state = SessionStateRepository(db).get_by_session(session_id)
+    if state is None:
+        plan = db.info.get("session_story_state_plan")
+        if plan is not None and plan.session_id == session_id:
+            return plan.session_state_overlay()
+    return state
+
+
 def _get_visible_npcs(
     db: Session,
     session_id: str,
@@ -1126,6 +1278,10 @@ def _get_visible_npcs(
     
     npc_state_repo = SessionNPCStateRepository(db)
     npc_states = npc_state_repo.get_by_session(session_id)
+    story_plan = db.info.get("session_story_state_plan")
+    if story_plan is not None and story_plan.session_id == session_id:
+        present_templates = {row.npc_template_id for row in npc_states}
+        npc_states.extend(row for row in story_plan.npc_state_overlays() if row.npc_template_id not in present_templates)
     
     visible_npcs = []
     npc_template_repo = NPCTemplateRepository(db)
@@ -1144,22 +1300,42 @@ def _get_visible_npcs(
     return visible_npcs
 
 
-def _get_active_quests(db: Session, session_id: str) -> List[Dict[str, Any]]:
-    """Get active quests for the session."""
+def _get_active_quests(
+    db: Session,
+    session_id: str,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+) -> List[Dict[str, Any]]:
+    """Get active quests for the session.
+
+    ``planned_quests`` maps ``session_quest_states.id`` to this turn's planned
+    progression update (``core/quest_progression.py``). Quest progression used to
+    write its row during preparation, so this reader observed the post-advance
+    status; while the write is pending the plan is applied here instead. The plan
+    only replaces field values, so the row set, the iteration order and every
+    returned field match what the query would have produced had the row already
+    been written — including a quest that the advance completed and that must
+    therefore disappear from the active list.
+    """
     quest_state_repo = SessionQuestStateRepository(db)
     quest_states = quest_state_repo.get_by_session(session_id)
+    story_plan = db.info.get("session_story_state_plan")
+    if story_plan is not None and story_plan.session_id == session_id:
+        present_templates = {row.quest_template_id for row in quest_states}
+        quest_states.extend(row for row in story_plan.quest_state_overlays() if row.quest_template_id not in present_templates)
     
     active_quests = []
     quest_template_repo = QuestTemplateRepository(db)
     
     for qs in quest_states:
-        if qs.status == "active":
+        status = effective_quest_status(qs, planned_quests)
+        if status == "active":
             quest_template = quest_template_repo.get_by_id(qs.quest_template_id)
             if quest_template:
+                plan = planned_quests.get(qs.id) if planned_quests else None
                 active_quests.append({
                     "name": quest_template.name,
-                    "current_step_no": qs.current_step_no,
-                    "status": qs.status,
+                    "current_step_no": plan.current_step_no if plan is not None else qs.current_step_no,
+                    "status": status,
                 })
     
     return active_quests
@@ -1169,13 +1345,35 @@ def _get_recent_events(
     db: Session,
     session_id: str,
     limit: int = 5,
+    planned_events: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Get recent event log entries for narration context."""
+    """Get recent event log entries for narration context.
+
+    ``planned_events`` are this turn's event-log rows that preparation planned but
+    the final transaction has not written yet (``core/turn_preparation.py``). They
+    used to be flushed before the LLM stages, so the context builders saw them; the
+    merge below reproduces that projection exactly.
+
+    Equivalence: ``EventLogRepository.get_recent`` orders by ``turn_no`` DESC and
+    takes ``limit`` rows, which this function then reverses. The planned rows belong
+    to the current (highest) turn, so fetching ``limit + len(planned)`` database rows,
+    merging and keeping the top ``limit`` by ``turn_no`` DESC yields the very same row
+    set and order the query would have returned had they already been flushed — the
+    planned rows simply occupy the slots they would have occupied.
+    """
+    planned = [event for event in (planned_events or []) if event is not None]
+
     event_log_repo = EventLogRepository(db)
-    recent = event_log_repo.get_recent(session_id, limit=limit)
+    recent = event_log_repo.get_recent(session_id, limit=limit + len(planned))
+
+    merged = list(recent) + planned
+    # Stable sort: database rows keep their query order, planned rows (appended last)
+    # stay after database rows of an equal turn_no.
+    merged.sort(key=lambda event: event.turn_no, reverse=True)
+    merged = merged[:limit]
     
     events = []
-    for event in reversed(recent):
+    for event in reversed(merged):
         events.append({
             "turn_no": event.turn_no,
             "event_type": event.event_type,
@@ -1184,6 +1382,29 @@ def _get_recent_events(
         })
     
     return events
+
+
+def _merge_planned_game_events(
+    db_rows: List[Any],
+    planned_events: Optional[List[Any]],
+    limit: int,
+) -> List[Any]:
+    """Merge planned game events into a ``GameEventRepository.get_by_session`` result.
+
+    ``get_by_session`` orders by ``(turn_no, occurred_at)`` ascending and takes the
+    first ``limit`` rows, so it returns the *oldest* rows. The planned events belong
+    to the current (highest) turn and carry the ``occurred_at`` captured when the
+    direct write used to happen, so fetching ``limit + len(planned)`` rows, merging
+    and truncating to ``limit`` reproduces exactly the row set and order the query
+    would have returned had they already been flushed.
+    """
+    planned = [event for event in (planned_events or []) if event is not None]
+    if not planned:
+        return db_rows
+
+    merged = list(db_rows) + planned
+    merged.sort(key=lambda event: (event.turn_no, event.occurred_at))
+    return merged[:limit]
 
 
 def _build_scene_context(
@@ -1195,6 +1416,8 @@ def _build_scene_context(
     movement_result: Optional[MovementResult] = None,
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
+    planned_events: Optional[List[Any]] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
 ) -> Dict[str, Any]:
     """
     Build scene context from committed state for scene candidate generation.
@@ -1217,7 +1440,7 @@ def _build_scene_context(
     }
     
     session_state_repo = SessionStateRepository(db)
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = _get_session_state_with_plan(db, session_id)
     
     context["current_location_id"] = current_location_id
     if session_state:
@@ -1251,10 +1474,10 @@ def _build_scene_context(
     visible_npcs = _get_visible_npcs(db, session_id, current_location_id)
     context["visible_npcs"] = visible_npcs
     
-    active_quests = _get_active_quests(db, session_id)
+    active_quests = _get_active_quests(db, session_id, planned_quests=planned_quests)
     context["active_quests"] = active_quests
     
-    recent_events = _get_recent_events(db, session_id, limit=5)
+    recent_events = _get_recent_events(db, session_id, limit=5, planned_events=planned_events)
     context["recent_events"] = recent_events
     
     player_state = canonical_state.player_state
@@ -1287,6 +1510,10 @@ def _get_active_npcs_at_location(
     
     npc_state_repo = SessionNPCStateRepository(db)
     npc_states = npc_state_repo.get_by_session(session_id)
+    story_plan = db.info.get("session_story_state_plan")
+    if story_plan is not None and story_plan.session_id == session_id:
+        present_templates = {row.npc_template_id for row in npc_states}
+        npc_states.extend(row for row in story_plan.npc_state_overlays() if row.npc_template_id not in present_templates)
     
     active_npcs = []
     npc_template_repo = NPCTemplateRepository(db)
@@ -1335,6 +1562,8 @@ def _build_npc_context(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     recent_npc_actions: Optional[List[Dict[str, Any]]] = None,
+    planned_events: Optional[List[Any]] = None,
+    planned_game_events: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build NPC context for LLM NPC decision generation.
@@ -1367,6 +1596,10 @@ def _build_npc_context(
     
     npc_state_repo = SessionNPCStateRepository(db)
     npc_states = npc_state_repo.get_by_session(session_id)
+    story_plan = db.info.get("session_story_state_plan")
+    if story_plan is not None and story_plan.session_id == session_id:
+        present_templates = {row.npc_template_id for row in npc_states}
+        npc_states.extend(row for row in story_plan.npc_state_overlays() if row.npc_template_id not in present_templates)
     npc_state = None
     for ns in npc_states:
         if ns.id == npc_id:
@@ -1413,7 +1646,12 @@ def _build_npc_context(
     
     # Use NPCVisibleProjectionBuilder to filter events for NPC perspective
     game_event_repo = GameEventRepository(db)
-    recent_event_models = game_event_repo.get_by_session(session_id, limit=10)
+    planned_game_event_rows = [event for event in (planned_game_events or []) if event is not None]
+    recent_event_models = _merge_planned_game_events(
+        game_event_repo.get_by_session(session_id, limit=10 + len(planned_game_event_rows)),
+        planned_game_event_rows,
+        limit=10,
+    )
     
     if recent_event_models:
         # Convert GameEventModel to GameEvent Pydantic model
@@ -1475,11 +1713,15 @@ def _build_npc_context(
             context["perception_constraints"] = perception_constraints
         else:
             # Fallback to simple recent events if no GameEvent objects
-            recent_events = _get_recent_events(db, session_id, limit=3)
+            recent_events = _get_recent_events(
+                db, session_id, limit=3, planned_events=planned_events
+            )
             context["recent_events"] = recent_events
     else:
         # Fallback to simple recent events if no events in DB
-        recent_events = _get_recent_events(db, session_id, limit=3)
+        recent_events = _get_recent_events(
+            db, session_id, limit=3, planned_events=planned_events
+        )
         context["recent_events"] = recent_events
     
     if recent_npc_actions:
@@ -1590,6 +1832,7 @@ def _execute_npc_stage(
     current_location_id: Optional[str] = None,
     recent_npc_actions: Optional[List[Dict[str, Any]]] = None,
     use_mock: bool = False,
+    write_buffer: Optional[TurnWriteBuffer] = None,
 ) -> LLMStageResult:
     """
     Execute the NPC LLM stage.
@@ -1686,12 +1929,16 @@ def _execute_npc_stage(
             state_deltas=state_deltas,
             current_location_id=current_location_id,
             recent_npc_actions=working_recent_actions,
+            planned_events=write_buffer.planned_event_logs() if write_buffer else None,
+            planned_game_events=write_buffer.planned_game_events() if write_buffer else None,
         )
         
         if not npc_context:
             continue
         
         try:
+            # npc_context and the NPC fields retained from active_npcs are plain data.
+            _end_read_transaction(db)
             proposal = _run_async_safe(
                 pipeline.generate_npc_action(
                     npc_id=npc_id,
@@ -1827,6 +2074,11 @@ def _execute_llm_stages(
     transaction_id: Optional[str] = None,
     progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
     turn_event_callback: Optional[Callable[[dict], None]] = None,
+    write_buffer: Optional[TurnWriteBuffer] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+    *,
+    narration_context_out: Dict[str, Any],
+    narration_forbidden_info_out: Optional[List[Any]] = None,
 ) -> List[LLMStageResult]:
     """
     Execute LLM-enabled stages for a turn (excluding input_intent which runs earlier).
@@ -1854,6 +2106,13 @@ def _execute_llm_stages(
         state_deltas: Optional state deltas from this turn
         current_location_id: The current location ID after any movement
         progress_callback: Optional callback for progress events
+        write_buffer: Optional preparation write buffer. Its planned rows are the
+            rows this turn will write in the final transaction, so every context
+            builder merges them in to keep seeing this turn's events exactly as it
+            did when preparation flushed them.
+        planned_quests: Optional map of this turn's planned quest-progression
+            updates, merged into ``active_quests`` by the context builders for the
+            same reason (see ``_get_active_quests``).
         
     Returns:
         List of LLMStageResult objects, one per stage executed
@@ -1869,6 +2128,8 @@ def _execute_llm_stages(
     results: List[LLMStageResult] = []
     
     _emit("world_stage", "started")
+    # A prior stage's post-model validation/audit may have read through this Session.
+    _end_read_transaction(db)
     world_result = _execute_world_stage(
         db=db,
         session_id=session_id,
@@ -1877,11 +2138,14 @@ def _execute_llm_stages(
         current_location_id=current_location_id,
         use_mock=use_mock,
         transaction_id=transaction_id,
+        write_buffer=write_buffer,
+        planned_quests=planned_quests,
     )
     results.append(world_result)
     _emit("world_stage", "completed")
     
     _emit("scene_stage", "started")
+    _end_read_transaction(db)
     scene_result = _execute_scene_stage(
         db=db,
         session_id=session_id,
@@ -1893,11 +2157,14 @@ def _execute_llm_stages(
         state_deltas=state_deltas,
         current_location_id=current_location_id,
         use_mock=use_mock,
+        write_buffer=write_buffer,
+        planned_quests=planned_quests,
     )
     results.append(scene_result)
     _emit("scene_stage", "completed")
     
     _emit("npc_stage", "started")
+    _end_read_transaction(db)
     npc_result = _execute_npc_stage(
         db=db,
         session_id=session_id,
@@ -1909,6 +2176,7 @@ def _execute_llm_stages(
         state_deltas=state_deltas,
         current_location_id=current_location_id,
         use_mock=use_mock,
+        write_buffer=write_buffer,
     )
     results.append(npc_result)
     npc_name_for_progress: Optional[str] = None
@@ -1922,34 +2190,53 @@ def _execute_llm_stages(
     if npc_result.accepted and npc_result.parsed_proposal:
         npc_reactions_for_narration = npc_result.parsed_proposal.get("npc_reactions", [])
     
-    _emit("narration", "started")
-    narration_result = _execute_narration_stage(
-        db=db,
-        session_id=session_id,
-        turn_no=turn_no,
-        canonical_state=canonical_state,
-        player_input=player_input,
-        action_type=action_type,
-        movement_result=movement_result,
-        state_deltas=state_deltas,
-        current_location_id=current_location_id,
-        npc_reactions=npc_reactions_for_narration,
-        use_mock=use_mock,
-    )
-    results.append(narration_result)
-    _emit("narration", "completed")
+    # Freeze the complete player-visible narration context while this turn's
+    # preparation overlay is available. The later post-commit model call receives
+    # only this plain-data snapshot and never reconstructs context from newer state.
+    if narration_context_out is not None:
+        frozen_context = _build_narration_context(
+            db=db,
+            session_id=session_id,
+            canonical_state=canonical_state,
+            player_input=player_input,
+            action_type=action_type,
+            movement_result=movement_result,
+            state_deltas=state_deltas,
+            current_location_id=current_location_id,
+            planned_events=write_buffer.planned_event_logs() if write_buffer else None,
+            planned_game_events=write_buffer.planned_game_events() if write_buffer else None,
+            planned_quests=planned_quests,
+        )
+        if npc_reactions_for_narration:
+            visible_reactions = [
+                {
+                    "npc_name": reaction.get("npc_name"),
+                    "action_type": reaction.get("action_type"),
+                    "summary": reaction.get("summary"),
+                    "visible_to_player": reaction.get("visible_to_player", True),
+                }
+                for reaction in npc_reactions_for_narration
+                if reaction.get("visible_to_player", True) and reaction.get("accepted", False)
+            ]
+            if visible_reactions:
+                frozen_context["npc_reactions"] = visible_reactions
+        narration_context_out.clear()
+        narration_context_out.update(jsonable_encoder(frozen_context))
+        # Freeze hidden facts separately; they are validation inputs only and are
+        # never sent to the narration model as part of its visible context.
+        narration_forbidden_info = _load_frozen_narration_forbidden_facts(
+            db,
+            session_id,
+            canonical_state,
+            db.info.get("session_story_state_plan"),
+        )
+        if narration_forbidden_info_out is not None:
+            narration_forbidden_info_out.clear()
+            narration_forbidden_info_out.extend(narration_forbidden_info)
     
-    if narration_result.accepted and narration_result.parsed_proposal:
-        narration_text = narration_result.parsed_proposal.get("text", "")
-        if narration_text:
-            _emit_turn_event({
-                "event": "narration_delta",
-                "data": {
-                    "delta": narration_text,
-                    "turn_no": turn_no,
-                },
-            })
-    
+    # Narration is deliberately not streamed here: the turn has not crossed
+    # its durable commit boundary yet. The streaming endpoint emits the saved
+    # TurnResult snapshot only after execute_turn_service returns.
     return results
 
 
@@ -1965,6 +2252,9 @@ def _execute_narration_stage(
     current_location_id: Optional[str] = None,
     npc_reactions: Optional[List[Dict[str, Any]]] = None,
     use_mock: bool = False,
+    write_buffer: Optional[TurnWriteBuffer] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+    frozen_context: Optional[Dict[str, Any]] = None,
 ) -> LLMStageResult:
     """
     Execute the narration LLM stage.
@@ -1989,31 +2279,36 @@ def _execute_narration_stage(
             fallback_reason="narration_stage_disabled",
         )
     
-    narration_context = _build_narration_context(
-        db=db,
-        session_id=session_id,
-        canonical_state=canonical_state,
-        player_input=player_input,
-        action_type=action_type,
-        movement_result=movement_result,
-        state_deltas=state_deltas,
-        current_location_id=current_location_id,
-    )
-    
-    # Expose player-visible NPC reactions to narration context
-    if npc_reactions:
-        visible_reactions = [
-            {
-                "npc_name": r.get("npc_name"),
-                "action_type": r.get("action_type"),
-                "summary": r.get("summary"),
-                "visible_to_player": r.get("visible_to_player", True),
-            }
-            for r in npc_reactions
-            if r.get("visible_to_player", True) and r.get("accepted", False)
-        ]
-        if visible_reactions:
-            narration_context["npc_reactions"] = visible_reactions
+    narration_context = frozen_context
+    if narration_context is None:
+        # Preserve the historical standalone behavior for other callers/tests.
+        narration_context = _build_narration_context(
+            db=db,
+            session_id=session_id,
+            canonical_state=canonical_state,
+            player_input=player_input,
+            action_type=action_type,
+            movement_result=movement_result,
+            state_deltas=state_deltas,
+            current_location_id=current_location_id,
+            npc_reactions=npc_reactions,
+            planned_events=write_buffer.planned_event_logs() if write_buffer else None,
+            planned_game_events=write_buffer.planned_game_events() if write_buffer else None,
+            planned_quests=planned_quests,
+        )
+        if npc_reactions:
+            visible_reactions = [
+                {
+                    "npc_name": r.get("npc_name"),
+                    "action_type": r.get("action_type"),
+                    "summary": r.get("summary"),
+                    "visible_to_player": r.get("visible_to_player", True),
+                }
+                for r in npc_reactions
+                if r.get("visible_to_player", True) and r.get("accepted", False)
+            ]
+            if visible_reactions:
+                narration_context["npc_reactions"] = visible_reactions
     
     try:
         from ..services.settings import SystemSettingsService
@@ -2055,6 +2350,8 @@ def _execute_narration_stage(
         )
     
     try:
+        # narration_context is the complete plain-data model input.
+        _end_read_transaction(db)
         proposal = _run_async_safe(
             pipeline.generate_narration(
                 visible_context=narration_context,
@@ -2344,6 +2641,8 @@ def _execute_scene_stage(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
+    write_buffer: Optional[TurnWriteBuffer] = None,
+    planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
 ) -> LLMStageResult:
     """
     Execute the scene LLM stage.
@@ -2380,6 +2679,8 @@ def _execute_scene_stage(
         movement_result=movement_result,
         state_deltas=state_deltas,
         current_location_id=current_location_id,
+        planned_events=write_buffer.planned_event_logs() if write_buffer else None,
+        planned_quests=planned_quests,
     )
     
     try:
@@ -2422,6 +2723,8 @@ def _execute_scene_stage(
         )
     
     try:
+        # scene_context and scene_id are plain data; no expired ORM value is reused.
+        _end_read_transaction(db)
         scene_id = current_location_id or "unknown"
         
         proposal = _run_async_safe(
@@ -2577,6 +2880,43 @@ def _validate_explicit_llm_config(db: Session) -> None:
             )
 
 
+class TurnStateConflictError(TurnServiceError):
+    """The authoritative session state changed while a turn was being prepared."""
+
+    code = "state_conflict"
+
+    def __init__(self, session_id: str):
+        super().__init__("Turn state changed before commit", session_id=session_id)
+
+
+def compute_state_fingerprint(db: Session, session_id: str) -> str:
+    """Hash decision-relevant persisted state, including row membership."""
+    models_and_fields = (
+        (SessionModel, ("id", "world_id", "status", "current_chapter_id")),
+        (SessionStateModel, ("id", "current_time", "time_phase", "current_location_id", "active_mode", "global_flags_json")),
+        (SessionPlayerStateModel, ("id", "realm_stage", "hp", "max_hp", "stamina", "spirit_power", "relation_bias_json", "conditions_json")),
+        (SessionNPCStateModel, ("id", "npc_template_id", "current_location_id", "trust_score", "suspicion_score", "status_flags", "short_memory_summary", "hidden_plan_state")),
+        (SessionInventoryItemModel, ("id", "item_template_id", "owner_type", "owner_ref_id", "quantity", "durability", "bound_flag")),
+        (SessionQuestStateModel, ("id", "quest_template_id", "current_step_no", "progress_json", "status", "player_visibility", "revealed_at", "reveal_source_event_id", "last_revealed_step_no")),
+        (SessionEventFlagModel, ("id", "flag_key", "flag_value")),
+        (ScheduledEventModel, ("id", "event_template_id", "trigger_time", "trigger_conditions_json", "status")),
+        (MemoryFactModel, ("id", "fact_type", "subject_ref", "fact_key", "fact_value", "confidence", "source_event_id")),
+        (NPCBeliefModel, ("id", "npc_id", "belief_type", "content", "confidence", "truth_status", "source_event_id", "created_turn", "last_updated_turn")),
+        (NPCPrivateMemoryModel, ("id", "npc_id", "memory_type", "content", "source_event_ids_json", "entities_json", "importance", "emotional_weight", "confidence", "current_strength", "created_turn", "last_accessed_turn", "recall_count", "memory_kind", "memory_text", "short_summary", "knowledge_source", "source_id", "source_ref", "source_turn_no", "salience", "visibility", "status", "tags_json", "entity_refs_json", "location_id", "world_time_text", "world_time_json", "checksum", "superseded_by", "contradicts_memory_ids_json", "recall_policy_json")),
+        (NPCRelationshipMemoryModel, ("id", "npc_id", "target_id", "content", "impact_json", "source_event_id", "created_turn")),
+    )
+    state = []
+    for model, fields in models_and_fields:
+        membership_column = model.id if model is SessionModel else model.session_id
+        rows = db.query(model).filter(membership_column == session_id).all()
+        state.append((model.__tablename__, sorted(
+            [{field: getattr(row, field) for field in fields} for row in rows],
+            key=lambda row: str(row["id"]),
+        )))
+    encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def execute_turn_service(
     db: Session,
     session_id: str,
@@ -2585,6 +2925,9 @@ def execute_turn_service(
     use_mock: bool = False,
     progress_callback: Optional[Callable[[TurnProgressEvent], None]] = None,
     turn_event_callback: Optional[Callable[[dict], None]] = None,
+    request_fingerprint: Optional[str] = None,
+    claim_session_factory: Optional[Callable[[], Session]] = None,
+    claim_budget: Optional[TurnBudget] = None,
 ) -> TurnResult:
     """
     Execute a turn with full transaction support.
@@ -2607,9 +2950,22 @@ def execute_turn_service(
         session_id: The session ID
         player_input: The player's input text
         idempotency_key: Optional idempotency key for retries
-        turn_event_callback: Optional callback invoked with dict events during narration streaming.
-            Each dict has the shape: {"event": "narration_delta", "data": {"delta": chunk_text}}
-            Can be used by streaming endpoint to forward narration chunks as SSE events.
+        request_fingerprint: **Deprecated, transport-compatibility only.** The server
+            always recomputes the fingerprint from the authoritative input
+            (``compute_request_fingerprint(player_input, None)``); a client-supplied
+            value never takes part in claim adjudication, because trusting it would let
+            a caller forge a match and bypass same-key/different-input conflict
+            detection. The claim row stores the recomputed value.
+        claim_session_factory: Optional factory for the independent Session the claim
+            heartbeat renews the lease from. Must connect to the same database.
+        claim_budget: Optional service-level budget for this turn (default
+            ``TurnBudget(DEFAULT_TURN_BUDGET_SECONDS)``, 600s unless
+            ``TURN_TOTAL_BUDGET_SECONDS`` overrides it). Once expired, the lease stops
+            being renewed and an uncommitted turn is refused with
+            ``TurnBudgetExceededError``.
+        turn_event_callback: Optional callback for post-commit turn events. Fact narration
+            is emitted by the streaming endpoint only after the authoritative commit.
+            The service does not send narration_delta through this callback.
         
     Returns:
         TurnResult with narration, recommended_actions, state_deltas, turn_no
@@ -2617,6 +2973,8 @@ def execute_turn_service(
     Raises:
         SessionNotFoundError: If session not found
         TurnValidationError: If validation fails
+        TurnClaimConflictError: If the claim cannot be held under its idempotency key
+        TurnBudgetExceededError: If the turn budget expired before the commit
         TurnServiceError: For other errors
     """
     def _emit(stage: str, phase: str, **kw):
@@ -2639,74 +2997,168 @@ def execute_turn_service(
     
     world_id = session.world_id
 
-    # Preflight: Validate explicit LLM provider config before any DB writes.
-    # Mock-only call paths intentionally bypass global provider settings.
-    if not use_mock:
-        _validate_explicit_llm_config(db)
-    
+    # Claim before business preparation; turn number is assigned under its session lock.
+    claim_key = idempotency_key if idempotency_key is not None else str(uuid.uuid4())
+    # W1b: the fingerprint is always recomputed server-side from the authoritative
+    # input (action text + the currently empty structured params, protocol v1). The
+    # ``request_fingerprint`` argument is kept only so existing clients keep working;
+    # adjudicating on it would let a caller send one forged value for two different
+    # inputs and turn a same-key/different-input conflict into a silent replay.
+    fingerprint = compute_request_fingerprint(player_input, None)
+    outcome = create_or_resume_claim(db, session_id, claim_key, fingerprint)
+    if outcome.status == ClaimStatus.NEW and outcome.token is not None:
+        # Persist request metadata with the short claim transaction. The claim row
+        # is otherwise read-only during the UoW, so lease takeover is not held up
+        # by any later LLM call.
+        claim_row = db.query(TurnTransactionModel).filter_by(
+            id=outcome.token.transaction_id
+        ).one()
+        claim_session_state = SessionStateRepository(db).get_by_session(session_id)
+        claim_row.player_input = player_input
+        claim_row.world_time_before = _format_world_time(
+            _get_world_time(claim_session_state)
+        )
+    db.commit()
+    if outcome.status == ClaimStatus.RESUME_COMMITTED:
+        existing = _get_existing_turn_result(db, session_id, outcome.token.turn_no if outcome.token else turn_no)
+        if existing is None:
+            raise TurnRecoveryIncompleteError(
+                "Committed turn claim has no complete player_turn result snapshot",
+                session_id=session_id,
+                turn_no=outcome.token.turn_no if outcome.token else turn_no,
+            )
+        existing.idempotency_key = claim_key
+        return existing
+    conflicts = {
+        ClaimStatus.FINGERPRINT_CONFLICT: "fingerprint_conflict",
+        ClaimStatus.SUPERSEDED: "claim_superseded",
+        ClaimStatus.ACTIVE_CONFLICT: "turn_in_progress",
+        ClaimStatus.LEGACY_INCONSISTENT: "legacy_inconsistent",
+        ClaimStatus.LEGACY: "legacy_claim",
+        ClaimStatus.EXPIRED: "claim_expired",
+    }
+    if outcome.status in conflicts:
+        raise TurnClaimConflictError(conflicts[outcome.status], session_id)
+    claim_token = outcome.token
+    if claim_token is None:
+        raise TurnServiceError("Turn claim did not return a token", session_id=session_id)
+    turn_no = claim_token.turn_no
+    fp_before = compute_state_fingerprint(db, session_id)
+
+    turn_uow = None
+    heartbeat: Optional[ClaimHeartbeat] = None
+    # Service-level budget for this turn: one monotonic deadline that covers every
+    # channel (REST and SSE share this entry point) and the model-call wait inside it.
+    budget = claim_budget if claim_budget is not None else TurnBudget(DEFAULT_TURN_BUDGET_SECONDS)
+    # Tracks whether the single authoritative db.commit() was already attempted, so the
+    # failure path can tell "receipt unknown" apart from "never tried to commit".
+    authoritative_commit_attempted = False
+
+    def _stop_heartbeat() -> None:
+        if heartbeat is not None:
+            heartbeat.stop()
+
+    def _rollback_turn_uow(error: Exception) -> None:
+        nonlocal turn_uow
+        if turn_uow is not None:
+            turn_uow.__exit__(type(error), error, error.__traceback__)
+            turn_uow = None
+
+    def _abort_before_execution(error: Exception) -> None:
+        _stop_heartbeat()
+        _rollback_turn_uow(error)
+        try:
+            abort_claim(db, claim_token, {"category": "preparation_failed", "type": type(error).__name__})
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    # Preflight is deliberately after claim; failures must release the pending claim.
+    try:
+        if not use_mock:
+            _validate_explicit_llm_config(db)
+    except Exception as e:
+        _abort_before_execution(e)
+        raise
+
+    # Own every authoritative write through the final transaction commit.
+    turn_uow = TurnUnitOfWork(db, guard_commits=True)
+    turn_uow.__enter__()
+
+    # W2: preparation plans its "event class" writes (validation reports, game events
+    # and this turn's event-log row) here instead of writing them. The plan is applied
+    # in the final write section, inside this single unit of work, so preparation no
+    # longer opens a business transaction or locks rows before the model runs.
+    write_buffer = TurnWriteBuffer()
+    db.info["turn_write_buffer"] = write_buffer
+
+    # Renew the claim lease from an independent Session for the whole execution body,
+    # so the model-wait window never holds a business transaction or the session lock.
+    # The budget rides along: once it expires the heartbeat stops renewing, which is
+    # what makes the lease run out for a turn that overran its service deadline.
+    heartbeat = ClaimHeartbeat(
+        claim_session_factory
+        or sessionmaker(bind=db.get_bind(), autoflush=False, expire_on_commit=False),
+        claim_token,
+        interval=turn_claim.HEARTBEAT_INTERVAL_SECONDS,
+        budget=budget,
+    )
+    heartbeat.start()
+
     # Step 2: Initialize session story state if needed (idempotent)
     try:
-        initialize_session_story_state(db, session_id)
-    except SessionInitializationError as e:
-        raise TurnServiceError(
-            f"Failed to initialize session: {str(e)}",
-            session_id=session_id,
-        )
-    
+        session_story_state_plan = plan_session_story_state(db, session_id)
+    except Exception as e:
+        _abort_before_execution(e)
+        if isinstance(e, SessionInitializationError):
+            raise TurnServiceError(f"Failed to initialize session: {str(e)}", session_id=session_id)
+        raise
+
+    db.info["session_story_state_plan"] = session_story_state_plan
+
     # Step 3: Reconstruct canonical state from DB
-    # This is used for context building, not for mutation
     try:
-        canonical_state = reconstruct_canonical_state(db, session_id)
+        canonical_state = reconstruct_canonical_state(db, session_id, session_story_state_plan=session_story_state_plan)
         if canonical_state is None:
-            raise TurnServiceError(
-                f"Failed to reconstruct state for session: {session_id}",
-                session_id=session_id,
-            )
-    except StateReconstructionError as e:
-        raise TurnServiceError(
-            f"State reconstruction failed: {str(e)}",
-            session_id=session_id,
-        )
-    
-    # Step 4: Allocate turn number (DB-authoritative)
+            raise TurnServiceError(f"Failed to reconstruct state for session: {session_id}", session_id=session_id)
+    except Exception as e:
+        _abort_before_execution(e)
+        if isinstance(e, StateReconstructionError):
+            raise TurnServiceError(f"State reconstruction failed: {str(e)}", session_id=session_id)
+        raise
+
+    # Step 4: retain allocate_turn's idempotency check, but the locked claim token
+    # remains authoritative for numbering and can never be overwritten by this query.
     try:
-        turn_no, is_new = allocate_turn(db, session_id, idempotency_key)
+        allocated_turn_no, is_new = allocate_turn(db, session_id, claim_key)
+        if not is_new:
+            existing_result = _get_existing_turn_result(db, session_id, allocated_turn_no)
+            if existing_result:
+                _abort_before_execution(
+                    TurnServiceError("Turn already exists", session_id=session_id)
+                )
+                existing_result.idempotency_key = claim_key
+                return existing_result
+        if allocated_turn_no != claim_token.turn_no:
+            raise TurnConflictError(session_id, claim_token.turn_no, allocated_turn_no)
     except TurnConflictError as e:
-        raise TurnServiceError(
-            f"Turn conflict: {str(e)}",
-            session_id=session_id,
-        )
+        _abort_before_execution(e)
+        raise TurnClaimConflictError("turn_in_progress", session_id) from e
     except TurnAllocationError as e:
-        raise TurnServiceError(
-            f"Turn allocation failed: {str(e)}",
-            session_id=session_id,
-        )
-    
-    # If this is a retry with idempotency key and turn already exists,
-    # return the existing turn result
-    if not is_new:
-        existing_result = _get_existing_turn_result(db, session_id, turn_no)
-        if existing_result:
-            return existing_result
-    
-    # Step 4b: Create turn_transaction record (status=pending)
-    turn_transaction_repo = TurnTransactionRepository(db)
-    world_time_before_str = _format_world_time(_get_world_time(None))
-    turn_transaction = turn_transaction_repo.create({
-        "session_id": session_id,
-        "turn_no": turn_no,
-        "idempotency_key": idempotency_key or f"auto_{session_id}_{turn_no}",
-        "status": "pending",
-        "player_input": player_input,
-        "world_time_before": world_time_before_str,
-        "started_at": datetime.now(),
-    })
-    transaction_id = turn_transaction.id
+        _abort_before_execution(e)
+        raise TurnServiceError(f"Turn allocation failed: {str(e)}", session_id=session_id)
+    except Exception as e:
+        _abort_before_execution(e)
+        raise
+    turn_no = claim_token.turn_no
+
+    # Reuse the claim row; it is only written by the full-token CAS at commit time.
+    transaction_id = claim_token.transaction_id
     
     try:
         # Get current location before input intent stage
         session_state_repo = SessionStateRepository(db)
-        session_state = session_state_repo.get_by_session(session_id)
+        session_state = _get_session_state_with_plan(db, session_id)
         current_location_id = session_state.current_location_id if session_state else None
         
         # Create ValidationContext for this turn
@@ -2716,6 +3168,10 @@ def execute_turn_service(
             turn_no=turn_no,
             canonical_state=canonical_state,
         )
+        # current_location_id is already an ordinary string and the context carries
+        # only the Session handle plus pure canonical data. W2-A1/A2/A3 leave no
+        # preparation writes pending, so this rollback only closes the read transaction.
+        _end_read_transaction(db)
         
         # Step 5: Execute input intent LLM stage (before deterministic parsing)
         _emit("input_intent", "started")
@@ -2731,6 +3187,7 @@ def execute_turn_service(
         _emit("input_intent", "completed")
         
         # Validate InputIntentProposal before using it
+        intent_proposal = None
         if input_intent_result.accepted and input_intent_result.parsed_proposal:
             from ..models.proposals import InputIntentProposal
             try:
@@ -2740,10 +3197,13 @@ def execute_turn_service(
                     target_type=input_intent_result.parsed_proposal.get("target_type"),
                     risk_level=input_intent_result.parsed_proposal.get("risk_level", "low"),
                     confidence=input_intent_result.parsed_proposal.get("confidence", 0.5),
-                    audit=type('obj', (object,), {
+                    needs_clarification=input_intent_result.parsed_proposal.get("needs_clarification", False),
+                    clarification_question=input_intent_result.parsed_proposal.get("clarification_question"),
+                    visibility=input_intent_result.parsed_proposal.get("visibility", "player_visible"),
+                    audit={
                         'proposal_type': 'input_intent',
                         'source_engine': 'input_engine',
-                    })(),
+                    },
                 )
                 is_valid_intent, intent_errors, intent_warnings = _validate_proposal(
                     db=db,
@@ -2751,6 +3211,7 @@ def execute_turn_service(
                     proposal_type="input_intent",
                     validation_context=validation_context,
                     transaction_id=transaction_id,
+                    buffer=write_buffer,
                 )
                 if not is_valid_intent:
                     logger.warning("InputIntentProposal validation failed: %s", intent_errors)
@@ -2764,7 +3225,72 @@ def execute_turn_service(
                     )
             except Exception as e:
                 logger.warning("Failed to validate InputIntentProposal: %s", e)
+                input_intent_result = LLMStageResult(
+                    stage_name="input_intent",
+                    enabled=input_intent_result.enabled,
+                    timeout=input_intent_result.timeout,
+                    accepted=False,
+                    fallback_reason=f"validation_failed: {type(e).__name__}",
+                )
         
+        # Only an accepted, non-fallback proposal which passed validation can
+        # explicitly request clarification. Hidden/non-player-visible wording is
+        # discarded in favour of the deterministic player-facing template.
+        if (
+            input_intent_result.accepted
+            and input_intent_result.parsed_proposal
+            and intent_proposal is not None
+            and intent_proposal.needs_clarification
+        ):
+            proposed_question = intent_proposal.clarification_question
+            if intent_proposal.visibility != "player_visible":
+                proposed_question = None
+            if proposed_question:
+                proposed_question = proposed_question.strip()[:240]
+                frozen_facts = _load_frozen_narration_forbidden_facts(
+                    db, session_id, canonical_state, session_story_state_plan
+                )
+                clarification_leak_validation = NarrationLeakValidator().validate_narration(
+                    text=proposed_question,
+                    forbidden_info=["隐藏身份", "真实身份", "hidden_identity", "secret_identity"],
+                    state=canonical_state,
+                    db=None,
+                    session_id=session_id,
+                    preloaded_forbidden_facts=frozen_facts,
+                )
+                if not clarification_leak_validation.is_valid:
+                    _create_validation_report(
+                        db=db,
+                        transaction_id=transaction_id,
+                        session_id=session_id,
+                        turn_no=turn_no,
+                        scope="narration_leak_validation",
+                        target_ref_id="clarification_question",
+                        is_valid=False,
+                        errors_json=clarification_leak_validation.errors,
+                        warnings_json=clarification_leak_validation.warnings,
+                        buffer=write_buffer,
+                    )
+                    proposed_question = None
+            return _commit_clarification_turn(
+                db=db,
+                session_id=session_id,
+                player_input=player_input,
+                claim_key=claim_key,
+                claim_token=claim_token,
+                turn_no=turn_no,
+                transaction_id=transaction_id,
+                fp_before=fp_before,
+                world_time_before=_get_world_time(session_state),
+                write_buffer=write_buffer,
+                turn_uow=turn_uow,
+                heartbeat=heartbeat,
+                budget=budget,
+                input_intent_result=input_intent_result,
+                input_intent_metadata=input_intent_result.parsed_proposal,
+                clarification_question=proposed_question,
+            )
+
         # Step 6: Parse player input and determine action type
         # Use LLM intent if accepted, otherwise fall back to deterministic parser
         _emit("action_resolving", "started")
@@ -2782,10 +3308,40 @@ def execute_turn_service(
             # Fallback to deterministic parser
             action_type, target = _parse_player_input(player_input)
             input_intent_fallback_reason = input_intent_result.fallback_reason
+
+        # The deterministic parser is authoritative exactly here: the LLM produced no
+        # accepted proposal, so a "move" with no target is an explicitly ambiguous
+        # instruction. Such a turn is a zero-time clarification turn -- it persists the
+        # input and a recoverable result and performs no game action, no world-time
+        # advance and no scheduling/NPC/memory work. When the LLM *did* accept a
+        # proposal, only its explicit marker decides (handled above), so a provider
+        # timeout/parse failure never reclassifies an otherwise-resolved action.
+        if action_type == "move" and target is None:
+            return _commit_clarification_turn(
+                db=db,
+                session_id=session_id,
+                player_input=player_input,
+                claim_key=claim_key,
+                claim_token=claim_token,
+                turn_no=turn_no,
+                transaction_id=transaction_id,
+                fp_before=fp_before,
+                world_time_before=_get_world_time(session_state),
+                write_buffer=write_buffer,
+                turn_uow=turn_uow,
+                heartbeat=heartbeat,
+                budget=budget,
+                input_intent_result=input_intent_result,
+                input_intent_metadata=input_intent_metadata,
+                clarification_question=None,
+            )
         
         # Step 7: Execute action
         movement_result: Optional[MovementResult] = None
         state_deltas: Dict[str, Any] = {}
+        # This turn's planned quest-progression updates (empty when nothing advanced);
+        # ``check_quest_progression`` fills it in plan mode and Step 14a applies it.
+        quest_plan: List[QuestStatePlan] = []
         
         if action_type == "move" and target:
             from_location_id = current_location_id or ""
@@ -2808,7 +3364,8 @@ def execute_turn_service(
             )
             
             if not can_move:
-                # Scene transition blocked - record validation report and game event
+                # Scene transition blocked - plan validation report and game event;
+                # both land in the final transaction (see write_buffer.flush below).
                 _create_validation_report(
                     db=db,
                     transaction_id=transaction_id,
@@ -2818,9 +3375,9 @@ def execute_turn_service(
                     is_valid=False,
                     errors_json=[blocked_reason or "Movement blocked by scene"],
                     warnings_json=[],
+                    buffer=write_buffer,
                 )
-                _create_game_event(
-                    db=db,
+                write_buffer.add_game_event(
                     transaction_id=transaction_id,
                     session_id=session_id,
                     turn_no=turn_no,
@@ -2859,7 +3416,7 @@ def execute_turn_service(
                 )
                 
                 if not movement_validation.is_valid:
-                    # Record validation failure
+                    # Plan the validation failure; written in the final transaction.
                     _create_validation_report(
                         db=db,
                         transaction_id=transaction_id,
@@ -2869,6 +3426,7 @@ def execute_turn_service(
                         is_valid=False,
                         errors_json=movement_validation.errors,
                         warnings_json=movement_validation.warnings,
+                        buffer=write_buffer,
                     )
                     logger.warning("Movement validation failed: %s", movement_validation.errors)
                     movement_result = MovementResult(
@@ -2877,8 +3435,14 @@ def execute_turn_service(
                         previous_location_id=from_location_id,
                     )
                 else:
-                    # Handle movement
-                    movement_result = handle_movement(db, session_id, target)
+                    # Handle movement. The location write is *planned*: it is applied
+                    # in the final write section (Step 14a) so preparation stays
+                    # write-free. Every MovementResult field is identical either way.
+                    movement_result = handle_movement(
+                        db, session_id, target, defer_location_write=True,
+                        planned_session_state=session_story_state_plan.session_state_overlay(),
+                        planned_player_state=session_story_state_plan.player_state_overlay(),
+                    )
             
             if movement_result.success:
                 state_deltas["location_id"] = movement_result.new_location_id
@@ -2919,6 +3483,7 @@ def execute_turn_service(
                     is_valid=False,
                     errors_json=quest_validation.errors,
                     warnings_json=quest_validation.warnings,
+                    buffer=write_buffer,
                 )
                 logger.warning("Quest progression validation failed: %s", quest_validation.errors)
             
@@ -2930,6 +3495,9 @@ def execute_turn_service(
                         "action_type": "movement",
                         "target_location_code": movement_result.new_location_code,
                     },
+                    defer_write=True,
+                    plan_out=quest_plan,
+                    planned_quest_states=session_story_state_plan.quest_state_overlays(),
                 )
                 # Quest progression results can be used for narration context
                 state_deltas["quest_progression"] = [
@@ -2941,8 +3509,17 @@ def execute_turn_service(
                 # Quest progression failure should not block the turn
                 pass
         
+        # The planned quest-progression updates, keyed by session_quest_states.id.
+        # Preparation readers that used to observe the already-written rows merge
+        # these in; the rows themselves are written in the final write section.
+        planned_quests: Dict[str, QuestStatePlan] = {
+            plan.quest_state_id: plan for plan in quest_plan
+        }
+        
         # Step 9: Generate recommended actions (deterministic fallback)
-        session_state = session_state_repo.get_by_session(session_id)
+        session_state = _get_session_state_with_plan(db, session_id)
+        # Preserve ordinary values before subsequent stage rollbacks expire ORM state.
+        session_state_id = session_state.id if session_state is not None else None
         
         current_location_id = None
         if session_state:
@@ -2955,6 +3532,11 @@ def execute_turn_service(
             db=db,
             session_id=session_id,
             location_id=current_location_id,
+            planned_quests=planned_quests,
+            planned_session_state=session_story_state_plan.session_state_overlay(),
+            planned_player_state=session_story_state_plan.player_state_overlay(),
+            planned_npc_states=session_story_state_plan.npc_state_overlays(),
+            baseline_quest_states=session_story_state_plan.quest_state_overlays(),
         )
         
         # Step 10: Build template narration (fallback-safe placeholder)
@@ -2990,7 +3572,6 @@ def execute_turn_service(
         )
         _validator = TimeAdvanceValidator()
         _validator_result = _validator.validate(_time_proposal)
-
         world_time = _advance_world_time(
             world_time_before,
             elapsed_minutes=_validator_result.accepted_elapsed_minutes,
@@ -3005,80 +3586,42 @@ def execute_turn_service(
             "new_world_time": world_time,
         }
         
-        # Step 11b: Process scheduled events with new world time
-        scheduled_event_results: list[dict[str, Any]] = []
-        try:
-            from ..models.events import WorldTime
-            world_time_obj = WorldTime(
-                calendar=world_time.get("calendar", "修仙历"),
-                season=world_time.get("season", "春"),
-                day=_parse_world_day(world_time.get("day", "第1日")),
-                period=world_time.get("period", "辰时"),
-                hour=world_time.get("hour", 7),
-                minute=world_time.get("minute", 0),
-            )
-            scheduled_processor = ScheduledEventProcessor(db)
-            scheduled_event_results = scheduled_processor.process_scheduled_events(
-                session_id=session_id,
-                world_time=world_time_obj,
-                current_turn=turn_no,
-                world_state=None,
-                transaction_id=transaction_id,
-            )
-            if scheduled_event_results:
-                logger.info(
-                    "Fired %d scheduled events for session %s turn %d",
-                    len(scheduled_event_results),
-                    session_id,
-                    turn_no,
-                )
-        except Exception as e:
-            logger.warning(
-                "ScheduledEventProcessor failed for session %s turn %d: %s",
-                session_id,
-                turn_no,
-                e,
-            )
-        
+
         # Step 12: Get player state
         player_state = _get_player_state(canonical_state, current_location_id)
         
-        # Step 13: Commit turn to DB with template narration (durable commit first)
+        # Step 13: Plan the turn's player_turn event log with template narration.
+        # The row itself is written by ``write_buffer.flush`` in the final write
+        # section (Step 14a); the plan already carries the pre-allocated id, turn
+        # number and text so preparation-side readers can see this turn's event.
+        # The progress events stay here: their names and order are part of the SSE
+        # contract and must not move.
         _emit("committing", "started")
-        try:
-            event = commit_turn(
-                db=db,
-                session_id=session_id,
-                turn_no=turn_no,
-                event_type="player_turn",
-                input_text=player_input,
-                narrative_text=narration,
-                result_json={
-                    "transaction_id": transaction_id,
-                    "recommended_actions": deterministic_recommended_actions,
-                    "state_deltas": state_deltas,
-                    "action_type": action_type,
-                    "movement_success": movement_result.success if movement_result else None,
-                    "new_location_id": movement_result.new_location_id if movement_result else None,
-                    "world_time_before": world_time_before,
-                    "world_time": world_time,
-                    "input_intent": input_intent_metadata,
-                    "input_intent_fallback_reason": input_intent_fallback_reason,
-                    "llm_stages": [],
-                },
-                idempotency_key=idempotency_key,
-            )
-        except TurnAllocationError as e:
-            raise TurnServiceError(
-                f"Failed to commit turn: {str(e)}",
-                session_id=session_id,
-                turn_no=turn_no,
-            )
+        planned_player_turn_event = write_buffer.add_event_log(
+            session_id=session_id,
+            turn_no=turn_no,
+            event_type="player_turn",
+            input_text=player_input,
+            narrative_text=narration,
+            result_json={
+                "transaction_id": transaction_id,
+                "recommended_actions": deterministic_recommended_actions,
+                "state_deltas": state_deltas,
+                "action_type": action_type,
+                "movement_success": movement_result.success if movement_result else None,
+                "new_location_id": movement_result.new_location_id if movement_result else None,
+                "world_time_before": world_time_before,
+                "world_time": world_time,
+                "input_intent": input_intent_metadata,
+                "input_intent_fallback_reason": input_intent_fallback_reason,
+                "llm_stages": [],
+            },
+            idempotency_key=idempotency_key,
+        )
         _emit("committing", "completed")
         
-        # Step 13b: Create game_event for player_input
-        _create_game_event(
-            db=db,
+        # Step 13b: Plan the game_event for player_input
+        write_buffer.add_game_event(
             transaction_id=transaction_id,
             session_id=session_id,
             turn_no=turn_no,
@@ -3098,7 +3641,10 @@ def execute_turn_service(
             },
         )
         
-        # Step 14: Execute LLM stages (scene before narration)
+        # Step 14: Execute preparation LLM stages. Narration context is frozen as
+        # plain data now, but its model call is deferred until after fact commit.
+        frozen_narration_context: Dict[str, Any] = {}
+        frozen_narration_forbidden_info: List[Any] = []
         llm_stage_results = _execute_llm_stages(
             db=db,
             session_id=session_id,
@@ -3113,7 +3659,74 @@ def execute_turn_service(
             transaction_id=transaction_id,
             progress_callback=progress_callback,
             turn_event_callback=turn_event_callback,
+            write_buffer=write_buffer,
+            planned_quests=planned_quests,
+            narration_context_out=frozen_narration_context,
+            narration_forbidden_info_out=frozen_narration_forbidden_info,
         )
+
+        # Stop independent claim renewal, enforce the budget, and begin the final
+        # authoritative transaction with its lock and state revalidation before any
+        # planned/validation/game-state write is applied.
+        if not heartbeat.stop() or heartbeat.lost:
+            raise TurnClaimConflictError("claim_lost", session_id)
+        if budget.expired():
+            raise TurnBudgetExceededError(
+                session_id=session_id,
+                turn_no=turn_no,
+                total_seconds=budget.total_seconds,
+            )
+        _end_read_transaction(db)
+        acquire_turn_lock(db, session_id)
+        if db.get_bind().dialect.name != "sqlite":
+            fp_after = compute_state_fingerprint(db, session_id)
+            if fp_after != fp_before:
+                raise TurnStateConflictError(session_id)
+        
+        # Step 14a: Apply the planned preparation writes, now inside the final write
+        # section and before the single authoritative db.commit(). ``flush`` reuses
+        # the same repositories/helper and the pre-allocated ids and applies the rows
+        # in planning order, so validation_reports and game_events end up with exactly
+        # the content and order the direct writes produced. It has to run *here*: the
+        # rows must exist (in this transaction) before the Step 14b validators read
+        # them — ``NarrationLeakValidator`` must keep seeing only this turn's
+        # preparation events, never the ones created later in the final section.
+        #
+        # The two game-state writes preparation used to perform directly are applied
+        # here as well, in their original relative order (movement, then quest
+        # progression, then the buffered event rows), using the very same repository
+        # calls and payloads, so the persisted rows are field-for-field what the
+        # direct writes produced and every later reader in this transaction sees the
+        # same state it saw before.
+        apply_session_story_state(db, session_story_state_plan)
+        if (
+            session_state_id is not None
+            and movement_result
+            and movement_result.success
+            and movement_result.new_location_id
+        ):
+            session_state_repo.update(session_state_id, {
+                "current_location_id": movement_result.new_location_id,
+            })
+        if quest_plan:
+            quest_state_repo = SessionQuestStateRepository(db)
+            for quest_update in quest_plan:
+                quest_state_repo.update(quest_update.quest_state_id, {
+                    "current_step_no": quest_update.current_step_no,
+                    "status": quest_update.status,
+                    "progress_json": quest_update.progress_json,
+                })
+        try:
+            write_buffer.flush(db)
+        except TurnAllocationError as e:
+            raise TurnServiceError(
+                f"Failed to commit turn: {str(e)}",
+                session_id=session_id,
+                turn_no=turn_no,
+            )
+        # The player_turn row is created here, in the final write section; every later
+        # reference (event_log updates, memories, presentation CAS) uses this object.
+        event = write_buffer.flushed_event_log(planned_player_turn_event.id)
         
         # Step 14b: Validate all proposals before committing
         _emit("validation", "started")
@@ -3356,7 +3969,7 @@ def execute_turn_service(
                 else:
                     npc_fallback_reason = stage_result.fallback_reason
 
-        # Step 15b: Refine time advance with world stage LLM result if available
+        # Step 15b: Validate world-stage time advice before scheduled-event settlement.
         _world_stage_result = next(
             (sr for sr in llm_stage_results if sr.stage_name == "world" and sr.accepted),
             None,
@@ -3368,44 +3981,84 @@ def execute_turn_service(
                 world_result=_world_stage_result,
             )
             if _refined_minutes != _validator_result.accepted_elapsed_minutes:
-                _refined_category = _resolved_category
                 _world_cat = getattr(_world_stage_result, "parsed_proposal", {})
+                _refined_category = _resolved_category
                 if isinstance(_world_cat, dict) and _world_cat.get("time_category"):
                     _refined_category = _world_cat["time_category"]
-                _refined_proposal = TimeAdvanceProposal(
+                _refined_validator_result = _validator.validate(TimeAdvanceProposal(
                     elapsed_minutes=_refined_minutes,
                     time_category=_refined_category,
-                )
-                _refined_validator_result = _validator.validate(_refined_proposal)
-                _refined_world_time = _advance_world_time(
-                    world_time_before,
-                    elapsed_minutes=_refined_validator_result.accepted_elapsed_minutes,
-                )
-                world_time = _refined_world_time
-                time_advance_result = {
-                    "accepted_elapsed_minutes": _refined_validator_result.accepted_elapsed_minutes,
+                ))
+                time_advance_result["world_stage_suggestion"] = {
                     "original_elapsed_minutes": _refined_validator_result.original_elapsed_minutes,
-                    "adjusted": _refined_validator_result.adjusted,
-                    "reason": _refined_validator_result.reason,
+                    "validated_elapsed_minutes": _refined_validator_result.accepted_elapsed_minutes,
                     "category": _refined_validator_result.category,
-                    "new_world_time": world_time,
+                    "adjusted": _refined_validator_result.adjusted,
+                    "adopted": False,
+                    "reason": "rejected_after_adjudication",
                 }
+
+        # Refresh only the adjudicated facts that were not knowable during the
+        # preparation freeze; do not reread state after this turn is applied.
+        frozen_narration_context["world_time"] = jsonable_encoder(world_time)
+        frozen_narration_context["npc_reactions"] = [
+            {
+                "npc_name": reaction.get("npc_name"),
+                "action_type": reaction.get("action_type"),
+                "summary": reaction.get("summary"),
+                "visible_to_player": reaction.get("visible_to_player", True),
+            }
+            for reaction in npc_reactions_for_json
+            if reaction.get("accepted", False) and reaction.get("visible_to_player", True)
+        ]
+
+        # Scheduled-event settlement uses the single adjudicated world_time above.
+        scheduled_event_results: list[dict[str, Any]] = []
+        try:
+            from ..models.events import WorldTime
+            world_time_obj = WorldTime(
+                calendar=world_time.get("calendar", "修仙历"),
+                season=world_time.get("season", "春"),
+                day=_parse_world_day(world_time.get("day", "第1日")),
+                period=world_time.get("period", "辰时"),
+                hour=world_time.get("hour", 7),
+                minute=world_time.get("minute", 0),
+            )
+            scheduled_processor = ScheduledEventProcessor(db)
+            scheduled_event_results = scheduled_processor.process_scheduled_events(
+                session_id=session_id,
+                world_time=world_time_obj,
+                current_turn=turn_no,
+                world_state=None,
+                transaction_id=transaction_id,
+            )
+            if scheduled_event_results:
+                logger.info(
+                    "Fired %d scheduled events for session %s turn %d",
+                    len(scheduled_event_results),
+                    session_id,
+                    turn_no,
+                )
+        except Exception as e:
+            if is_managed(db):
+                raise
+            logger.warning(
+                "ScheduledEventProcessor failed for session %s turn %d: %s",
+                session_id,
+                turn_no,
+                e,
+            )
         
-        # Step 16: If LLM narration accepted, update EventLogModel.narrative_text
+        # Add this turn's adjudicated scheduler output to the frozen narration
+        # snapshot without rereading session state.
+        if scheduled_event_results:
+            frozen_narration_context["scheduled_events"] = jsonable_encoder(
+                scheduled_event_results
+            )
+
+        # The committed snapshot remains template narration until the post-commit
+        # stage succeeds and the presentation CAS accepts its generation.
         final_narration = narration
-        for stage_result in llm_stage_results:
-            if stage_result.stage_name == "narration" and stage_result.accepted:
-                if stage_result.parsed_proposal and "text" in stage_result.parsed_proposal:
-                    final_narration = stage_result.parsed_proposal["text"]
-                    event_log_repo = EventLogRepository(db)
-                    event_log_repo.update(event.id, {"narrative_text": final_narration})
-                    _emit_turn_event({
-                        "event": "narration_delta",
-                        "data": {
-                            "delta": final_narration,
-                            "turn_no": turn_no,
-                        },
-                    })
         
         # Step 16b: Create game_events for world_tick, scene, NPC, and narration
         if world_progression:
@@ -3548,7 +4201,38 @@ def execute_turn_service(
             "world_progression": world_progression,
             "world_fallback_reason": world_fallback_reason,
             "time_advance_result": time_advance_result,
+            "player_state": player_state,
+            "events_committed": 1,
+            "actions_committed": 1 if movement_result and movement_result.success else 0,
+            "validation_passed": True,
+            "is_new_turn": is_new,
+            "recovery_status": "complete",
+            "presentation_status": "template",
+            "presentation_version": 0,
+            "turn_result_v1": {
+                "version": 1,
+                "turn_no": turn_no,
+                "narration": narration,
+                "presentation_status": "template",
+                "generation": claim_token.generation,
+                "recommended_actions": deterministic_recommended_actions,
+                "state_deltas": state_deltas,
+                "world_time": world_time,
+                "player_state": player_state,
+                "transaction_id": transaction_id,
+                "events_committed": 1,
+                "actions_committed": 1 if movement_result and movement_result.success else 0,
+                "validation_passed": True,
+                "is_new_turn": is_new,
+                "recovery_status": "complete",
+                "time_advance_result": time_advance_result,
+                "presentation_version": 0,
+            },
         }
+        snapshot = updated_result_json["turn_result_v1"]
+        # Persist the template representation first; final presentation is a post-commit CAS.
+        updated_result_json["narration"] = narration
+        updated_result_json["recommended_actions"] = deterministic_recommended_actions
         event_log_repo = EventLogRepository(db)
         event_log_repo.update(event.id, {"result_json": updated_result_json})
         
@@ -3594,14 +4278,122 @@ def execute_turn_service(
                 }
                 event_log_repo.update(event.id, {"result_json": updated_result_json})
         
-        # Step 21: Mark transaction as committed
-        turn_transaction_repo.update_status(
-            transaction_id,
-            status="committed",
-            world_time_after=_format_world_time(world_time),
+        # Final budget gate after the lock/revalidation/write work and immediately
+        # before the full-token claim CAS. Expiry means no facts may commit.
+        if budget.expired():
+            raise TurnBudgetExceededError(
+                session_id=session_id,
+                turn_no=turn_no,
+                total_seconds=budget.total_seconds,
+            )
+        # Fencing: only the exact worker that still owns this generation under a live
+        # lease may mark the claim committed, in the same transaction as its facts.
+        try:
+            commit_claim(db, claim_token, world_time_after=_format_world_time(world_time))
+        except ClaimRejected as exc:
+            raise TurnClaimConflictError("claim_lost", session_id) from exc
+        turn_uow.allow_commit()
+        # From here on a failure means "commit receipt unknown", not "nothing happened".
+        authoritative_commit_attempted = True
+        db.commit()
+        turn_uow.__exit__(None, None, None)
+        turn_uow = None
+
+        # The sole authoritative fact commit and UoW exit are complete. Only now
+        # may narration invoke a model; it receives the preparation-frozen context.
+        _emit("narration", "started")
+        try:
+            narration_result = _execute_narration_stage(
+                db=db,
+                session_id=session_id,
+                turn_no=turn_no,
+                canonical_state=canonical_state,
+                player_input=player_input,
+                action_type=action_type,
+                movement_result=movement_result,
+                state_deltas=state_deltas,
+                current_location_id=current_location_id,
+                npc_reactions=None,
+                use_mock=use_mock,
+                frozen_context=frozen_narration_context,
+            )
+        except Exception as narration_error:
+            logger.warning("Post-commit narration failed: %s", narration_error)
+            narration_result = LLMStageResult(
+                stage_name="narration",
+                enabled=True,
+                timeout=30.0,
+                accepted=False,
+                fallback_reason=f"post_commit_error: {str(narration_error)[:200]}",
+            )
+        post_commit_leak_validation = None
+        if narration_result.accepted and narration_result.parsed_proposal:
+            candidate_text = narration_result.parsed_proposal.get("text", "")
+            post_commit_leak_validation = NarrationLeakValidator().validate_narration(
+                text=candidate_text,
+                forbidden_info=[],
+                state=canonical_state,
+                db=None,
+                session_id=None,
+                preloaded_forbidden_facts=frozen_narration_forbidden_info,
+                forbidden_patterns=[
+                    "隐藏身份", "真实身份", "hidden_identity", "secret_identity"
+                ],
+            )
+            if not post_commit_leak_validation.is_valid:
+                narration_result.accepted = False
+                narration_result.validation_errors = post_commit_leak_validation.errors
+                narration_result.fallback_reason = (
+                    "leak_detected: "
+                    + ", ".join(post_commit_leak_validation.errors[:3])
+                )
+        _emit("narration", "completed")
+
+        if narration_result.accepted and narration_result.parsed_proposal:
+            candidate_text = narration_result.parsed_proposal.get("text")
+            if candidate_text:
+                final_narration = candidate_text
+
+        # Post-commit stage audit is an independent short transaction. Do not
+        # rewrite the fact event's llm_stages JSON with this presentation result.
+        audit_db = sessionmaker(
+            bind=db.get_bind(), autoflush=False, expire_on_commit=False
+        )()
+        try:
+            if post_commit_leak_validation is not None and not post_commit_leak_validation.is_valid:
+                _create_validation_report(
+                    db=audit_db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="narration_leak_validation",
+                    is_valid=False,
+                    errors_json=post_commit_leak_validation.errors,
+                    warnings_json=post_commit_leak_validation.warnings,
+                )
+            _create_llm_stage_results_for_turn(
+                db=audit_db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                llm_stage_results=[narration_result],
+            )
+            audit_db.commit()
+        except Exception as audit_error:
+            audit_db.rollback()
+            logger.warning("Failed to persist post-commit narration audit: %s", audit_error)
+        finally:
+            audit_db.close()
+
+        presentation_finalized = _finalize_turn_presentation(
+            db, event.id, claim_token, final_narration, final_recommended_actions,
+            narration_event_id=narration_event_id,
         )
-        
-        # Step 22: Return result
+        if not presentation_finalized:
+            final_narration = narration
+            final_recommended_actions = deterministic_recommended_actions
+
+        # Step 22: Return the same durable presentation snapshot used by retries and SSE.
         return TurnResult(
             turn_no=turn_no,
             narration=final_narration,
@@ -3615,18 +4407,170 @@ def execute_turn_service(
             validation_passed=True,
             movement_result=movement_result,
             is_new_turn=is_new,
-            llm_stage_results=[input_intent_result] + llm_stage_results,
+            llm_stage_results=[input_intent_result] + llm_stage_results + [narration_result],
             time_advance_result=time_advance_result,
+            idempotency_key=claim_key,
+            recovery_status="complete",
+            presentation_version=1 if presentation_finalized else 0,
         )
     
     except Exception as e:
-        # Mark transaction as aborted on any failure
-        turn_transaction_repo.update_status(
-            transaction_id,
-            status="aborted",
-            error_json={"error": str(e)[:500], "type": type(e).__name__},
-        )
+        # Renewals stop before any terminal handling of the claim, so the aborted
+        # short transaction cannot race a heartbeat that still owns the row.
+        _stop_heartbeat()
+        _rollback_turn_uow(e)
+        if authoritative_commit_attempted and _claim_row_is_committed(db, claim_token):
+            # The authoritative db.commit() raised, so the durable receipt is unknown:
+            # the facts may or may not be committed. Never guess — neither by replaying
+            # the turn nor by blindly marking the claim aborted (which would hide
+            # committed facts behind an "aborted" row and invite a duplicate turn).
+            # The database is the authority, so re-read the claim row: a committed row
+            # means the turn is durable and this call takes the same read-only recovery
+            # path as a same-key retry, reusing the persisted snapshot instead of
+            # regenerating it.
+            recovered = _get_existing_turn_result(db, session_id, claim_token.turn_no)
+            if recovered is None:
+                raise TurnRecoveryIncompleteError(
+                    "Committed turn claim has no complete player_turn result snapshot",
+                    session_id=session_id,
+                    turn_no=claim_token.turn_no,
+                ) from e
+            recovered.idempotency_key = claim_key
+            return recovered
+        # A rolled-back attempt still retains a sanitized audit in an independent
+        # short transaction, tagged with this worker's fencing generation.
+        try:
+            write_buffer.persist_failed_model_audits(db.get_bind(), claim_token.generation)
+        except Exception:
+            logger.warning("Failed to write independent model-call audit", exc_info=True)
+        # Fence the same claim row as aborted in its own short transaction.
+        try:
+            abort_claim(db, claim_token, {"category": "turn_execution_failed", "type": type(e).__name__})
+            db.commit()
+        except Exception:
+            db.rollback()
         raise
+    finally:
+        # Every exit path of the execution body stops and joins the heartbeat.
+        _stop_heartbeat()
+        if db.info.get("turn_write_buffer") is write_buffer:
+            db.info.pop("turn_write_buffer", None)
+
+
+def _claim_row_is_committed(db: Session, token) -> bool:
+    """Confirm an uncertain commit receipt by re-reading the claim row.
+
+    Only used after the authoritative ``db.commit()`` raised. The Session is rolled
+    back first so the read starts a fresh transaction and reflects durable state
+    instead of the failed transaction's identity map. A missing row or a read error
+    reports "not committed", which keeps the conservative abort path: the abort CAS
+    itself still requires the full token, ``pending`` status and a live lease, so a
+    taken-over or already-committed row is never overwritten.
+    """
+    try:
+        db.rollback()
+    except Exception:
+        logger.warning("Rollback before commit-receipt confirmation failed", exc_info=True)
+    try:
+        row = db.query(TurnTransactionModel).filter_by(
+            id=token.transaction_id,
+            session_id=token.session_id,
+        ).one_or_none()
+        return (
+            row is not None
+            and row.status == "committed"
+            and row.fencing_generation == token.generation
+            and row.idempotency_key == token.idempotency_key
+            and row.request_fingerprint == token.request_fingerprint
+            and row.turn_no == token.turn_no
+        )
+    except Exception:
+        db.rollback()
+        logger.warning(
+            "Could not confirm the commit receipt for claim %s",
+            token.transaction_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _finalize_turn_presentation(
+    db: Session,
+    event_id: str,
+    claim_token,
+    narration: str,
+    recommended_actions: List[str],
+    narration_event_id: Optional[str] = None,
+) -> bool:
+    """CAS-finalize only presentation fields after the fact transaction is durable."""
+    try:
+        transaction = db.query(TurnTransactionModel).filter_by(
+            id=claim_token.transaction_id,
+            session_id=claim_token.session_id,
+        ).with_for_update().one_or_none()
+        event = db.query(EventLogModel).filter_by(id=event_id).with_for_update().one_or_none()
+        if (
+            transaction is None
+            or event is None
+            or transaction.status != "committed"
+            or transaction.fencing_generation != claim_token.generation
+            or transaction.turn_no != claim_token.turn_no
+        ):
+            db.rollback()
+            return False
+
+        stored = dict(event.result_json or {})
+        snapshot = stored.get("turn_result_v1")
+        if not isinstance(snapshot, dict):
+            db.rollback()
+            return False
+        if (
+            snapshot.get("presentation_status") != "template"
+            or snapshot.get("transaction_id") != claim_token.transaction_id
+            or snapshot.get("generation") != claim_token.generation
+            or snapshot.get("presentation_version") != 0
+        ):
+            db.rollback()
+            return False
+
+        # Preserve the entire fact-bearing JSON object; update only the presentation allowlist.
+        updated_snapshot = dict(snapshot)
+        updated_snapshot.update({
+            "narration": narration,
+            "recommended_actions": recommended_actions,
+            "presentation_status": "finalized",
+            "presentation_version": 1,
+        })
+        stored.update({
+            "narration": narration,
+            "recommended_actions": recommended_actions,
+            "presentation_status": "finalized",
+            "presentation_version": 1,
+            "turn_result_v1": updated_snapshot,
+        })
+        event.narrative_text = narration
+        event.result_json = stored
+        if narration_event_id is not None:
+            narration_event = db.query(GameEventModel).filter_by(
+                id=narration_event_id,
+                transaction_id=claim_token.transaction_id,
+                session_id=claim_token.session_id,
+                turn_no=claim_token.turn_no,
+                event_type="narration",
+            ).with_for_update().one_or_none()
+            if narration_event is None:
+                db.rollback()
+                return False
+            public_payload = dict(narration_event.public_payload_json or {})
+            public_payload["text"] = narration
+            narration_event.public_payload_json = public_payload
+        db.commit()
+        return True
+    except Exception:
+        # The fact commit has already succeeded; presentation failure must not undo it.
+        db.rollback()
+        logger.warning("Turn presentation CAS failed for event %s", event_id, exc_info=True)
+        return False
 
 
 def _get_existing_turn_result(
@@ -3649,19 +4593,171 @@ def _get_existing_turn_result(
         return None
     
     result_json = event.result_json
-    
+    snapshot = result_json.get("turn_result_v1")
+    if not isinstance(snapshot, dict):
+        snapshot = result_json
+    required = {"world_time", "player_state", "events_committed", "actions_committed"}
+    legacy_partial = not required.issubset(snapshot)
+    return TurnResult(
+        turn_no=snapshot.get("turn_no", turn_no),
+        narration=event.narrative_text or snapshot.get("narration", ""),
+        recommended_actions=snapshot.get("recommended_actions", result_json.get("recommended_actions", [])),
+        state_deltas=snapshot.get("state_deltas", result_json.get("state_deltas", {})),
+        world_time=snapshot.get("world_time", {}),
+        player_state=snapshot.get("player_state", {}),
+        transaction_id=snapshot.get("transaction_id", result_json.get("transaction_id")),
+        events_committed=snapshot.get("events_committed", 0),
+        actions_committed=snapshot.get("actions_committed", 0),
+        validation_passed=snapshot.get("validation_passed", False),
+        is_new_turn=False,
+        time_advance_result=snapshot.get("time_advance_result"),
+        recovery_status="legacy_partial" if legacy_partial else snapshot.get("recovery_status", "complete"),
+        presentation_version=snapshot.get("presentation_version", 0),
+    )
+
+
+def _commit_clarification_turn(
+    db: Session,
+    session_id: str,
+    player_input: str,
+    claim_key: str,
+    claim_token: Any,
+    turn_no: int,
+    transaction_id: str,
+    fp_before: str,
+    world_time_before: Dict[str, Any],
+    write_buffer: TurnWriteBuffer,
+    turn_uow: TurnUnitOfWork,
+    heartbeat: ClaimHeartbeat,
+    budget: TurnBudget,
+    input_intent_result: Optional[LLMStageResult] = None,
+    input_intent_metadata: Optional[Dict[str, Any]] = None,
+    clarification_question: Optional[str] = None,
+) -> TurnResult:
+    """Commit an explicitly ambiguous input as a zero-time, zero-action turn.
+
+    This intentionally persists only the idempotent player_turn event and claim CAS;
+    it does not initialize state or run action/world/scene/NPC/scheduling/memory work.
+    """
+    question = clarification_question.strip()[:240] if clarification_question else ""
+    if not question:
+        question = "你想前往哪里？请告诉我具体地点。"
+
+    if not heartbeat.stop() or heartbeat.lost:
+        raise TurnClaimConflictError("claim_lost", session_id)
+    if budget.expired():
+        raise TurnBudgetExceededError(
+            session_id=session_id,
+            turn_no=turn_no,
+            total_seconds=budget.total_seconds,
+        )
+    _end_read_transaction(db)
+    acquire_turn_lock(db, session_id)
+    if db.get_bind().dialect.name != "sqlite":
+        fp_after = compute_state_fingerprint(db, session_id)
+        if fp_after != fp_before:
+            raise TurnStateConflictError(session_id)
+
+    time_advance_result = {
+        "accepted_elapsed_minutes": 0,
+        "original_elapsed_minutes": 0,
+        "adjusted": False,
+        "reason": "clarification_requires_no_time",
+        "category": "clarification",
+        "new_world_time": world_time_before,
+        "needs_clarification": True,
+        "clarification_question": question,
+    }
+    result_json = {
+        "transaction_id": transaction_id,
+        "recommended_actions": [],
+        "state_deltas": {},
+        "action_type": "clarification",
+        "world_time_before": world_time_before,
+        "world_time": world_time_before,
+        "input_intent": input_intent_metadata,
+        "time_advance_result": time_advance_result,
+        "events_committed": 1,
+        "actions_committed": 0,
+        "validation_passed": True,
+        "is_new_turn": True,
+        "recovery_status": "complete",
+        "presentation_status": "template",
+        "presentation_version": 0,
+    }
+    planned_event = write_buffer.add_event_log(
+        session_id=session_id,
+        turn_no=turn_no,
+        event_type="player_turn",
+        input_text=player_input,
+        narrative_text=question,
+        result_json=result_json,
+        idempotency_key=claim_key,
+    )
+    event = write_buffer.flush(db)[planned_event.id]
+    snapshot = {
+        "version": 1,
+        "turn_no": turn_no,
+        "narration": question,
+        "presentation_status": "template",
+        "generation": claim_token.generation,
+        "recommended_actions": [],
+        "state_deltas": {},
+        "world_time": world_time_before,
+        "player_state": {},
+        "transaction_id": transaction_id,
+        "events_committed": 1,
+        "actions_committed": 0,
+        "validation_passed": True,
+        "is_new_turn": True,
+        "recovery_status": "complete",
+        "time_advance_result": time_advance_result,
+        "presentation_version": 0,
+    }
+    result_json["turn_result_v1"] = snapshot
+    event.result_json = result_json
+
+    if budget.expired():
+        raise TurnBudgetExceededError(
+            session_id=session_id,
+            turn_no=turn_no,
+            total_seconds=budget.total_seconds,
+        )
+    try:
+        commit_claim(db, claim_token, world_time_after=_format_world_time(world_time_before))
+    except ClaimRejected as exc:
+        raise TurnClaimConflictError("claim_lost", session_id) from exc
+    turn_uow.allow_commit()
+    try:
+        db.commit()
+    except Exception:
+        if _claim_row_is_committed(db, claim_token):
+            recovered = _get_existing_turn_result(db, session_id, turn_no)
+            if recovered is not None:
+                turn_uow.__exit__(None, None, None)
+                recovered.idempotency_key = claim_key
+                return recovered
+        raise
+    turn_uow.__exit__(None, None, None)
+
+    finalized = _finalize_turn_presentation(db, event.id, claim_token, question, [])
     return TurnResult(
         turn_no=turn_no,
-        narration=event.narrative_text or "",
-        recommended_actions=result_json.get("recommended_actions", []),
-        state_deltas=result_json.get("state_deltas", {}),
-        world_time={},
+        narration=question,
+        recommended_actions=[],
+        state_deltas={},
+        world_time=world_time_before,
         player_state={},
-        transaction_id=result_json.get("transaction_id"),
+        transaction_id=transaction_id,
         events_committed=1,
-        actions_committed=1,
+        actions_committed=0,
         validation_passed=True,
-        is_new_turn=False,
+        is_new_turn=True,
+        llm_stage_results=[input_intent_result] if input_intent_result is not None else [],
+        time_advance_result=time_advance_result,
+        idempotency_key=claim_key,
+        recovery_status="complete",
+        presentation_version=1 if finalized else 0,
     )
 
 
@@ -3969,8 +5065,12 @@ def _persist_turn_memories(
     canonical_state: Optional[CanonicalState] = None,
 ) -> Dict[str, Any]:
     """
-    Persist perspective-aware memory summaries and facts after a successful turn.
-    
+    Persist necessary cognition within the managed turn transaction.
+
+    These summaries are retrieved as future-turn context; facts, beliefs,
+    relationships, and source-bound NPC memories likewise affect later decisions.
+    Every write below is therefore required to commit atomically with the turn.
+
     Uses MemoryWriter to write to DB tables:
     - memory_summaries: World Chronicle, Scene Summary, NPC Subjective Summary
     - memory_facts: Location changes, quest progression, NPC beliefs
@@ -3979,7 +5079,7 @@ def _persist_turn_memories(
     
     NPC subjective memory is NEVER included in player-visible output.
     
-    Returns metadata about memory write success/failure (non-fatal).
+    Returns metadata about persisted cognition. Managed write failures propagate.
     """
     from .memory_writer import MemoryWriter
     from .npc_memory import NPCMemoryManager
@@ -4183,8 +5283,10 @@ def _persist_turn_memories(
                                     session_id, npc_id, write_result.errors,
                                 )
                         except Exception as pcm_err:
+                            if is_managed(db):
+                                raise
                             logger.warning(
-                                "P10-C post-commit memory write failed session=%s npc=%s: %s",
+                                "P10-C private-memory write failed session=%s npc=%s: %s",
                                 session_id, npc_id, pcm_err,
                             )
 
@@ -4206,6 +5308,8 @@ def _persist_turn_memories(
                                     + updated_count
                                 )
                         except Exception as recall_err:
+                            if is_managed(db):
+                                raise
                             logger.warning(
                                 "P10-C recall stats update failed session=%s npc=%s: %s",
                                 session_id, npc_id, recall_err,
@@ -4229,6 +5333,8 @@ def _persist_turn_memories(
                     result["facts_created"] += 1
         
     except Exception as e:
+        if is_managed(db):
+            raise
         logger.warning("Memory persistence failed for session %s turn %s: %s", session_id, turn_no, e)
         result["fallback_reason"] = f"memory_write_error: {str(e)[:200]}"
     
@@ -4681,12 +5787,30 @@ def _create_validation_report(
     is_valid: bool = True,
     errors_json: Optional[List[str]] = None,
     warnings_json: Optional[List[str]] = None,
+    buffer: Optional[TurnWriteBuffer] = None,
 ) -> Optional[str]:
     """
     Create a validation_report record for validation tracking.
     
     Returns the created record ID, or None on failure.
+
+    When ``buffer`` is given (preparation section) the report is only planned and is
+    written later, inside the final authoritative transaction; the returned id is the
+    pre-allocated one. Without a buffer the write happens right here, exactly as
+    before, which is what the final write section keeps doing.
     """
+    if buffer is not None:
+        return buffer.add_validation_report(
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            scope=scope,
+            target_ref_id=target_ref_id,
+            is_valid=is_valid,
+            errors_json=errors_json,
+            warnings_json=warnings_json,
+        )
+
     from ..storage.models import generate_uuid
     
     validation_report_repo = ValidationReportRepository(db)
@@ -4716,6 +5840,7 @@ def _validate_proposal(
     proposal_type: str,
     validation_context: ValidationContext,
     transaction_id: str,
+    buffer: Optional[TurnWriteBuffer] = None,
 ) -> Tuple[bool, List[str], List[str]]:
     """
     Validate a proposal using ValidationContext and Validator.
@@ -4735,6 +5860,10 @@ def _validate_proposal(
         proposal_type: Type of proposal (input_intent, world_tick, scene_event, npc_action, narration)
         validation_context: ValidationContext with state and metadata
         transaction_id: Transaction ID for tracking
+        buffer: Optional preparation write buffer. When given (preparation section),
+            the validation report is planned instead of written; the final write
+            section passes no buffer and keeps writing directly, so its
+            validation_reports content and order are unchanged.
         
     Returns:
         Tuple of (is_valid, errors, warnings)
@@ -4755,6 +5884,7 @@ def _validate_proposal(
             is_valid=False,
             errors_json=errors,
             warnings_json=warnings,
+            buffer=buffer,
         )
         return (False, errors, warnings)
     
@@ -4815,6 +5945,7 @@ def _validate_proposal(
         is_valid=is_valid_final,
         errors_json=errors if errors else None,
         warnings_json=warnings if warnings else None,
+        buffer=buffer,
     )
     
     return (is_valid_final, errors, warnings)

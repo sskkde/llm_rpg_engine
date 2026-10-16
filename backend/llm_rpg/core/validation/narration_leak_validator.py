@@ -59,6 +59,7 @@ class NarrationLeakValidator:
         session_id: Optional[str] = None,
         npc_ids: Optional[List[str]] = None,
         forbidden_patterns: Optional[List[str]] = None,
+        preloaded_forbidden_facts: Optional[List[ForbiddenNarrationFact]] = None,
     ) -> ValidationResult:
         """Validate narration for information leaks.
 
@@ -106,7 +107,10 @@ class NarrationLeakValidator:
             for info in forbidden_info
             if self._is_checkable_text(info)
         ]
-        forbidden_facts.extend(self._load_db_forbidden_facts(db, session_id, state, npc_ids))
+        if preloaded_forbidden_facts is not None:
+            forbidden_facts.extend(preloaded_forbidden_facts)
+        else:
+            forbidden_facts.extend(self._load_db_forbidden_facts(db, session_id, state, npc_ids))
 
         for fact in self._deduplicate_facts(forbidden_facts):
             severity, reason = self._check_fact_against_text(fact, text_lower)

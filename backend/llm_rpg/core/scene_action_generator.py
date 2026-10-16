@@ -6,7 +6,7 @@ Derives available actions from location access_rules, active quests,
 and visible NPCs at the current location.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
@@ -156,6 +156,11 @@ def generate_recommended_actions(
     db: Session,
     session_id: str,
     location_id: Optional[str] = None,
+    planned_quests: Optional[Mapping[str, Any]] = None,
+    planned_session_state: Optional[SessionStateModel] = None,
+    planned_player_state: Optional[SessionPlayerStateModel] = None,
+    planned_npc_states: Optional[List[SessionNPCStateModel]] = None,
+    baseline_quest_states: Optional[List[SessionQuestStateModel]] = None,
 ) -> List[str]:
     """Generate rule-based recommended actions for the current scene.
     
@@ -168,6 +173,12 @@ def generate_recommended_actions(
         db: SQLAlchemy database session.
         session_id: The active session ID.
         location_id: Optional location ID. If None, uses current location from session state.
+        planned_quests: Optional map of ``session_quest_states.id`` to this turn's
+            planned quest-progression update (``core/quest_progression.py``). Quest
+            progression used to write its row during turn preparation, so this
+            function observed the post-advance status; while the write is still
+            pending the plan is applied here instead, so the generated actions stay
+            identical (a quest the advance completed must drop out of the list).
     
     Returns:
         List of recommended action strings (max 4).
@@ -189,7 +200,7 @@ def generate_recommended_actions(
     world_id = session.world_id
     
     # 2. Determine current location
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = session_state_repo.get_by_session(session_id) or planned_session_state
     current_location_id = location_id
     if current_location_id is None:
         if session_state:
@@ -209,7 +220,7 @@ def generate_recommended_actions(
         return []
     
     # 4. Load player state
-    player_state = player_state_repo.get_by_session(session_id)
+    player_state = player_state_repo.get_by_session(session_id) or planned_player_state
     
     # 5. Get global flags
     global_flags = {}
@@ -241,6 +252,8 @@ def generate_recommended_actions(
     
     # 7. Add NPC interaction actions for NPCs at current location
     npc_states = npc_state_repo.get_by_session(session_id)
+    existing_npc_templates = {row.npc_template_id for row in npc_states}
+    npc_states.extend(row for row in (planned_npc_states or []) if row.npc_template_id not in existing_npc_templates)
     for npc_state in npc_states:
         if npc_state.current_location_id == current_location_id:
             npc_template = npc_template_repo.get_by_id(npc_state.npc_template_id)
@@ -250,9 +263,15 @@ def generate_recommended_actions(
                 recommended_actions.append(action)
     
     # 8. Add quest-relevant actions from active quests
+    # ``planned_quests`` carries this turn's not-yet-written progression updates, so
+    # the status filter below sees the same values the committed row would provide.
     quest_states = quest_state_repo.get_by_session(session_id)
+    existing_quest_templates = {row.quest_template_id for row in quest_states}
+    quest_states.extend(row for row in (baseline_quest_states or []) if row.quest_template_id not in existing_quest_templates)
     for quest_state in quest_states:
-        if quest_state.status == "active":
+        planned = planned_quests.get(quest_state.id) if planned_quests else None
+        status = planned.status if planned is not None else quest_state.status
+        if status == "active":
             quest_template = quest_template_repo.get_by_id(quest_state.quest_template_id)
             if quest_template:
                 # Add quest action hint

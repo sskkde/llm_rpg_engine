@@ -305,6 +305,9 @@ class ProposalPipeline:
                     raw_tokens=data.get("raw_tokens", []),
                     confidence=data.get("confidence", 0.5),
                     mentioned_entities=data.get("mentioned_entities", []),
+                    needs_clarification=data.get("needs_clarification", False),
+                    clarification_question=data.get("clarification_question"),
+                    visibility=data.get("visibility", "player_visible"),
                     audit=audit,
                     is_fallback=False,
                 )

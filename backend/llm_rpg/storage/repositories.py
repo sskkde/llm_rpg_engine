@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional, Type, TypeVar
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
 
+from ..core.turn_unit_of_work import is_managed
+
 from .models import (
     WorldModel,
     ChapterModel,
@@ -64,7 +66,10 @@ class BaseRepository:
     def create(self, data: Dict[str, Any]) -> T:
         instance = self.model(**data)
         self.db.add(instance)
-        self.db.commit()
+        if is_managed(self.db):
+            self.db.flush()
+        else:
+            self.db.commit()
         self.db.refresh(instance)
         return instance
 
@@ -80,7 +85,10 @@ class BaseRepository:
             for key, value in data.items():
                 if hasattr(instance, key):
                     setattr(instance, key, value)
-            self.db.commit()
+            if is_managed(self.db):
+                self.db.flush()
+            else:
+                self.db.commit()
             self.db.refresh(instance)
         return instance
 
@@ -88,7 +96,10 @@ class BaseRepository:
         instance = self.get_by_id(id)
         if instance:
             self.db.delete(instance)
-            self.db.commit()
+            if is_managed(self.db):
+                self.db.flush()
+            else:
+                self.db.commit()
             return True
         return False
 

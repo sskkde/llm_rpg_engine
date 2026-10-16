@@ -800,7 +800,11 @@ class TurnTransactionModel(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     session_id = Column(String, ForeignKey("sessions.id"), nullable=False)
     turn_no = Column(Integer, nullable=False)
-    idempotency_key = Column(String, nullable=False, unique=True)
+    idempotency_key = Column(String, nullable=False)
+    request_fingerprint = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    fencing_generation = Column(Integer, nullable=True)
+    attempt_history_json = Column(JSON, nullable=True)
     status = Column(String, nullable=False)
     player_input = Column(Text, nullable=True)
     world_time_before = Column(String, nullable=True)
@@ -818,6 +822,7 @@ class TurnTransactionModel(Base):
 
     __table_args__ = (
         UniqueConstraint("session_id", "turn_no"),
+        UniqueConstraint("session_id", "idempotency_key", name="uq_turn_transactions_session_key"),
         Index("idx_turn_transactions_session", "session_id", "turn_no"),
         Index("idx_turn_transactions_status", "session_id", "status"),
     )

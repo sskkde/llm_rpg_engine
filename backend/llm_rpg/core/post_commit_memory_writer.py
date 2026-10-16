@@ -1,11 +1,12 @@
 """
-Post-Commit Memory Write Service (P10-C Phase 6).
+Source-Bound NPC Memory Writer (historically named post-commit; P10-C Phase 6).
 
 Persists source-bound NPCPrivateMemoryModel rows from accepted
-new_memory_candidates after a turn has been committed.
+new_memory_candidates. These memories are retrieved for future NPC decisions,
+so managed turn calls write them in the authoritative turn transaction.
 
 Safety constraints:
-- Only writes after commit (never before validation/commit).
+- Requires source_type, source_id, source_turn_no on each candidate.
 - Requires source_type, source_id, source_turn_no on each candidate.
 - Rejects candidates missing memory_text or source_type.
 - Only writes for major NPCs when NPC_MEMORY_FIRST_ENABLED=true.
@@ -31,6 +32,7 @@ from ..storage.repositories import (
 )
 from .feature_flags import npc_memory_first_enabled
 from .npc_memory_retrieval_service import batch_update_recall_stats
+from .turn_unit_of_work import is_managed
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +54,9 @@ def write_post_commit_memories(
 ) -> PostCommitWriteResult:
     """Write source-bound private memories from accepted proposal candidates.
 
-    Must only be called AFTER the turn has been committed.
-    Returns PostCommitWriteResult with written IDs and any errors.
+    Source-bound private memories are necessary cognition: during a managed
+    turn they are written in the turn transaction and failures propagate. In
+    legacy unmanaged callers, per-row failures remain reportable in the result.
     """
     if not npc_memory_first_enabled():
         return PostCommitWriteResult()
@@ -130,6 +133,8 @@ def write_post_commit_memories(
             row = memory_repo.create(memory_data)
             written_ids.append(row.id)
         except Exception as e:
+            if is_managed(db):
+                raise
             errors.append(f"Failed to write memory: {e}")
             logger.error(
                 "Post-commit memory write failed session=%s npc=%s: %s",
@@ -152,13 +157,10 @@ def update_recall_stats_post_commit(
     used_memory_ids: List[str],
     current_turn: int,
 ) -> int:
-    """Update recall stats for memories used in a committed NPC action.
+    """Update recall stats for memories used in an NPC action.
 
-    Must only be called AFTER the turn has been committed. This is the
-    safe path that replaces the old inline update_recall loop in
-    retrieve_major_npc_memories. Uses batch_update_recall_stats which
-    performs a single commit for all memory IDs rather than N individual
-    commits.
+    In managed turns this decision-relevant ranking state remains in the
+    authoritative turn transaction; unmanaged callers retain legacy commits.
 
     Returns the number of memories updated.
     """
@@ -185,4 +187,7 @@ def _update_scope_count(
     scope = scope_repo.get_by_session_and_npc_template(session_id, npc_template_id)
     if scope is not None:
         scope.memory_count = (scope.memory_count or 0) + added
-        db.commit()
+        if is_managed(db):
+            db.flush()
+        else:
+            db.commit()

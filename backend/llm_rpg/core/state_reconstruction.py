@@ -78,7 +78,7 @@ class StateReconstructionError(Exception):
         super().__init__(message)
 
 
-def reconstruct_canonical_state(db: Session, session_id: str) -> Optional[CanonicalState]:
+def reconstruct_canonical_state(db: Session, session_id: str, session_story_state_plan: Optional[Any] = None) -> Optional[CanonicalState]:
     """
     Reconstruct CanonicalState from persisted DB rows.
     
@@ -131,9 +131,13 @@ def reconstruct_canonical_state(db: Session, session_id: str) -> Optional[Canoni
     
     # Step 3: Get session_state (may be missing for new sessions)
     session_state = session_state_repo.get_by_session(session_id)
+    if session_state is None and session_story_state_plan is not None:
+        session_state = session_story_state_plan.session_state_overlay()
     
     # Step 4: Get player_state (may be missing for new sessions)
     player_state_model = player_state_repo.get_by_session(session_id)
+    if player_state_model is None and session_story_state_plan is not None:
+        player_state_model = session_story_state_plan.player_state_overlay()
     
     # Step 5: Build WorldState
     world_state = _build_world_state(
@@ -161,6 +165,7 @@ def reconstruct_canonical_state(db: Session, session_id: str) -> Optional[Canoni
         npc_state_repo=npc_state_repo,
         npc_template_repo=npc_template_repo,
         location_repo=location_repo,
+        planned_npc_states=session_story_state_plan.npc_state_overlays() if session_story_state_plan is not None else None,
     )
     
     # Step 9: Build Quest states dict
@@ -168,6 +173,7 @@ def reconstruct_canonical_state(db: Session, session_id: str) -> Optional[Canoni
         session_id=session_id,
         quest_state_repo=quest_state_repo,
         quest_template_repo=quest_template_repo,
+        planned_quest_states=session_story_state_plan.quest_state_overlays() if session_story_state_plan is not None else None,
     )
     
     # Step 10: Build Location states dict (known locations)
@@ -327,6 +333,7 @@ def _build_npc_states(
     npc_state_repo: SessionNPCStateRepository,
     npc_template_repo: NPCTemplateRepository,
     location_repo: LocationRepository,
+    planned_npc_states: Optional[List[SessionNPCStateModel]] = None,
 ) -> Dict[str, NPCState]:
     """
     Build NPC states dict from session_npc_states and npc_templates.
@@ -337,6 +344,10 @@ def _build_npc_states(
     
     # Get all NPC states for this session
     session_npc_states = npc_state_repo.get_by_session(session_id)
+    existing_npc_templates = {row.npc_template_id for row in session_npc_states}
+    session_npc_states.extend(
+        row for row in (planned_npc_states or []) if row.npc_template_id not in existing_npc_templates
+    )
     
     for snpc in session_npc_states:
         # Get NPC template for name and identity
@@ -392,6 +403,7 @@ def _build_quest_states(
     session_id: str,
     quest_state_repo: SessionQuestStateRepository,
     quest_template_repo: QuestTemplateRepository,
+    planned_quest_states: Optional[List[SessionQuestStateModel]] = None,
 ) -> Dict[str, QuestState]:
     """
     Build Quest states dict from session_quest_states and quest_templates.
@@ -402,6 +414,10 @@ def _build_quest_states(
     
     # Get all quest states for this session
     session_quest_states = quest_state_repo.get_by_session(session_id)
+    existing_quest_templates = {row.quest_template_id for row in session_quest_states}
+    session_quest_states.extend(
+        row for row in (planned_quest_states or []) if row.quest_template_id not in existing_quest_templates
+    )
     
     for sq in session_quest_states:
         # Get quest template for name and objectives

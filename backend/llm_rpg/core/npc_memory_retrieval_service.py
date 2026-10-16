@@ -343,6 +343,11 @@ def batch_update_recall_stats(
             updated += 1
 
     if updated > 0:
-        db.commit()
+        from .turn_unit_of_work import is_managed
+
+        if is_managed(db):
+            db.flush()
+        else:
+            db.commit()
 
     return updated

@@ -103,8 +103,12 @@ def acquire_turn_lock(
         (commit or rollback). This is a critical safety feature.
     """
     try:
-        # Detect database type
-        db_url = str(db.bind.url)
+        # Detect database type from either an Engine or a Connection bind.
+        bind = db.get_bind()
+        url = getattr(bind, "url", None) or getattr(
+            getattr(bind, "engine", None), "url", None
+        )
+        db_url = str(url) if url is not None else ""
         
         if 'postgresql' in db_url or 'postgres' in db_url:
             # PostgreSQL: Use advisory lock

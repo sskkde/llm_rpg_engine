@@ -234,6 +234,9 @@ def handle_movement(
     db: Session,
     session_id: str,
     target_location_code: str,
+    defer_location_write: bool = False,
+    planned_session_state: Optional[SessionStateModel] = None,
+    planned_player_state: Optional[SessionPlayerStateModel] = None,
 ) -> MovementResult:
     """Process a player movement request deterministically.
 
@@ -246,6 +249,12 @@ def handle_movement(
         db: SQLAlchemy database session.
         session_id: The active session ID.
         target_location_code: User-provided location identifier (code, name, or alias).
+        defer_location_write: Plan mode. When true the successful branch does *not*
+            write ``session_states.current_location_id``; the caller applies the
+            planned location (``MovementResult.new_location_id``) inside its final
+            authoritative transaction. Every other behaviour — resolution, access
+            checks, and every ``MovementResult`` field — is unchanged, so the caller
+            can reproduce the deferred write field by field.
 
     Returns:
         MovementResult with success/failure details.
@@ -287,11 +296,11 @@ def handle_movement(
         )
 
     # 4. Load current session state
-    session_state = session_state_repo.get_by_session(session_id)
+    session_state = session_state_repo.get_by_session(session_id) or planned_session_state
     previous_location_id = session_state.current_location_id if session_state else None
 
     # 5. Load player state
-    player_state = player_state_repo.get_by_session(session_id)
+    player_state = player_state_repo.get_by_session(session_id) or planned_player_state
 
     # 6. Get global flags
     global_flags = {}
@@ -313,7 +322,10 @@ def handle_movement(
         )
 
     # 8. Success: update session_states.current_location_id
-    if session_state is not None:
+    # In plan mode the write is deferred to the caller's final transaction; the
+    # payload it must apply is exactly ``{"current_location_id": target_location.id}``
+    # on this same row (``MovementResult.new_location_id`` carries the id).
+    if session_state is not None and not defer_location_write:
         session_state_repo.update(session_state.id, {
             "current_location_id": target_location.id,
         })

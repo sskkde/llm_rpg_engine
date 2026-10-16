@@ -27,6 +27,7 @@ from ..storage.repositories import (
     QuestStepRepository,
 )
 from ..services.quest_journal_service import QuestJournalService
+from ..core.turn_concurrency import acquire_turn_lock
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/player/sessions/{session_id}", tags=["player-quests"])
@@ -254,8 +255,24 @@ def abandon_quest(
     Completed or already-abandoned quests cannot be re-abandoned.
 
     Returns the updated quest state with status set to 'abandoned'.
+
+    Concurrency protocol (W3): like the turn commit boundary, this non-turn writer
+    takes the transaction-scoped session advisory lock before it reads the quest
+    state, so it can never commit inside the turn's "re-verify -> commit" window.
     """
     _get_session_and_verify_owner(session_id, current_user, db)
+
+    # Lock order is "session lock -> read -> validate -> write -> single commit".
+    # Taking the lock after the ownership check but before any quest read removes the
+    # old "read first, lock never" hazard: the value validated below is always the one
+    # persisted under the lock. ``pg_advisory_xact_lock`` is transaction-scoped, so it
+    # is held until the single commit inside ``update`` below releases it; no extra
+    # commit is introduced to take the lock.
+    acquire_turn_lock(db, session_id)
+
+    # Re-read only after the lock. Expire whatever this Session already cached so the
+    # status validation cannot run against a pre-lock snapshot of the quest state.
+    db.expire_all()
 
     quest_state_repo = SessionQuestStateRepository(db)
     quest_state = quest_state_repo.get_by_session_and_quest(session_id, quest_id)

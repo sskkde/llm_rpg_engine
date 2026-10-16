@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..storage.models import EventLogModel
 from ..storage.repositories import EventLogRepository
+from .turn_unit_of_work import is_managed
 
 
 class TurnAllocationError(Exception):
@@ -149,6 +150,7 @@ def commit_turn(
     result_json: Optional[Dict[str, Any]] = None,
     narrative_text: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    event_id: Optional[str] = None,
 ) -> EventLogModel:
     """
     Commit a turn event to the database.
@@ -165,6 +167,10 @@ def commit_turn(
         result_json: Optional structured result data
         narrative_text: Optional narrative text
         idempotency_key: Optional idempotency key for retries
+        event_id: Optional pre-allocated primary key. The turn service plans its
+            writes before the final transaction (``core/turn_preparation.py``) and
+            assigns ids up front so planned rows and durable rows are the same
+            entity; when omitted the model default generates the id as before.
         
     Returns:
         The created or existing EventLogModel
@@ -189,7 +195,20 @@ def commit_turn(
     # Step 1: Check if event already exists (idempotency)
     existing = event_log_repo.get_by_session_turn_event(session_id, turn_no, event_type)
     if existing:
-        # Event already committed - return it for idempotency
+        # Managed turns may only reuse an event proven to belong to this request.
+        if is_managed(db):
+            existing_action = existing.structured_action
+            if (
+                idempotency_key
+                and isinstance(existing_action, dict)
+                and existing_action.get("idempotency_key") == idempotency_key
+            ):
+                return existing
+            raise TurnAllocationError(
+                f"Turn {turn_no} for session {session_id} is already owned by another event",
+                session_id=session_id,
+            )
+        # Legacy non-managed behavior retains its idempotent lookup.
         return existing
     
     # Step 2: Build structured_action with idempotency key if provided
@@ -198,21 +217,35 @@ def commit_turn(
         structured_action = {"idempotency_key": idempotency_key}
     
     # Step 3: Create event log entry
+    event_data: Dict[str, Any] = {
+        "session_id": session_id,
+        "turn_no": turn_no,
+        "event_type": event_type,
+        "input_text": input_text,
+        "structured_action": structured_action,
+        "result_json": result_json,
+        "narrative_text": narrative_text,
+    }
+    if event_id:
+        # Honour the id planned during preparation so the durable row is the same
+        # entity the preparation section already referenced.
+        event_data["id"] = event_id
     try:
-        event = event_log_repo.create({
-            "session_id": session_id,
-            "turn_no": turn_no,
-            "event_type": event_type,
-            "input_text": input_text,
-            "structured_action": structured_action,
-            "result_json": result_json,
-            "narrative_text": narrative_text,
-        })
-        db.commit()
+        event = event_log_repo.create(event_data)
+        if is_managed(db):
+            db.flush()
+        else:
+            db.commit()
         return event
         
     except IntegrityError as e:
-        db.rollback()
+        if not is_managed(db):
+            db.rollback()
+        elif "uq_event_logs_session_turn_type" in str(e) or "UNIQUE constraint failed" in str(e):
+            raise TurnAllocationError(
+                f"Turn conflict while writing turn {turn_no} for session {session_id}",
+                session_id=session_id,
+            ) from e
         
         # Check if it's a unique constraint violation
         # This can happen with concurrent requests
@@ -229,7 +262,8 @@ def commit_turn(
         )
     
     except Exception as e:
-        db.rollback()
+        if not is_managed(db):
+            db.rollback()
         raise TurnAllocationError(
             f"Failed to commit turn {turn_no} for session {session_id}: {str(e)}",
             session_id=session_id,

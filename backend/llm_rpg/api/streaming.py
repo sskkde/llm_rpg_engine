@@ -37,6 +37,9 @@ from ..core.turn_service import (
     execute_turn_service,
     SessionNotFoundError as TurnServiceSessionNotFoundError,
     TurnServiceError,
+    TurnBudgetExceededError,
+    TurnClaimConflictError,
+    TurnRecoveryIncompleteError,
     TurnValidationError as TurnServiceValidationError,
     LLMConfigurationError,
 )
@@ -226,6 +229,7 @@ class StreamTurnRequest(BaseModel):
     """Request to stream a turn."""
     action: str = Field(..., description="Player action input")
     idempotency_key: Optional[str] = Field(None, description="Idempotency key for deduplication")
+    request_fingerprint: Optional[str] = Field(None, description="Canonical request fingerprint")
 
 
 async def generate_narration_stream(
@@ -325,6 +329,7 @@ async def execute_turn_stream(
     world_id: str,
     use_mock: bool = False,
     idempotency_key: Optional[str] = None,
+    request_fingerprint: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Execute a turn with streaming SSE events.
@@ -388,6 +393,7 @@ async def execute_turn_stream(
                 player_input=player_input,
                 use_mock=use_mock,
                 idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 progress_callback=progress_callback,
                 turn_event_callback=turn_event_callback,
             )
@@ -481,7 +487,36 @@ async def execute_turn_stream(
     
     if thread_error.get("value"):
         e = thread_error["value"]
-        if isinstance(e, TurnServiceValidationError):
+        if isinstance(e, (TurnClaimConflictError, TurnRecoveryIncompleteError)):
+            yield format_sse(
+                "error",
+                {
+                    "code": e.code,
+                    "error_type": "turn_claim_conflict" if isinstance(e, TurnClaimConflictError) else "recovery_incomplete",
+                    "message": str(e),
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        elif isinstance(e, TurnBudgetExceededError):
+            # Structured timeout, mirroring the REST 504: the transport ended normally
+            # (the stream just stops after this event) and nothing uncommitted was
+            # persisted, so the same idempotency key can be retried later.
+            yield format_sse(
+                "error",
+                {
+                    "code": e.code,
+                    "error_type": "turn_budget_exceeded",
+                    "message": str(e),
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                event_id=f"{event_id}_error"
+            )
+        elif isinstance(e, TurnServiceValidationError):
             yield format_sse(
                 "turn_error",
                 {
@@ -634,6 +669,7 @@ async def stream_turn(
     
     game_id = f"game_{session_id}"
     turn_index = _get_current_turn_from_db(db, session_id) + 1
+    effective_key = request.idempotency_key or str(uuid.uuid4())
     
     return StreamingResponse(
         execute_turn_stream(
@@ -642,13 +678,15 @@ async def stream_turn(
             turn_index=turn_index,
             player_input=request.action,
             world_id=session.world_id,
-            idempotency_key=request.idempotency_key,
+            idempotency_key=effective_key,
+            request_fingerprint=request.request_fingerprint,
         ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Timeout-Seconds": "180",
+            "X-Idempotency-Key": effective_key,
         },
     )
 
@@ -684,6 +722,7 @@ async def stream_turn_mock(
     
     game_id = f"game_{session_id}"
     turn_index = _get_current_turn_from_db(db, session_id) + 1
+    effective_key = request.idempotency_key or str(uuid.uuid4())
     
     return StreamingResponse(
         execute_turn_stream(
@@ -693,12 +732,14 @@ async def stream_turn_mock(
             player_input=request.action,
             world_id=session.world_id,
             use_mock=True,
-            idempotency_key=request.idempotency_key,
+            idempotency_key=effective_key,
+            request_fingerprint=request.request_fingerprint,
         ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Timeout-Seconds": "180",
+            "X-Idempotency-Key": effective_key,
         },
     )

@@ -26,6 +26,7 @@ from ..storage.repositories import (
     TurnTransactionRepository,
 )
 from ..models.events import WorldTime
+from ..core.turn_unit_of_work import is_managed
 
 
 class ScheduledEventProcessor:
@@ -315,6 +316,8 @@ class ScheduledEventProcessor:
             }
             
         except Exception:
+            if is_managed(self.db):
+                raise
             # Only rollback in legacy mode
             if not transaction_id:
                 self.db.rollback()
@@ -346,6 +349,8 @@ class ScheduledEventProcessor:
             return transaction
             
         except Exception:
+            if is_managed(self.db):
+                raise
             self.db.rollback()
             return None
     

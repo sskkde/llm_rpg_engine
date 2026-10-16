@@ -13,6 +13,7 @@ This module provides:
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 import uuid
@@ -20,6 +21,8 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class LLMMessage(BaseModel):
@@ -480,34 +483,77 @@ class LLMService:
         return round(input_cost + output_cost, 6)
     
     def _persist_call_log(self, log: LLMCallLog):
-        """Persist call log to database if available."""
+        """Persist call log to database if available.
+
+        Model-call auditing is an audit-class write: when it fails the turn keeps
+        going, and it must never take transaction control away from the owner of the
+        turn's unit of work. ``TurnUnitOfWork(guard_commits=True)`` replaces
+        ``Session.commit`` with ``flush`` but does *not* guard ``rollback``, and this
+        service holds the very same managed Session as the turn service
+        (``turn_service`` passes ``db_session=db``). An unguarded ``rollback()`` here
+        would therefore discard the whole turn's facts while swallowing the exception,
+        and the turn would go on to commit a partial result. Inside a managed turn UoW
+        the failure is downgraded to a log entry instead: the pending turn work stays
+        in the transaction, and rolling back remains the UoW owner's decision.
+        Outside a managed UoW the previous behaviour is unchanged, because there the
+        Session belongs to this service and a failed insert would otherwise poison it.
+        """
         db_error = None
         if self._db_session is not None:
+            # Imported lazily: ``llm.service`` is imported by ``llm.proposal_pipeline``,
+            # which ``core/__init__`` pulls in, so a module-level import of the core
+            # package would be circular.
+            from ..core.turn_unit_of_work import is_managed
+
+            managed = is_managed(self._db_session)
             try:
-                from ..storage.models import ModelCallLogModel
-                
-                db_log = ModelCallLogModel(
-                    id=log.log_id,
-                    session_id=log.session_id,
-                    turn_no=log.turn_no,
-                    provider=log.provider,
-                    model_name=log.model,
-                    prompt_type=log.prompt_template_id,
-                    input_tokens=log.input_tokens,
-                    output_tokens=log.output_tokens,
-                    cost_estimate=log.cost_estimate,
-                    latency_ms=log.latency_ms,
-                    request_payload={"prompt": log.prompt_content} if log.prompt_content else None,
-                    response_payload={"content": log.response_content} if log.response_content else None,
-                )
-                self._db_session.add(db_log)
-                self._db_session.commit()
+                buffer = self._db_session.info.get("turn_write_buffer") if managed else None
+                request_payload = {"prompt": log.prompt_content} if log.prompt_content else None
+                response_payload = {"content": log.response_content} if log.response_content else None
+                if buffer is not None:
+                    buffer.add_model_call_log(
+                        id=log.log_id, session_id=log.session_id, turn_no=log.turn_no,
+                        provider=log.provider, model_name=log.model,
+                        prompt_type=log.prompt_template_id,
+                        input_tokens=log.input_tokens, output_tokens=log.output_tokens,
+                        cost_estimate=log.cost_estimate, latency_ms=log.latency_ms,
+                        request_payload=request_payload, response_payload=response_payload,
+                    )
+                else:
+                    from ..storage.models import ModelCallLogModel
+                    db_log = ModelCallLogModel(
+                        id=log.log_id,
+                        session_id=log.session_id,
+                        turn_no=log.turn_no,
+                        provider=log.provider,
+                        model_name=log.model,
+                        prompt_type=log.prompt_template_id,
+                        input_tokens=log.input_tokens,
+                        output_tokens=log.output_tokens,
+                        cost_estimate=log.cost_estimate,
+                        latency_ms=log.latency_ms,
+                        request_payload=request_payload,
+                        response_payload=response_payload,
+                    )
+                    self._db_session.add(db_log)
+                    self._db_session.commit()
             except Exception as e:
                 db_error = str(e)
-                try:
-                    self._db_session.rollback()
-                except:
-                    pass
+                if managed:
+                    # Never roll back a transaction this service does not own. The
+                    # failure still surfaces: the turn's next database operation sees
+                    # the poisoned transaction and the turn's UoW rolls the whole turn
+                    # back, so no partial turn is ever committed silently.
+                    logger.warning(
+                        "Model call audit persistence failed inside a managed turn; "
+                        "leaving transaction control to the turn unit of work: %s",
+                        db_error,
+                    )
+                else:
+                    try:
+                        self._db_session.rollback()
+                    except Exception:
+                        pass
         
         self._call_logs.append(log)
         

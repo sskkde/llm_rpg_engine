@@ -15,7 +15,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localho
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``fileConfig`` defaults to ``disable_existing_loggers=True``, which silences
+    # every logger created before this call. Running migrations in-process (tests,
+    # admin tooling, startup hooks) would therefore permanently disable application
+    # logging for the rest of the process. Keep existing loggers alive and only let
+    # the alembic sections of the ini adjust their own loggers.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

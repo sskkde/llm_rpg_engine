@@ -1,5 +1,7 @@
 # LLM RPG Engine - Perspective-Aware Memory System
 
+> **版本与路线说明**：本仓库当前源码与下方运行说明描述的是 **V1 当前实现**，不代表新目标已实现。当前选定的演进目标是 **Python（FastAPI）游戏后端 + Next.js Web 前端**，按四阶段路线推进；设计基线与阶段路线见 [RFC（LLM RPG Engine 设计总结）](docs/design/llm_rpg_engine_design_summary_2026-10-08.md) 和[路线图草案](docs/design/roadmap-draft.md)。[旧 DSH V2 文档](docs/v2_dsh_rpg_engine.md)仅作已被替代的历史记录，不是当前目标或唯一权威入口。阶段实测不变量及未完成项见[回合恢复与不变量](backend/docs/RECOVERY_AND_INVARIANTS.md)。
+
 A narrative RPG engine powered by LLMs with a perspective-aware memory system. This system maintains world consistency, prevents NPC omniscience, and supports long-term narrative generation through a sophisticated event sourcing architecture.
 
 ## Architecture Overview
@@ -1365,7 +1367,7 @@ For detailed status, see `P10C_EXECUTION_REPORT.md`.
 
 ## References
 
-- [Architecture Document](doc/llm_rpg_perspective_aware_memory_system_architecture.md)
+- [Architecture Document](doc/core-game-loop-architecture.md)
 - [Requirements Traceability](doc/requirements-traceability.md)
 - [Testing Strategy](doc/testing_strategy.md) — Test pyramid, gates, and coverage requirements
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)

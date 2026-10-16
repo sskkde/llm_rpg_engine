@@ -1,5 +1,9 @@
 # Roadmap Alignment Status
 
+> **当前目标入口**：当前选定的演进目标是 **Python（FastAPI）后端 + Next.js 前端**；设计基线与四阶段路线见 [RFC](design/llm_rpg_engine_design_summary_2026-10-08.md) 和[路线图草案](design/roadmap-draft.md)。下方路线对齐表是 V1 日期快照，保留其历史记录，不代表新目标进度或本轮复验。旧 [DSH V2 目标](v2_dsh_rpg_engine.md)已被替代，仅作历史参考。
+>
+> **V1 dated snapshot**：以下路线对齐表保留其原有历史内容与状态，仅反映文档标注日期时的 V1 记录，不代表新目标进度或本轮复验。
+
 **Date**: 2026-05-21
 **Version**: V1.0 Release
 

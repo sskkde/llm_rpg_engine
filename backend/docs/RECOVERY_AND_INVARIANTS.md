@@ -1,5 +1,37 @@
 # Backend Architecture: Recovery Workflow and Progression Invariants
 
+> **当前阶段实测基线（不是对所有运行配置的普遍保证）**：本节记录回合原子性与认领/恢复链路的阶段验证结论；后续通用说明中未列出的旧路径不应推断为同样满足这些不变量。当前选定的产品演进目标与路线入口见根目录 README、[RFC](../../docs/design/llm_rpg_engine_design_summary_2026-10-08.md) 和[四阶段路线图](../../docs/design/roadmap-draft.md)。
+
+## Current Turn Commit and Recovery Invariants
+
+> **勘误（2026-10-15，阶段一补齐）**：本文件此前记录的「旧 worker 不得提交」在**提交路径上并未接线**——租约/generation 只在失败路径（`abort_claim`）生效，最终事实提交按事务 ID 直接更新状态，且认领心跳在生产零调用。**helper 级 fencing 不等于生产提交保证。** 该缺口已由阶段一补齐计划修复，证据见 [`../../.omo/evidence/phase1/20261015-p1-completion/`](../../.omo/evidence/phase1/20261015-p1-completion/)（W1a/W1b/Fix-1 复核记录）。旧验收记录保留原文，不作为当前保证的依据。
+
+- **数据库是权威真相**。回合必要效果经 Unit of Work 原子提交，并由单一权威提交点持久化；该提交失败时不得留下半回合持久化残留。回合生产入口为 `execute_turn_service`。
+- **认领与幂等按会话隔离**：`(session_id, idempotency_key)` 唯一；同键输入指纹不同返回 409；活跃认领快速返回 `turn_in_progress`；已提交的同键请求只恢复既有结果，不重放回合。请求指纹**由服务端始终重算**，客户端传入值不参与裁决。
+- **回合编号在会话锁内判定**：编号只在取得会话级 advisory 锁之后计算，并以认领 token 为准；后续步骤不得另算编号覆盖 token。这消除了「陈旧编号撞上竞争者已提交回合」的路径。
+- **租约与 fencing generation**：认领使用租约及 generation fencing。最终提交以**完整 token**（transaction_id、session、key、fingerprint、turn_no、generation）+ `status='pending'` + **SQL 内 `clock_timestamp()` 租约比较**做 CAS，失败整体回滚；旧 worker 不得提交。模型等待期间不持有业务事务或写锁（读事务在每次模型调用前显式结束）。
+- **心跳与预算**：认领后由**独立 Session** 周期续租（默认 15s / 90s 租约）；进入最终写事务前停止并有界 join 心跳，停止失败或已失认领则拒绝提交。服务级总预算默认 600s，到期停止续租并在提交前复检。
+- **提交回执不确定**：`db.commit()` 抛错时按**完整 token** 重读认领行确认归属；只有确认属本 worker 且已提交才走只读恢复，否则走 abort（abort 自身亦为完整 token CAS，不会覆盖接替者）。
+- **历史认领裁决**：存在 `player_turn` 时只恢复，不重放；无事件且无残留时裁为 `expired`；发现残留或未知指纹时裁为 `legacy_inconsistent`，不重放也不清理。
+- **准备期零业务写**：模型等待期间的初始化、移动、任务推进、事件与校验报告、模型审计均以「计划/缓冲」形式存在，随最终权威事务一次性落库；准备段不再对游戏状态产生可见写入。
+- **澄清语义**：明确需澄清的输入（含确定性解析得到 `move` 但缺目标）记为零耗时回合——回合号增加、`actions_committed=0`、世界时间不变，且不产生移动/任务/NPC/调度/认知写入；首回合澄清不提前初始化运行状态。澄清文案与旁白一样经过泄漏校验，不通过则使用确定性模板。
+- **提交后旁白**：旁白模型调用发生在权威提交**之后**，只消费本回合冻结、白名单可见的上下文（含最终裁决后的时间与仍被接受的反应）；表现采用 `template → finalized` CAS，并同时定稿该回合 narration `game_event` 的表现文本。旁白生成/定稿失败保留模板，不回滚已提交事实。同键恢复为只读；历史部分状态标为 `legacy_partial`。
+- **非回合写者的锁协议**：可修改状态指纹集合的非回合写者（当前为放弃任务）在读取之前取得同一会话级 advisory 锁，顺序为「会话锁 → 读取 → 校验 → 写入 → 单次提交」，因此不能落入回合的「重验 → 提交」窗口。
+- **流式语义边界**：当前不提供逐片 SSE 续传；断开后可恢复已提交结果，但不保证从断点续发先前片段。外部 LLM 调用不承诺 exactly-once；数据库事务不能撤销已发生的外部调用。
+
+### Measured gaps and limitations
+
+阶段一补齐计划（[`.omo/plans/phase1-turn-foundation-completion.md`](../../.omo/plans/phase1-turn-foundation-completion.md)）已完成 W0–W4 与收口修复；**全量测试在基线条件（不导出 PG 变量）下只剩 4 项既有失败**（`test_runtime_entrypoint::test_required_endpoints_exist`、`test_llm_npc_engine::TestExecuteNPCStage::test_build_npc_context_excludes_hidden_identity`、`test_p10c_npc_decision_adapter::TestPromptMemoryFirstRules` ×2），无设计内红灯。仍存在的边界如下（不得据此推断更强的保证）：
+
+- **SQLite 下独立连接重验不可测**；并发/锁/租约语义以 PostgreSQL 为准，不能用 SQLite 结果替代。
+- **模型调用不被预算抢占**：预算到期只停止续租并在提交前复检（拒绝落库未提交结果），不会中断进行中的模型调用。
+- **参数化事务测试观测各阶段入口**；「阶段内模型调用前关闭读事务」由代码检视（`_end_read_transaction` 调用点）覆盖，尚无独立的运行时断言。
+- **旧客户端指纹兼容（已接受为偏差，2026-10-15 决定）**：历史中由客户端传入并落库的 `request_fingerprint` 记录，同键重试会得到 `fingerprint_conflict`（明确拒绝、不重放、不重写），而非计划措辞中的 `legacy_inconsistent` 分类。该行为安全，但不满足计划退出门第 8 条的措辞；彻底对齐需要额外的持久标记来区分「客户端值」与「服务端值」，会改动最敏感的认领裁决代码，故按已记录偏差接受。
+- **首回合种子记忆（`NPC_MEMORY_FIRST_ENABLED`）** 未纳入 overlay：该开关开启且首回合存在 major NPC seed bundle 时，第一回合上下文看不到本应初始化的种子记忆；既有会话不受影响。
+- **测试隔离缺陷（已定位根因，未修）**：`alembic/env.py` 调用 `fileConfig(config.config_file_name)`，而 `fileConfig` 默认 `disable_existing_loggers=True`，会把调用前已存在的 logger 全部禁用。`tests/integration/test_turn_postgres_foundation.py` 会真实执行 `alembic upgrade`，因此同一进程内**之后**的测试 `caplog` 收不到任何记录——表现为全量在导出 PG 变量（迁移真的执行）时出现 3 例 `test_asset_provider_resolver` 失败（`assert len(caplog.records) == 3` 得到 `0`）；单跑该文件 29 passed，不导出 PG 变量的基线全量无此失败。实测：`llm_rpg.assets.provider_resolver` 的 `disabled` 由 `False` 变为 `True`。这同时是运维隐患（进程内跑迁移会静默关掉应用日志）。修法为一行 `fileConfig(cfg, disable_existing_loggers=False)`，属本阶段范围外文件，未改动。
+- **心跳 Session 未设数据库/连接池超时**：`stop()` 有界 join 但不能中断阻塞中的数据库操作；连接中断、池耗尽等场景需故障注入验证（未做）。
+
+
 This document explains the core invariants governing turn execution, state management, and recovery workflows in the LLM RPG Engine backend.
 
 ## Core Invariants

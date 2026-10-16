@@ -681,35 +681,22 @@ class TestRejectedProposalNoStateDelta:
         test_quest_templates,
     ):
         """
-        Test that rejected proposal creates validation_report with errors.
+        Test that a rejected production world proposal creates validation_report with errors.
+
+        Phase 2: the negative case is now a *contract violation* — a model response
+        that tries to submit a direct state delta (`player_state.hp = 0`) is refused
+        before it can be authorized, and the refusal must still be recorded as an
+        invalid validation report. The security assertion is unchanged; only the
+        injection point moved from the lenient proposal object to the strict
+        production contract.
         """
-        from llm_rpg.models.proposals import (
-            WorldTickProposal,
-            CandidateEvent,
-            StateDeltaCandidate,
-            ProposalAuditMetadata,
-            ProposalType,
-            ProposalSource,
+        from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+        invalid_world_outcome = ProductionContractOutcome(
+            reason_code="contract_schema_violation",
+            detail="state_deltas: Extra inputs are not permitted",
         )
-        
-        invalid_world_proposal = WorldTickProposal(
-            time_description="Time passes...",
-            candidate_events=[],
-            state_deltas=[
-                StateDeltaCandidate(
-                    path="player_state.hp",
-                    operation="set",
-                    value=0,
-                    reason="invalid",
-                )
-            ],
-            confidence=0.8,
-            audit=ProposalAuditMetadata(
-                proposal_type=ProposalType.WORLD_TICK,
-                source_engine=ProposalSource.WORLD_ENGINE,
-            ),
-        )
-        
+
         with patch("llm_rpg.core.turn_service._is_world_stage_enabled", return_value=True):
             with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
                 mock_provider = MockLLMProvider()
@@ -718,8 +705,8 @@ class TestRejectedProposalNoStateDelta:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=invalid_world_proposal
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=invalid_world_outcome
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -985,35 +972,19 @@ class TestFallbackMetadataInResultJson:
         test_quest_templates,
     ):
         """
-        Test that validation_errors are recorded in llm_stage_result.
+        Test that a refused production contract is recorded in llm_stage_result.
+
+        Phase 2: the refusal reason is now a stable contract reason code carried on
+        the stage result, so the audit trail records *why* the world proposal was
+        refused instead of a legacy proposal-validation error list.
         """
-        from llm_rpg.models.proposals import (
-            WorldTickProposal,
-            CandidateEvent,
-            StateDeltaCandidate,
-            ProposalAuditMetadata,
-            ProposalType,
-            ProposalSource,
+        from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+        invalid_world_outcome = ProductionContractOutcome(
+            reason_code="contract_duplicate_key",
+            detail="duplicate object key: state_deltas",
         )
-        
-        invalid_world_proposal = WorldTickProposal(
-            time_description="Time passes...",
-            candidate_events=[],
-            state_deltas=[
-                StateDeltaCandidate(
-                    path="player_state.hp",
-                    operation="set",
-                    value=0,
-                    reason="invalid",
-                )
-            ],
-            confidence=0.8,
-            audit=ProposalAuditMetadata(
-                proposal_type=ProposalType.WORLD_TICK,
-                source_engine=ProposalSource.WORLD_ENGINE,
-            ),
-        )
-        
+
         with patch("llm_rpg.core.turn_service._is_world_stage_enabled", return_value=True):
             with patch("llm_rpg.core.turn_service._create_llm_service_from_config") as mock_create:
                 mock_provider = MockLLMProvider()
@@ -1022,8 +993,8 @@ class TestFallbackMetadataInResultJson:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=invalid_world_proposal
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=invalid_world_outcome
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     

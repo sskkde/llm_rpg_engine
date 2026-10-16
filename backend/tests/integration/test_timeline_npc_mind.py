@@ -1120,6 +1120,79 @@ class TestHiddenInfoProtection:
         assert npc_data["hidden_plan_state"] == "Planning to betray the player"
 
 
+def _engine_move_resolution(location_id, location_name, location_code):
+    """Engine adjudication of a successful move, as the turn service produces it."""
+    from llm_rpg.core.action_resolution import (
+        CognitionKind,
+        ResolvedAction,
+        ResolvedCognition,
+        ResolvedEvent,
+        ResolvedEventKind,
+    )
+    from llm_rpg.core.action_reason import ActionStatus
+    from llm_rpg.core.movement_handler import MovementResult
+
+    return ResolvedAction(
+        action=None,
+        status=ActionStatus.ACCEPTED,
+        movement_result=MovementResult(
+            success=True,
+            new_location_id=location_id,
+            new_location_name=location_name,
+            new_location_code=location_code,
+        ),
+        state_changes={"location_id": location_id},
+        events=[ResolvedEvent(
+            kind=ResolvedEventKind.ACTION_RESOLVED,
+            actor_id="player",
+            action_type="move",
+            game_event_type="action_resolved",
+            is_action_cause=True,
+        )],
+        cognition=[ResolvedCognition(
+            kind=CognitionKind.FACT,
+            content=location_name,
+            source_event_kind=ResolvedEventKind.ACTION_RESOLVED,
+            fact_type="location_change",
+            subject_ref="player",
+            fact_key="current_location",
+            importance=1.0,
+            confidence=1.0,
+        )],
+    )
+
+
+def _npc_observe_resolution(npc_id):
+    """Engine adjudication of an NPC observe action, for memory-persistence tests."""
+    from llm_rpg.core.action_resolution import (
+        CognitionKind,
+        ResolvedAction,
+        ResolvedCognition,
+        ResolvedEvent,
+        ResolvedEventKind,
+    )
+    from llm_rpg.core.action_reason import ActionStatus
+
+    return ResolvedAction(
+        action=None,
+        status=ActionStatus.ACCEPTED,
+        events=[ResolvedEvent(
+            kind=ResolvedEventKind.NPC_OBSERVE,
+            actor_id=npc_id,
+            action_type="observe",
+            game_event_type="npc_decision",
+        )],
+        cognition=[ResolvedCognition(
+            kind=CognitionKind.SUMMARY,
+            content=f"{npc_id}观察了当前场景",
+            source_event_kind=ResolvedEventKind.NPC_OBSERVE,
+            scope_type="npc",
+            importance=0.6,
+            confidence=0.6,
+        )],
+    )
+
+
 class TestMemoryPersistence:
     """Test memory persistence after turn execution."""
 
@@ -1201,8 +1274,11 @@ class TestMemoryPersistence:
             state_deltas={"location_id": "loc_trial_hall"},
             current_location_id="loc_trial_hall",
             npc_reactions=[],
-            world_progression=None,
-            scene_event_summary=None,
+            # Phase 2: facts come from the engine's adjudication of the action, not
+            # from a free world/scene candidate description.
+            player_resolution=_engine_move_resolution(
+                "loc_trial_hall", "试炼堂", "trial_hall"
+            ),
             canonical_state=canonical_state,
         )
         
@@ -1225,7 +1301,9 @@ class TestMemoryPersistence:
             None
         )
         assert location_fact is not None
-        assert location_fact.fact_value == "loc_trial_hall"
+        # Phase 2: the fact value is the engine's adjudicated location, not a
+        # model-echoed id string.
+        assert location_fact.fact_value == "试炼堂"
 
     def test_npc_subjective_memory_isolation(self, db_session: Session):
         """Test that NPC subjective memory is scoped by NPC ID and not player-visible."""
@@ -1297,6 +1375,13 @@ class TestMemoryPersistence:
             ),
         )
         
+        # Phase 2: retrievable cognition is derived from the engine's adjudication of
+        # the NPC action, so the caller must supply that resolution. The summary text
+        # stored in memory is engine-authored, not the model's prose.
+        npc_resolutions = {
+            "npc_001": _npc_observe_resolution("npc_001")
+        }
+
         memory_result = _persist_turn_memories(
             db=db_session,
             session_id="test_npc_memory_session",
@@ -1308,8 +1393,7 @@ class TestMemoryPersistence:
             state_deltas={},
             current_location_id="loc_trial_hall",
             npc_reactions=npc_reactions,
-            world_progression=None,
-            scene_event_summary=None,
+            npc_resolutions=npc_resolutions,
             canonical_state=canonical_state,
         )
         
@@ -1323,8 +1407,11 @@ class TestMemoryPersistence:
         ).all()
         
         assert len(npc_memories) >= 1
-        assert "主观记忆" in npc_memories[0].summary_text
-        assert "师姐微笑着回应你的问候" in npc_memories[0].summary_text
+        # The retrievable summary is the engine's own record of the action, and it is
+        # still isolated to this NPC's scope.
+        assert "师姐" in npc_memories[0].summary_text
+        assert "执行了" in npc_memories[0].summary_text
+        assert "师姐微笑着回应你的问候" not in npc_memories[0].summary_text
 
     def test_no_hidden_memory_leakage_to_player_narration(self, db_session: Session):
         """Test that NPC subjective memory does not leak to player-visible narration context."""
@@ -1425,8 +1512,6 @@ class TestMemoryPersistence:
             state_deltas={},
             current_location_id=None,
             npc_reactions=[],
-            world_progression=None,
-            scene_event_summary=None,
         )
         
         assert memory_result is not None

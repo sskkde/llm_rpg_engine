@@ -222,3 +222,224 @@ def validate_action_schema(action: dict[str, Any]) -> ValidationResult:
         "action_schema_valid",
         f"Action '{action_type_str}' passes schema validation",
     )
+
+
+# =============================================================================
+# Phase 2: production authorization profile
+# =============================================================================
+#
+# ``ACTION_SCHEMAS`` above only *declares* that an action type exists. Declaring
+# an action is not a production grant: this phase authorizes a small, explicit
+# set of (role, action_type) pairs that have a domain handler, and everything
+# else declared-but-unauthorized must answer "unsupported / no effect" instead of
+# pretending to succeed.
+#
+# The profile is the single registry both the prompt layer and the runtime check
+# read, so the model is told exactly what it may propose and the runtime enforces
+# exactly the same table.
+
+
+class ActorRole(str, Enum):
+    """Who is acting. The role decides the authorized action surface."""
+
+    player = "player"
+    npc = "npc"
+    world = "world"
+    scene = "scene"
+
+
+class TimePolicy(str, Enum):
+    """Who owns the elapsed world time of an action."""
+
+    #: The engine computes the cost from the action class (existing time rules).
+    ENGINE_ADJUDICATED = "engine_adjudicated"
+    #: The action never advances world time by itself.
+    NONE = "none"
+
+
+class ProductionTargetKind(str, Enum):
+    """Target kinds a production proposal may reference."""
+
+    location = "location"
+    npc = "npc"
+    player = "player"
+    scene = "scene"
+    none = "none"
+
+
+@dataclass(frozen=True)
+class ActionPermission:
+    """A production grant: role + action type + handler + cost policy.
+
+    Attributes:
+        action_type: Canonical action type (after wire-alias normalization).
+        role: The acting role this grant belongs to.
+        params_model: Name of the strict contract params DTO for this action.
+        target_kinds: Target kinds the proposal may reference.
+        handler: Domain resolution handler key (see ``core.action_resolution``).
+        time_policy: Who owns elapsed world time for this action.
+        note: Short human-readable boundary of what the grant does *not* allow.
+    """
+
+    action_type: str
+    role: ActorRole
+    params_model: str
+    target_kinds: tuple[ProductionTargetKind, ...]
+    handler: str
+    time_policy: TimePolicy
+    note: str = ""
+
+
+def _permission(
+    action_type: str,
+    role: ActorRole,
+    params_model: str,
+    target_kinds: tuple[ProductionTargetKind, ...],
+    handler: str,
+    time_policy: TimePolicy = TimePolicy.ENGINE_ADJUDICATED,
+    note: str = "",
+) -> ActionPermission:
+    return ActionPermission(
+        action_type=action_type,
+        role=role,
+        params_model=params_model,
+        target_kinds=target_kinds,
+        handler=handler,
+        time_policy=time_policy,
+        note=note,
+    )
+
+
+#: The complete production grant table for this phase. See the implementation
+#: plan section 3.1; the table is intentionally small.
+PRODUCTION_ACTION_PERMISSIONS: dict[tuple[ActorRole, str], ActionPermission] = {
+    (ActorRole.player, "move"): _permission(
+        "move",
+        ActorRole.player,
+        "MoveIntentParams",
+        (ProductionTargetKind.location,),
+        "player_move",
+        note="one currently selectable location; no other effect parameter",
+    ),
+    (ActorRole.player, "talk"): _permission(
+        "talk",
+        ActorRole.player,
+        "TalkIntentParams",
+        (ProductionTargetKind.npc, ProductionTargetKind.scene),
+        "player_talk",
+        note="speech only; no reply, relationship or quest reward is promised",
+    ),
+    (ActorRole.player, "inspect"): _permission(
+        "inspect",
+        ActorRole.player,
+        "InspectIntentParams",
+        (ProductionTargetKind.scene, ProductionTargetKind.npc),
+        "player_inspect",
+        note="existing visible information only; no discovery or reward",
+    ),
+    (ActorRole.player, "idle"): _permission(
+        "idle",
+        ActorRole.player,
+        "IdleIntentParams",
+        (ProductionTargetKind.none,),
+        "player_idle",
+        note="engine-owned duration; the wire carries no duration",
+    ),
+    (ActorRole.npc, "observe"): _permission(
+        "observe",
+        ActorRole.npc,
+        "NPCObserveParams",
+        (ProductionTargetKind.scene,),
+        "npc_observe",
+        note="controlled observation result only; no physical effect",
+    ),
+    (ActorRole.npc, "idle"): _permission(
+        "idle",
+        ActorRole.npc,
+        "NPCIdleParams",
+        (ProductionTargetKind.none,),
+        "npc_idle",
+        note="controlled wait result only; no physical effect",
+    ),
+    (ActorRole.npc, "talk"): _permission(
+        "talk",
+        ActorRole.npc,
+        "NPCTalkParams",
+        (ProductionTargetKind.npc, ProductionTargetKind.player),
+        "npc_talk",
+        note="the sentence proves it was said, not that its proposition is true",
+    ),
+    (ActorRole.npc, "refuse"): _permission(
+        "refuse",
+        ActorRole.npc,
+        "NPCRefuseParams",
+        (ProductionTargetKind.npc, ProductionTargetKind.player),
+        "npc_refuse",
+        note="the sentence proves it was said, not that its proposition is true",
+    ),
+}
+
+
+#: Wire action-type aliases normalized to a canonical authorized action type.
+PRODUCTION_ACTION_ALIASES: dict[str, str] = {
+    "dialogue": "talk",
+}
+
+
+def normalize_production_action_type(action_type: str) -> str:
+    """Normalize a wire action type to its canonical production action type."""
+    if not action_type:
+        return action_type
+    return PRODUCTION_ACTION_ALIASES.get(action_type, action_type)
+
+
+def resolve_production_permission(
+    role: ActorRole | str,
+    action_type: str,
+) -> ActionPermission | None:
+    """Return the production grant for a role/action pair, or ``None``.
+
+    ``None`` means the action is not authorized for that role: the caller must
+    treat it as unsupported/no-effect rather than executing anything.
+    """
+    try:
+        role_value = role if isinstance(role, ActorRole) else ActorRole(role)
+    except ValueError:
+        return None
+    return PRODUCTION_ACTION_PERMISSIONS.get(
+        (role_value, normalize_production_action_type(action_type))
+    )
+
+
+def is_action_authorized(role: ActorRole | str, action_type: str) -> bool:
+    """Whether this phase has a domain handler for the role/action pair."""
+    return resolve_production_permission(role, action_type) is not None
+
+
+def production_authorized_action_types(role: ActorRole | str) -> frozenset[str]:
+    """All canonical action types authorized for a role."""
+    try:
+        role_value = role if isinstance(role, ActorRole) else ActorRole(role)
+    except ValueError:
+        return frozenset()
+    return frozenset(
+        action_type
+        for (grant_role, action_type) in PRODUCTION_ACTION_PERMISSIONS
+        if grant_role is role_value
+    )
+
+
+def declared_action_types() -> frozenset[str]:
+    """The general action types declared by ``ACTION_SCHEMAS``."""
+    return frozenset(action_type.value for action_type in ACTION_SCHEMAS)
+
+
+def is_declared_but_unauthorized(role: ActorRole | str, action_type: str) -> bool:
+    """True when the action is a known general type with no production grant.
+
+    This is the ``unsupported`` case: the action keeps its input classification
+    and its existing time cost, but produces no effect.
+    """
+    if action_type not in declared_action_types():
+        return False
+    return not is_action_authorized(role, action_type)

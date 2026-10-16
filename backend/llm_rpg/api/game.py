@@ -126,6 +126,10 @@ class TurnResponse(BaseModel):
     transaction_id: str
     idempotency_key: Optional[str] = None
     time_advance_result: Optional[Dict[str, Any]] = None
+    # Phase 2: the public action-resolution summary of a *committed* turn. It is
+    # read back verbatim on a same-key recovery and is ``None`` for a legacy
+    # snapshot that predates the field (never recomputed on read).
+    action_resolution: Optional[Dict[str, Any]] = None
 
 
 class ReplayRequest(BaseModel):
@@ -298,6 +302,7 @@ def execute_turn(
             transaction_id=result.transaction_id or "",
             idempotency_key=result.idempotency_key,
             time_advance_result=result.time_advance_result,
+            action_resolution=result.action_resolution,
         )
     except TurnClaimConflictError as e:
         raise HTTPException(

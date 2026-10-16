@@ -868,6 +868,22 @@ class TestStateDeltaSourceEventIdRequired:
                 f"state_delta {delta.id} references non-existent game_event {delta.source_event_id}"
 
 
+def _invalid_world_production_outcome():
+    """A world-stage answer that violates the production contract.
+
+    Phase 2: the world stage is reference-only, so a proposal that tries to submit
+    candidate events or a direct state delta (for example ``player_state.hp``) is
+    refused at the contract gate. The refusal is still recorded as an invalid
+    ``proposal_world_tick`` validation report, which is what these tests assert.
+    """
+    from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+    return ProductionContractOutcome(
+        reason_code="contract_schema_violation",
+        detail="state_deltas: Extra inputs are not permitted",
+    )
+
+
 class TestRejectedProposalAuditNoDelta:
     """
     Regression tests for rejected proposal audit/no-delta contract.
@@ -940,31 +956,8 @@ class TestRejectedProposalAuditNoDelta:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[
-                                CandidateEvent(
-                                    event_type="time_based",
-                                    description="测试事件",
-                                    effects={},
-                                    importance=0.5,
-                                )
-                            ],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1038,24 +1031,8 @@ class TestRejectedProposalAuditNoDelta:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1189,24 +1166,8 @@ class TestRejectedProposalAuditNoDelta:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1273,24 +1234,8 @@ class TestRejectedProposalAuditNoDelta:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1698,24 +1643,8 @@ class TestInvalidProposalContract:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",  # Forbidden: world engine cannot modify player hp
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1782,24 +1711,8 @@ class TestInvalidProposalContract:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",  # Forbidden path
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1867,24 +1780,8 @@ class TestInvalidProposalContract:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     
@@ -1995,24 +1892,8 @@ class TestInvalidProposalContract:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_world_tick = AsyncMock(
-                        return_value=WorldTickProposal(
-                            time_description="时间流逝...",
-                            candidate_events=[],
-                            state_deltas=[
-                                StateDeltaCandidate(
-                                    path="player_state.hp",
-                                    operation="set",
-                                    value=0,
-                                    reason="invalid",
-                                )
-                            ],
-                            confidence=0.8,
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.WORLD_TICK,
-                                source_engine=ProposalSource.WORLD_ENGINE,
-                            ),
-                        )
+                    mock_pipeline_instance.generate_world_tick_production = AsyncMock(
+                        return_value=_invalid_world_production_outcome()
                     )
                     MockPipeline.return_value = mock_pipeline_instance
                     

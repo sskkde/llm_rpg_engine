@@ -1015,46 +1015,64 @@ class TestMajorNPCNonTrivialActionEnforcement:
 
 
 class TestPromptMemoryFirstRules:
+    """Memory-first rules as they exist in the *production* NPC prompt.
+
+    Phase 2 replaced the prompt the production path actually uses with the strict
+    ``npc_action_v2`` contract. These tests assert the same memory-first guarantees
+    against the new prompt, plus the new hard boundary: the model may no longer
+    author memory candidates or audit/decision fields, because necessary cognition
+    is now derived by the engine from the adjudicated event.
+    """
+
     def test_prompt_includes_memory_first_rules(self):
-        from llm_rpg.llm.proposal_pipeline import ProposalPipeline
-        from llm_rpg.llm.proposal_pipeline import LLMMessage
+        from llm_rpg.llm.proposal_pipeline import build_npc_action_prompt_v2
 
-        pipeline = ProposalPipeline.__new__(ProposalPipeline)
-
-        import asyncio
-        messages = asyncio.get_event_loop().run_until_complete(
-            self._capture_messages(pipeline)
+        messages = build_npc_action_prompt_v2(
+            "test-npc",
+            {"profile": {"name": "Test"}, "retrieved_private_memories": "m1: 旧事"},
         )
-
-        user_content = messages[-1].content
         system_content = messages[0].content
+        user_content = messages[-1].content
 
-        assert "只能基于NPC当前可见事实和retrieved_private_memories做出决策" in system_content
-        assert "如果没有相关记忆，不得虚构经历" in system_content
-        assert "major NPC的非idle/observe行为必须引用至少一个used_memory_ids" in system_content
-        assert "new_memory_candidates必须使用第一人称视角" in system_content
-        assert "summary和visible_motivation不得泄露玩家不可见秘密" in system_content
+        # Memory-first decisions: bounded by the memories actually supplied.
+        assert "私有记忆" in system_content
+        assert "可引用的记忆 id" in user_content
+        assert "没有可用记忆时必须是空列表" in user_content
+        # No fabricated experience when no memory is available.
+        assert "不得虚构经历" in system_content
+        # Summary/motivation are player-facing description, not truth claims.
+        assert "不是事实声明" in system_content
+        assert "不得泄露玩家不可见的信息" in system_content
+        # Speech proves it was said, not that its proposition is true.
+        assert "不证明这句话的内容为真" in user_content
 
     def test_prompt_includes_used_memory_ids_output_field(self):
-        from llm_rpg.llm.proposal_pipeline import ProposalPipeline
+        from llm_rpg.llm.proposal_pipeline import build_npc_action_prompt_v2
 
-        pipeline = ProposalPipeline.__new__(ProposalPipeline)
-
-        import asyncio
-        messages = asyncio.get_event_loop().run_until_complete(
-            self._capture_messages(pipeline)
+        messages = build_npc_action_prompt_v2(
+            "test-npc",
+            {"profile": {"name": "Test"}, "used_memory_ids": ["m1"]},
         )
-
         user_content = messages[-1].content
 
         assert "used_memory_ids" in user_content
-        assert "new_memory_candidates" in user_content
-        assert "decision_audit" in user_content
-        assert "reasoning_basis" in user_content
-        assert "memory_count_used" in user_content
-        assert "fallback_used" in user_content
-        assert "memory_text" in user_content
-        assert "knowledge_source" in user_content
+        assert '"contract_version": 2' in user_content
+
+        # Phase 2 forbidden fields: the model cannot author memory content, audit
+        # identity or state changes. These used to be requested by the prompt.
+        for forbidden in (
+            "new_memory_candidates",
+            "decision_audit",
+            "reasoning_basis",
+            "memory_count_used",
+            "memory_text",
+            "knowledge_source",
+            "state_deltas",
+            "npc_id",
+        ):
+            assert forbidden not in user_content, (
+                f"production prompt must not request the forbidden field {forbidden!r}"
+            )
 
     async def _capture_messages(self, pipeline):
         captured = []

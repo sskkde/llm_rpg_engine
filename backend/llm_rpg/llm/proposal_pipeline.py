@@ -15,6 +15,7 @@ Key features:
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
 
 from pydantic import BaseModel, ValidationError
@@ -40,6 +41,7 @@ from ..models.proposals import (
 from .service import LLMService, LLMMessage, LLMResponse, StreamingNotSupportedError
 from .parsers import OutputParser
 from .repair import RetryRepairHandler, RepairAuditRecord, RepairStatus as RepairHandlerStatus
+from .strict_contract import ContractReasonCode, ContractViolation, validate_production_contract
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -83,6 +85,278 @@ class ProposalConfig:
 
 
 DEFAULT_CONFIG = ProposalConfig()
+
+
+@dataclass
+class ProductionContractOutcome:
+    """Result of one strict production-contract call.
+
+    Exactly one of ``contract`` / ``reason_code`` is meaningful:
+
+    * ``contract`` is the validated ``contract_version=2`` DTO, or ``None`` when
+      the output was rejected.
+    * ``reason_code`` is a stable :class:`ContractReasonCode` value, or
+      ``contract_unavailable`` when no model output was obtained at all
+      (timeout/provider error). ``detail`` is restricted-audit detail.
+
+    Nothing here is an authorization credential: a parsed contract still has to
+    pass entity/reference authorization and domain adjudication.
+    """
+
+    contract: Optional[BaseModel] = None
+    reason_code: Optional[str] = None
+    detail: str = ""
+    latency_ms: int = 0
+    model_name: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    raw_output_preview: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        """Whether a contract model was produced and validated."""
+        return self.contract is not None
+
+    @property
+    def contract_incompatible(self) -> bool:
+        """Whether the failure was a contract violation rather than no output."""
+        return self.contract is None and self.reason_code not in (
+            None,
+            ContractReasonCode.EMPTY_OUTPUT.value,
+            "contract_unavailable",
+        )
+
+
+#: Reason code used when no model output could be obtained at all.
+CONTRACT_UNAVAILABLE = "contract_unavailable"
+
+
+_STRICT_RULES = """严格遵守以下输出契约（contract_version=2）：
+- 只输出一个完整 JSON 对象，不要输出解释、前后缀文字或多个对象。
+- 必须包含 "contract_version": 2。
+- 不得输出契约未列出的任何字段（顶层或嵌套都不允许）。
+- 不得输出 state_deltas、effects、success、damage、reward、hp、relationship、time、actor、
+  session、turn、source、audit、permission、role 等执行或权限字段。
+- 布尔值用 true/false，空值用 null，字符串用双引号，禁止注释与尾随逗号。"""
+
+
+def build_player_intent_prompt_v2(
+    raw_input: str,
+    context: Dict[str, Any],
+) -> List[LLMMessage]:
+    """Build the production player-intent prompt.
+
+    The prompt lists exactly the stable IDs the model may reference and states
+    the closed action set. It is the human-readable twin of
+    ``PRODUCTION_ACTION_PERMISSIONS`` / ``PlayerIntentV2``.
+    """
+    available_locations = context.get("available_locations") or []
+    visible_npcs = context.get("visible_npcs") or []
+    location_lines = "\n".join(
+        f'- id="{loc.get("id")}" code="{loc.get("code")}" name="{loc.get("name")}"'
+        for loc in available_locations
+    ) or "- （无可选地点）"
+    npc_lines = "\n".join(
+        f'- id="{npc.get("npc_id")}" name="{npc.get("name")}"'
+        for npc in visible_npcs
+    ) or "- （当前场景没有可见 NPC）"
+
+    system = (
+        "你是一个文字RPG游戏的意图解析器。把玩家的自然语言输入解析为受限的结构化提案。\n"
+        "你只能引用下面列出的稳定 ID，不得虚构实体；无法确定目标时把目标字段设为 null。\n"
+        f"{_STRICT_RULES}"
+    )
+    user = f"""玩家输入: {raw_input}
+
+当前地点 id: {context.get("current_location_id")}
+
+可选地点（只能引用这里的 id）:
+{location_lines}
+
+当前场景可见 NPC（只能引用这里的 id）:
+{npc_lines}
+
+输出格式（intent 的具体字段按 action_type 只能取下面列出的那一种，不得混用）:
+{{
+  "contract_version": 2,
+  "intent": {{"action_type": "move", "target_location_id": "<上面某个地点 id 或 null>"}},
+  "needs_clarification": false,
+  "clarification_question": null,
+  "confidence": 0.0
+}}
+
+按 action_type 允许的 intent 形状：
+- move:    {{"action_type": "move", "target_location_id": "<地点 id 或 null>"}}
+- talk:    {{"action_type": "talk", "target_npc_id": "<NPC id 或 null>", "topic": "<不超过240字的话题或 null>"}}
+- inspect: {{"action_type": "inspect", "target_npc_id": "<NPC id 或 null>"}}
+- idle:    {{"action_type": "idle"}}
+- attack/interact/action/unknown: {{"action_type": "attack", "target": "<原始目标文本或 null>"}}
+
+语义要求：
+- 玩家没有明确目的地时用 move + target_location_id=null，并把 needs_clarification 设为 true。
+- talk/inspect 只能指向当前场景可见 NPC；不确定就用 null。
+- 不要承诺对话结果、关系变化、任务奖励或任何数值变化。"""
+    return [
+        LLMMessage(role="system", content=system),
+        LLMMessage(role="user", content=user),
+    ]
+
+
+def build_npc_action_prompt_v2(
+    npc_id: str,
+    npc_context: Dict[str, Any],
+) -> List[LLMMessage]:
+    """Build the production NPC-action prompt.
+
+    The actor is bound by the server, so the wire neither carries nor needs an
+    NPC identity, and it cannot carry state deltas or memory candidates.
+    """
+    retrieved_memories = npc_context.get("retrieved_private_memories")
+    memory_section = ""
+    if retrieved_memories:
+        memory_section = (
+            "\n本次提供给该 NPC 的私有记忆（只能引用这些 id，没有就留空列表）:\n"
+            f"{retrieved_memories}\n"
+        )
+    allowed_memory_ids = npc_context.get("used_memory_ids") or []
+
+    system = (
+        "你是一个文字RPG游戏的NPC引擎。请基于当前可见事实和检索到的私有记忆，生成受限的行动提案。\n"
+        "你只能描述该 NPC 的一个动作；actor 身份由服务端绑定，你不需要也不能声明。\n"
+        "如果没有相关记忆，不得虚构经历；只能基于 NPC 当前可见事实与下面列出的记忆做决策。\n"
+        "summary/visible_motivation 是给玩家看的描述文本，不是事实声明，也不得泄露玩家不可见的信息。\n"
+        f"{_STRICT_RULES}"
+    )
+    user = f"""NPC id: {npc_id}
+NPC 上下文: {npc_context}
+{memory_section}
+可引用的记忆 id: {allowed_memory_ids}
+
+输出格式（action 的具体字段按 action_type 只能取下面列出的那一种）:
+{{
+  "contract_version": 2,
+  "action": {{"action_type": "observe"}},
+  "summary": "一句话描述该 NPC 的行动",
+  "visible_motivation": "玩家可见的动机说明",
+  "visible_to_player": true,
+  "used_memory_ids": [],
+  "confidence": 0.0
+}}
+
+按 action_type 允许的 action 形状：
+- observe: {{"action_type": "observe"}}
+- idle:    {{"action_type": "idle"}}
+- talk:    {{"action_type": "talk", "target_id": "<同场景目标 id 或 null>", "utterance": "<不超过1000字的话语或 null>"}}
+- refuse:  {{"action_type": "refuse", "target_id": "<同场景目标 id 或 null>", "utterance": "<不超过1000字的话语或 null>"}}
+
+语义要求：
+- 不允许输出任何状态变化、数值、伤害、奖励、物品或关系变化。
+- 话语只证明“说过这句话”，不证明这句话的内容为真。
+- used_memory_ids 只能从上面“可引用的记忆 id”里选；没有可用记忆时必须是空列表。"""
+    return [
+        LLMMessage(role="system", content=system),
+        LLMMessage(role="user", content=user),
+    ]
+
+
+def build_world_tick_prompt_v2(world_context: Dict[str, Any]) -> List[LLMMessage]:
+    """Build the production world-stage prompt (reference-only)."""
+    system = (
+        "你是一个文字RPG游戏的世界引擎。你只能组织引擎已经产生的结果，不能创造新的事实。\n"
+        "你不得提议任何状态变化、效果或时间变化；世界时间由引擎裁决。\n"
+        f"{_STRICT_RULES}"
+    )
+    engine_event_ids = world_context.get("engine_event_ids") or []
+    user = f"""世界上下文: {world_context}
+
+本回合可引用的引擎事件 id（referenced_event_ids 只能逐字取自这里，最多3个）:
+{engine_event_ids}
+
+输出格式:
+{{
+  "contract_version": 2,
+  "referenced_event_ids": ["<本回合引擎事件 id，最多3个>"],
+  "display_hint": "<不超过500字的展示提示或 null>",
+  "confidence": 0.0
+}}
+
+语义要求：
+- referenced_event_ids 只能引用上下文里已经出现过的本回合事件 id；没有就留空列表。
+- 不得输出 candidate_events、state_deltas、effects、elapsed_minutes、time_category 或任何时间字段。"""
+    return [
+        LLMMessage(role="system", content=system),
+        LLMMessage(role="user", content=user),
+    ]
+
+
+def build_scene_event_prompt_v2(
+    scene_id: str,
+    scene_context: Dict[str, Any],
+) -> List[LLMMessage]:
+    """Build the production scene-stage prompt (reference-only)."""
+    legal_actions = scene_context.get("deterministic_recommended_actions") or []
+    system = (
+        "你是一个文字RPG游戏的场景引擎。你只能组织引擎已经产生的结果，不能创造新的事实。\n"
+        "推荐行动只能从引擎给出的合法推荐动作里挑选，不得自己编写新的行动文本。\n"
+        f"{_STRICT_RULES}"
+    )
+    engine_event_ids = scene_context.get("engine_event_ids") or []
+    user = f"""场景 id: {scene_id}
+场景上下文: {scene_context}
+
+本回合可引用的引擎事件 id（referenced_event_ids 只能逐字取自这里，最多3个）:
+{engine_event_ids}
+
+引擎给出的合法推荐动作（recommended_actions 只能逐字从这里挑选，最多4个）:
+{legal_actions}
+
+输出格式:
+{{
+  "contract_version": 2,
+  "referenced_event_ids": ["<本回合引擎事件 id，最多3个>"],
+  "recommended_actions": [],
+  "display_hint": "<不超过500字的展示提示或 null>",
+  "confidence": 0.0
+}}
+
+语义要求：
+- 不得输出 candidate_events、state_deltas、effects、scene_name 或任何状态/时间字段。
+- recommended_actions 里出现不在上面列表中的字符串时，该条会被引擎丢弃。"""
+    return [
+        LLMMessage(role="system", content=system),
+        LLMMessage(role="user", content=user),
+    ]
+
+
+def build_narration_prompt_v2(visible_context: Dict[str, Any]) -> List[LLMMessage]:
+    """Build the production narration prompt (post-commit presentation only)."""
+    system = (
+        "你是一个文字RPG游戏的叙事引擎。请根据已提交的事实生成叙事文本。\n"
+        "只能描述玩家可见的信息，不能泄露隐藏的秘密，也不能发明未提交的事实。\n"
+        f"{_STRICT_RULES}"
+    )
+    user = f"""可见上下文: {visible_context}
+
+输出格式:
+{{
+  "contract_version": 2,
+  "text": "叙事文本内容（一段生动的中文描述，100-300字）",
+  "confidence": 0.0
+}}"""
+    return [
+        LLMMessage(role="system", content=system),
+        LLMMessage(role="user", content=user),
+    ]
+
+
+#: Proposal type key -> production prompt builder signature marker.
+PRODUCTION_PROMPT_BUILDERS = {
+    "input_intent": build_player_intent_prompt_v2,
+    "npc_action": build_npc_action_prompt_v2,
+    "world_tick": build_world_tick_prompt_v2,
+    "scene_event": build_scene_event_prompt_v2,
+    "narration": build_narration_prompt_v2,
+}
 
 
 class ProposalPipeline:
@@ -388,6 +662,30 @@ class ProposalPipeline:
             return self._create_fallback(
                 proposal_type=proposal_type,
                 reason=f"Schema validation failed: {e}",
+                latency_ms=latency_ms,
+                context=context,
+                raw_output_preview=raw_output_preview,
+                repair_status=repair_status,
+                repair_attempts=repair_attempts,
+                repair_strategies_tried=repair_strategies_tried,
+                validation_status=ValidationStatus.FAILED,
+                validation_errors=validation_errors_list,
+            )
+        except (KeyError, TypeError) as e:
+            # A *required* field missing from the parsed payload raises here (the
+            # construction reads it directly) rather than as a pydantic
+            # ValidationError. That is still a schema failure of the model's output,
+            # so it must be recorded as FAILED — otherwise an invalid response is
+            # indistinguishable from a valid one in the audit trail. This path is
+            # non-production/legacy only: the production chain uses
+            # ``generate_production_proposal`` and never reaches lenient repair.
+            validation_errors_list = [f"missing or invalid field: {e!r}"]
+            audit.validation_status = ValidationStatus.FAILED
+            audit.validation_errors = validation_errors_list
+
+            return self._create_fallback(
+                proposal_type=proposal_type,
+                reason=f"Schema validation failed: {e!r}",
                 latency_ms=latency_ms,
                 context=context,
                 raw_output_preview=raw_output_preview,
@@ -817,6 +1115,173 @@ NPC上下文: {npc_context}
         )
         
         return proposal
+
+    # ------------------------------------------------------------------
+    # Production strict-contract path (contract_version=2)
+    # ------------------------------------------------------------------
+    #
+    # This is the only path the authoritative turn service uses. It shares the
+    # LLM call, timeout and audit metadata with ``generate_proposal`` but never
+    # reaches the lenient repair handler: a proposal that does not satisfy the
+    # v2 contract is reported with a stable reason code and the caller falls
+    # back deterministically.
+
+    async def generate_production_proposal(
+        self,
+        proposal_type: str,
+        prompt_messages: List[LLMMessage],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Call the model and validate its output against the v2 contract.
+
+        Args:
+            proposal_type: Production proposal key (``input_intent``,
+                ``npc_action``, ``world_tick``, ``scene_event``, ``narration``).
+            prompt_messages: The production prompt messages.
+            prompt_template_id: Template id, recorded for audit only.
+            session_id: Game session id, recorded for audit only.
+            turn_no: Turn number, recorded for audit only.
+
+        Returns:
+            A :class:`ProductionContractOutcome`. Never raises for a bad model
+            output: contract violations and provider failures are reported as
+            reason codes so the caller can fall back safely.
+        """
+        start_time = time.time()
+        try:
+            response = await asyncio.wait_for(
+                self._llm_service.generate(
+                    messages=prompt_messages,
+                    template_id=prompt_template_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    temperature=self._config.temperature,
+                    max_tokens=self._config.max_tokens,
+                ),
+                timeout=self._config.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return ProductionContractOutcome(
+                reason_code=CONTRACT_UNAVAILABLE,
+                detail="Timeout exceeded",
+                latency_ms=int((time.time() - start_time) * 1000),
+            )
+        except Exception as exc:  # provider/transport failure: no output at all
+            return ProductionContractOutcome(
+                reason_code=CONTRACT_UNAVAILABLE,
+                detail=f"{type(exc).__name__}: {str(exc)[:200]}",
+                latency_ms=int((time.time() - start_time) * 1000),
+            )
+
+        latency_ms = int((time.time() - start_time) * 1000)
+        raw_output = response.content or ""
+
+        try:
+            contract = validate_production_contract(proposal_type, raw_output)
+        except ContractViolation as violation:
+            return ProductionContractOutcome(
+                reason_code=violation.code.value,
+                detail=violation.detail,
+                latency_ms=latency_ms,
+                model_name=getattr(response, "model", "") or "",
+                input_tokens=response.usage.get("prompt_tokens", 0),
+                output_tokens=response.usage.get("completion_tokens", 0),
+                raw_output_preview=raw_output[:200],
+            )
+
+        return ProductionContractOutcome(
+            contract=contract,
+            latency_ms=latency_ms,
+            model_name=getattr(response, "model", "") or "",
+            input_tokens=response.usage.get("prompt_tokens", 0),
+            output_tokens=response.usage.get("completion_tokens", 0),
+            raw_output_preview=raw_output[:200],
+        )
+
+    async def generate_player_intent_production(
+        self,
+        raw_input: str,
+        context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Production player-intent proposal (``PlayerIntentV2``)."""
+        return await self.generate_production_proposal(
+            proposal_type="input_intent",
+            prompt_messages=build_player_intent_prompt_v2(raw_input, context),
+            prompt_template_id=prompt_template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+        )
+
+    async def generate_npc_action_production(
+        self,
+        npc_id: str,
+        npc_context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Production NPC-action proposal (``NPCActionV2``)."""
+        return await self.generate_production_proposal(
+            proposal_type="npc_action",
+            prompt_messages=build_npc_action_prompt_v2(npc_id, npc_context),
+            prompt_template_id=prompt_template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+        )
+
+    async def generate_world_tick_production(
+        self,
+        world_context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Production world-stage proposal (``WorldTickV2``)."""
+        return await self.generate_production_proposal(
+            proposal_type="world_tick",
+            prompt_messages=build_world_tick_prompt_v2(world_context),
+            prompt_template_id=prompt_template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+        )
+
+    async def generate_scene_event_production(
+        self,
+        scene_id: str,
+        scene_context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Production scene-stage proposal (``SceneEventV2``)."""
+        return await self.generate_production_proposal(
+            proposal_type="scene_event",
+            prompt_messages=build_scene_event_prompt_v2(scene_id, scene_context),
+            prompt_template_id=prompt_template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+        )
+
+    async def generate_narration_production(
+        self,
+        visible_context: Dict[str, Any],
+        prompt_template_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        turn_no: int = 0,
+    ) -> ProductionContractOutcome:
+        """Production narration proposal (``NarrationV2``)."""
+        return await self.generate_production_proposal(
+            proposal_type="narration",
+            prompt_messages=build_narration_prompt_v2(visible_context),
+            prompt_template_id=prompt_template_id,
+            session_id=session_id,
+            turn_no=turn_no,
+        )
 
 
 def create_proposal_pipeline(

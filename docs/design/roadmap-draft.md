@@ -2,7 +2,9 @@
 
 > **当前选定目标**：Python（FastAPI）游戏后端 + Next.js Web 前端，按本文四阶段推进。设计基线见 [RFC（LLM RPG Engine 设计总结，2026-10-08）](./llm_rpg_engine_design_summary_2026-10-08.md)。旧 [DSH 原生迁移目标](../v2_dsh_rpg_engine.md)已被替代，仅保留历史正文。
 >
-> **进度（2026-10-15）**：**阶段一已完成**（原阶段一计划 + [阶段一补齐计划](../../.omo/plans/phase1-turn-foundation-completion.md) 的 W0–W4 与收口修复）。证据见 [`.omo/evidence/phase1/20261015-p1-completion/`](../../.omo/evidence/phase1/20261015-p1-completion/)；当前保证与残留边界见 [`backend/docs/RECOVERY_AND_INVARIANTS.md`](../../backend/docs/RECOVERY_AND_INVARIANTS.md)。阶段二至四仍未实施。
+> **进度（2026-10-16）**：**阶段二已完成**（契约收紧、实体授权、领域裁决、事件与认知事实边界、安全回退、恢复兼容；远端全量验收两套配置均 0 失败，独立复核缺陷全部修复）。证据见 [`.omo/evidence/phase2/20261016-p2-authority/`](../../.omo/evidence/phase2/20261016-p2-authority/)；计划见 [阶段二实施计划](../../.omo/plans/phase2-llm-authority.md)。阶段三至四仍未实施。
+>
+> **进度（2026-10-15）**：**阶段一已完成**（原阶段一计划 + [阶段一补齐计划](../../.omo/plans/phase1-turn-foundation-completion.md) 的 W0–W4 与收口修复）。证据见 [`.omo/evidence/phase1/20261015-p1-completion/`](../../.omo/evidence/phase1/20261015-p1-completion/)；当前保证与残留边界见 [`backend/docs/RECOVERY_AND_INVARIANTS.md`](../../backend/docs/RECOVERY_AND_INVARIANTS.md)。
 >
 > RFC 的 P0–P8 是建议交付步骤，本草案把演进组织为四个阶段；两者层次不同，细节仍需后续审议。
 
@@ -22,6 +24,7 @@
 - **目标：** 将 LLM 的输出从状态变更候选收紧为受限动作提案与叙事表现；权威状态变化由引擎裁决。
 - **范围：** 复用现有 ProposalPipeline；限定可提议的动作与参数；由领域逻辑生成 Delta；验证实体权限；提供安全回退。
 - **退出标准：** 提议经过确定性验证后才影响状态；非法、越权或不可用的提议有可预测的安全处理；旁白与规则提交边界清晰。
+- **实施结果（2026-10-16）：** 已建立唯一可信链路 `LLM 受限提案 → 严格契约检查 → 引用与角色权限检查 → 领域规则裁决 → 引擎生成事件/Delta/必要认知 → 原子提交 → 提交后表现`。生产 wire 契约收紧为 `contract_version=2`（递归 `extra=forbid`，不含任何可执行字段）；授权表与提示词读同一份 `PRODUCTION_ACTION_PERMISSIONS`；world/scene 收敛为引用型；模型文本不再进入 `memory_facts`/`npc_beliefs(fact)`/`memory_summaries`/事件公开载荷；公开 `action_resolution` 摘要贯通 REST 与 SSE 且同键恢复只读。证据与残留见 [`.omo/evidence/phase2/20261016-p2-authority/`](../../.omo/evidence/phase2/20261016-p2-authority/)。
 
 ## 阶段三：最小时间模拟纵切片
 

@@ -627,6 +627,9 @@ async def execute_turn_stream(
             "world_time": result.world_time,
             "timestamp": datetime.now().isoformat(),
             "time_advance_result": result.time_advance_result,
+            # Phase 2: same public action-resolution summary as the REST response,
+            # read back verbatim from the committed snapshot on a same-key recovery.
+            "action_resolution": result.action_resolution,
         },
         event_id=f"{event_id}_complete"
     )

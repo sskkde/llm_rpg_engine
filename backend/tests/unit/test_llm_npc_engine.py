@@ -875,7 +875,13 @@ class TestExecuteNPCStage:
         assert context.get("public_identity") == "宗门向导"
         assert context.get("personality") == "温和友善"
         assert context.get("goals") == ["保护新弟子"]
-        assert context.get("trust_score") == 50
+        # P10-C memory-first: numeric relationship scores are deliberately excluded
+        # from NPC decision context (the memory-first design decision documented on
+        # ``_build_npc_context``). An earlier version of this test asserted the
+        # opposite and had been failing since that change; it is corrected here to
+        # the actual contract instead of being exempted as a baseline failure.
+        assert "trust_score" not in context
+        assert "suspicion_score" not in context
 
     def test_get_active_npcs_excludes_dead(self, db):
         from llm_rpg.core.turn_service import _get_active_npcs_at_location

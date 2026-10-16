@@ -48,3 +48,8 @@ frontend/test-results/
 # Agent instructions - not tracked
 AGENTS.md
 frontend/AGENTS.md
+
+# Agent scratch directories - not tracked
+.omo/
+.agent-notes/
+.openviking/

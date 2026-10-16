@@ -141,14 +141,40 @@ def test_managed_scheduled_event_failure_aborts_turn(session_factory, seeded_ses
 
 
 def test_successful_turn_commits_cognition_with_turn_facts(session_factory, seeded_session, monkeypatch):
+    """Necessary cognition derived from an adjudicated action commits with the turn.
+
+    Phase 2 contract: the cognition source is the engine's *resolution* of the
+    action, not a free world-candidate description. This test injects an
+    engine-authored fact cognition and asserts it lands in the same authoritative
+    transaction as the turn's events.
+    """
+    from llm_rpg.core.action_resolution import (
+        CognitionKind,
+        ResolvedAction,
+        ResolvedCognition,
+    )
+    from llm_rpg.core.action_reason import ActionStatus
+
     original_persist = turn_service._persist_turn_memories
 
     def persist_with_fact(**kwargs):
-        world_progression = dict(kwargs.get("world_progression") or {})
-        world_progression["candidate_events"] = list(world_progression.get("candidate_events") or []) + [
-            {"event_type": "cognition_test", "description": "同批提交的必要认知事实"}
-        ]
-        kwargs["world_progression"] = world_progression
+        resolution = kwargs.get("player_resolution")
+        engine_fact = ResolvedCognition(
+            kind=CognitionKind.FACT,
+            content="engine_adjudicated_fact",
+            source_event_kind=None,
+            fact_type="cognition_test",
+            subject_ref="player",
+            fact_key="cognition_test",
+            confidence=1.0,
+        )
+        if resolution is None:
+            resolution = ResolvedAction(
+                action=None, status=ActionStatus.ACCEPTED, cognition=[engine_fact]
+            )
+        else:
+            resolution.cognition.append(engine_fact)
+        kwargs["player_resolution"] = resolution
         return original_persist(**kwargs)
 
     monkeypatch.setattr(turn_service, "_persist_turn_memories", persist_with_fact)
@@ -164,5 +190,57 @@ def test_successful_turn_commits_cognition_with_turn_facts(session_factory, seed
         facts = verify.query(MemoryFactModel).filter_by(session_id=seeded_session).count()
         assert summaries > 0
         assert facts > 0
+        persisted = verify.query(MemoryFactModel).filter_by(
+            session_id=seeded_session, fact_type="cognition_test"
+        ).one()
+        assert persisted.fact_value == "engine_adjudicated_fact"
+    finally:
+        verify.close()
+
+
+def test_free_world_candidate_text_never_becomes_a_memory_fact(session_factory, seeded_session, monkeypatch):
+    """A world-stage candidate description must not become a committed memory fact.
+
+    This is the Phase 2 fact-boundary negative: the world stage is reference-only,
+    so even a fully accepted world proposal carrying model-authored descriptions
+    leaves no ``memory_facts`` row derived from that text.
+    """
+    from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome, ProposalPipeline
+    from llm_rpg.models.action_contract import WorldTickV2
+
+    def fake_world_production(**_kwargs):
+        async def _coro():
+            return ProductionContractOutcome(
+                contract=WorldTickV2(
+                    contract_version=2,
+                    referenced_event_ids=[],
+                    display_hint="伪造的世界事实：玩家获得了神器",
+                )
+            )
+        return _coro()
+
+    monkeypatch.setattr(
+        ProposalPipeline, "generate_world_tick_production", fake_world_production
+    )
+    monkeypatch.setattr(turn_service, "_is_world_stage_enabled", lambda _db: True)
+
+    db = session_factory()
+    turn_service.execute_turn_service(db, seeded_session, "观察四周", use_mock=True)
+    db.close()
+
+    verify = session_factory()
+    try:
+        polluted = verify.query(MemoryFactModel).filter(
+            MemoryFactModel.session_id == seeded_session,
+            MemoryFactModel.fact_type == "world_event",
+        ).count()
+        assert polluted == 0, "world candidate text must never become a memory fact"
+        game_events = verify.query(GameEventModel).filter_by(
+            session_id=seeded_session, event_type="world_tick"
+        ).all()
+        for event in game_events:
+            payload = event.public_payload_json or {}
+            assert "candidate_events" not in payload
+            assert "effects" not in (event.result_json or {})
     finally:
         verify.close()

@@ -33,6 +33,59 @@ from llm_rpg.models.proposals import (
 from llm_rpg.engines.scene_engine import SceneEngine, Scene, SceneTrigger, TriggerType
 
 
+def seed_locations(db_engine, world_id, names=("藏经阁", "药园", "后山", "试炼堂")):
+    """Seed a starting location plus accessible siblings.
+
+    Returns the starting location's id, so the engine's deterministic recommended
+    actions can be generated from a known current location.
+    """
+    from llm_rpg.storage.models import LocationModel
+
+    SessionLocal = sessionmaker(bind=db_engine)
+    db = SessionLocal()
+    try:
+        start = LocationModel(
+            id=f"loc_start_{uuid.uuid4().hex[:8]}",
+            world_id=world_id,
+            code="square",
+            name="宗门广场",
+            tags=["public", "starting_point"],
+            access_rules={"always_accessible": True},
+        )
+        db.add(start)
+        for index, name in enumerate(names):
+            db.add(LocationModel(
+                id=f"loc_seed_{uuid.uuid4().hex[:8]}",
+                world_id=world_id,
+                code=f"seed_{index}_{uuid.uuid4().hex[:6]}",
+                name=name,
+                tags=["public"],
+                access_rules={"always_accessible": True},
+            ))
+        db.commit()
+        return start.id
+    finally:
+        db.close()
+
+
+def _engine_recommended_actions(db_engine, session_id, location_id):
+    """Return the engine's deterministic recommended actions for a session.
+
+    Phase 2: the scene stage may only select from this legal set, so tests assert
+    against it instead of assuming the model can dictate arbitrary hints.
+    """
+    from llm_rpg.core.scene_action_generator import generate_recommended_actions
+
+    SessionLocal = sessionmaker(bind=db_engine)
+    db = SessionLocal()
+    try:
+        return generate_recommended_actions(
+            db=db, session_id=session_id, location_id=location_id
+        )
+    finally:
+        db.close()
+
+
 TEST_DATABASE_URL = "sqlite:///:memory:"
 
 
@@ -426,28 +479,29 @@ class TestSceneStageRecommendedActions:
         )
         from llm_rpg.llm.service import MockLLMProvider, LLMService
         
-        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        session_id, world_id = create_session(client, auth_headers, db_engine, sample_world_data)
+        start_location_id = seed_locations(db_engine, world_id)
         
-        scene_recommended = ["探索洞穴", "与神秘人交谈", "检查石碑", "返回入口"]
-        
-        mock_proposal = SceneEventProposal(
-            scene_id="test_scene",
-            scene_name="Test Scene",
-            candidate_events=[
-                CandidateEvent(
-                    event_type="discovery",
-                    description="你发现了一个隐藏的洞穴入口。",
-                    importance=0.8,
-                )
-            ],
-            recommended_actions=scene_recommended,
-            confidence=0.9,
-            audit=ProposalAuditMetadata(
-                proposal_type=ProposalType.SCENE_EVENT,
-                source_engine=ProposalSource.SCENE_ENGINE,
-                validation_status=ValidationStatus.PASSED,
-            ),
-            is_fallback=False,
+        # The scene stage now selects from the engine's legal actions instead of
+        # dictating arbitrary hints. The engine's deterministic list for this scene
+        # is captured first, then the contract selects its first entries: the
+        # selection is honoured, and nothing outside the legal set can appear.
+        deterministic = _engine_recommended_actions(
+            db_engine, session_id, start_location_id
+        )
+        assert deterministic, "the engine must offer at least one legal recommended action"
+        scene_recommended = deterministic[:4]
+
+        from llm_rpg.models.action_contract import SceneEventV2
+        from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+        mock_outcome = ProductionContractOutcome(
+            contract=SceneEventV2(
+                contract_version=2,
+                referenced_event_ids=[],
+                recommended_actions=scene_recommended,
+                display_hint=None,
+            )
         )
         
         with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
@@ -458,7 +512,7 @@ class TestSceneStageRecommendedActions:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    mock_pipeline_instance.generate_scene_event_production = AsyncMock(return_value=mock_outcome)
                     MockPipeline.return_value = mock_pipeline_instance
                     
                     response = client.post(
@@ -471,6 +525,7 @@ class TestSceneStageRecommendedActions:
         data = response.json()
         assert data["recommended_actions"] == scene_recommended
         assert len(data["recommended_actions"]) <= 4
+        assert all(a in deterministic for a in data["recommended_actions"])
     
     def test_fallback_to_deterministic_actions_on_scene_rejection(
         self, client, auth_headers, db_engine, sample_world_data
@@ -515,24 +570,20 @@ class TestSceneStageRecommendedActions:
         
         session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
         
-        mock_proposal = SceneEventProposal(
-            scene_id="test_scene",
-            scene_name="Ancient Temple",
-            candidate_events=[
-                CandidateEvent(
-                    event_type="atmosphere",
-                    description="古老的符文在墙上闪烁。",
-                    importance=0.6,
-                )
-            ],
-            recommended_actions=["检查符文", "继续探索"],
-            confidence=0.8,
-            audit=ProposalAuditMetadata(
-                proposal_type=ProposalType.SCENE_EVENT,
-                source_engine=ProposalSource.SCENE_ENGINE,
-                validation_status=ValidationStatus.PASSED,
-            ),
-            is_fallback=False,
+        # A scene proposal is now a *reference*: it points at events the engine
+        # already produced and selects legal recommended actions. It can no longer
+        # submit candidate_events or a model-chosen scene_name, so this test asserts
+        # the reference shape and that no model-authored event text survives.
+        from llm_rpg.models.action_contract import SceneEventV2
+        from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+        mock_outcome = ProductionContractOutcome(
+            contract=SceneEventV2(
+                contract_version=2,
+                referenced_event_ids=[],
+                recommended_actions=[],
+                display_hint="古老的符文在墙上闪烁。",
+            )
         )
         
         from llm_rpg.storage.repositories import EventLogRepository
@@ -545,7 +596,7 @@ class TestSceneStageRecommendedActions:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    mock_pipeline_instance.generate_scene_event_production = AsyncMock(return_value=mock_outcome)
                     MockPipeline.return_value = mock_pipeline_instance
                     
                     response = client.post(
@@ -565,9 +616,22 @@ class TestSceneStageRecommendedActions:
             result_json = event.result_json
             assert "scene_event_summary" in result_json
             assert result_json["scene_event_summary"] is not None
-            assert result_json["scene_event_summary"]["scene_id"] == "test_scene"
-            assert result_json["scene_event_summary"]["scene_name"] == "Ancient Temple"
-            assert len(result_json["scene_event_summary"]["candidate_events"]) == 1
+            summary = result_json["scene_event_summary"]
+            assert summary["contract_version"] == 2
+            assert summary["referenced_event_ids"] == []
+            assert summary["display_hint"] == "古老的符文在墙上闪烁。"
+            # A model-authored candidate event and scene name must not exist.
+            assert "candidate_events" not in summary
+            assert "scene_name" not in summary
+            # No scene game_event carries model event text: the scene event, when
+            # present, may only reference engine events and a bounded display hint.
+            from llm_rpg.storage.models import GameEventModel
+            for game_event in db.query(GameEventModel).filter_by(
+                session_id=session_id, event_type="scene"
+            ).all():
+                payload = game_event.public_payload_json or {}
+                assert "candidate_events" not in payload
+                assert "scene_name" not in payload
         finally:
             db.close()
     
@@ -618,21 +682,31 @@ class TestSceneStageRecommendedActions:
         )
         from llm_rpg.llm.service import MockLLMProvider, LLMService
         
-        session_id, _ = create_session(client, auth_headers, db_engine, sample_world_data)
+        session_id, world_id = create_session(client, auth_headers, db_engine, sample_world_data)
+        start_location_id = seed_locations(db_engine, world_id)
         
-        valid_actions = ["行动1", "行动2", "行动3", "行动4"]
-        
-        mock_proposal = SceneEventProposal(
-            scene_id="test_scene",
-            candidate_events=[],
-            recommended_actions=valid_actions,
-            confidence=0.8,
-            audit=ProposalAuditMetadata(
-                proposal_type=ProposalType.SCENE_EVENT,
-                source_engine=ProposalSource.SCENE_ENGINE,
-                validation_status=ValidationStatus.PASSED,
-            ),
-            is_fallback=False,
+        # The contract caps the wire list at four, and the engine additionally drops
+        # anything the model invented: only legal actions survive, at most four.
+        from llm_rpg.models.action_contract import SceneEventV2
+        from llm_rpg.llm.proposal_pipeline import ProductionContractOutcome
+
+        deterministic = _engine_recommended_actions(
+            db_engine, session_id, start_location_id
+        )
+        assert deterministic, "the engine must offer at least one legal recommended action"
+        # Stay inside the wire cap (4) so the contract itself is satisfied; the
+        # engine must still drop the two invented entries and keep only legal ones.
+        valid_actions = deterministic[:2]
+        invented = ["凭空捏造的行动甲", "凭空捏造的行动乙"]
+        assert len(valid_actions) + len(invented) <= 4
+
+        mock_outcome = ProductionContractOutcome(
+            contract=SceneEventV2(
+                contract_version=2,
+                referenced_event_ids=[],
+                recommended_actions=valid_actions + invented,
+                display_hint=None,
+            )
         )
         
         with patch("llm_rpg.core.turn_service._is_scene_stage_enabled", return_value=True):
@@ -643,7 +717,7 @@ class TestSceneStageRecommendedActions:
                 
                 with patch("llm_rpg.llm.proposal_pipeline.ProposalPipeline") as MockPipeline:
                     mock_pipeline_instance = MagicMock()
-                    mock_pipeline_instance.generate_scene_event = AsyncMock(return_value=mock_proposal)
+                    mock_pipeline_instance.generate_scene_event_production = AsyncMock(return_value=mock_outcome)
                     MockPipeline.return_value = mock_pipeline_instance
                     
                     response = client.post(
@@ -654,8 +728,12 @@ class TestSceneStageRecommendedActions:
         
         assert response.status_code == 200
         data = response.json()
-        assert len(data["recommended_actions"]) == 4
+        assert len(data["recommended_actions"]) == len(valid_actions)
         assert data["recommended_actions"] == valid_actions
+        for action in invented:
+            assert action not in data["recommended_actions"], (
+                "a model-invented recommended action must never reach the player"
+            )
     
     def test_scene_stage_disabled_uses_deterministic_actions(
         self, client, auth_headers, db_engine, sample_world_data

@@ -251,6 +251,38 @@ class TestBuildNPCContextEnrichment:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _speech_resolution(npc_id, utterance):
+    """Engine adjudication of an NPC speech act, with its source-bound cognition."""
+    from llm_rpg.core.action_resolution import (
+        CognitionKind,
+        ResolvedAction,
+        ResolvedCognition,
+        ResolvedEvent,
+        ResolvedEventKind,
+    )
+    from llm_rpg.core.action_reason import ActionStatus
+
+    return ResolvedAction(
+        action=None,
+        status=ActionStatus.ACCEPTED,
+        events=[ResolvedEvent(
+            kind=ResolvedEventKind.NPC_TALK,
+            actor_id=npc_id,
+            action_type="talk",
+            game_event_type="npc_decision",
+        )],
+        cognition=[ResolvedCognition(
+            kind=CognitionKind.BELIEF,
+            content=f"{npc_id}说：{utterance}",
+            source_event_kind=ResolvedEventKind.NPC_TALK,
+            belief_type="speech",
+            importance=0.8,
+            confidence=0.5,
+            is_speech=True,
+        )],
+    )
+
+
 class TestPersistTurnMemoriesIntegration:
     def test_writes_private_memories_for_accepted_reaction(self, monkeypatch):
         monkeypatch.setenv("NPC_MEMORY_FIRST_ENABLED", "true")
@@ -270,15 +302,16 @@ class TestPersistTurnMemoriesIntegration:
                 "action_type": "talk",
                 "summary": "NPC与玩家交谈",
                 "visible_to_player": True,
-                "new_memory_candidates": [
-                    {
-                        "memory_text": "I decided to trust the player",
-                        "source_type": "decision",
-                        "salience": 0.8,
-                    }
-                ],
                 "used_memory_ids": [],
             }]
+
+            # Phase 2: private-memory content is authored by the engine from the
+            # adjudicated event; the model no longer supplies new_memory_candidates.
+            npc_resolutions = {
+                data["npc_state"].id: _speech_resolution(
+                    data["npc_state"].id, "I decided to trust the player"
+                )
+            }
 
             result = _persist_turn_memories(
                 db=db,
@@ -289,6 +322,7 @@ class TestPersistTurnMemoriesIntegration:
                 player_input="和师姐说话",
                 current_location_id=data["location"].id,
                 npc_reactions=npc_reactions,
+                npc_resolutions=npc_resolutions,
                 canonical_state=state,
             )
 
@@ -297,9 +331,13 @@ class TestPersistTurnMemoriesIntegration:
             # Verify NPCPrivateMemoryModel rows were written
             mem_repo = NPCPrivateMemoryRepository(db)
             rows = mem_repo.get_by_npc_template(session_id, npc_template_id)
-            written = [r for r in rows if r.knowledge_source == "decision"]
+            written = [r for r in rows if r.knowledge_source == "overheard_speech"]
             assert len(written) >= 1
-            assert written[0].memory_text == "I decided to trust the player"
+            # The stored content is the engine-authored record of the speech act:
+            # it says the sentence was heard, and never asserts it as truth.
+            assert "I decided to trust the player" in written[0].memory_text
+            assert written[0].memory_text.startswith(data["npc_state"].id)
+            assert written[0].source_turn_no == 5
             assert written[0].source_turn_no == 5
             assert written[0].status == "active"
             assert written[0].visibility == "npc_private"

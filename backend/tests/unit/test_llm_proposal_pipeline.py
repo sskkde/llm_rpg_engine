@@ -389,7 +389,13 @@ class TestProposalPipelineSchemaValidation:
         assert proposal.audit.validation_status == ValidationStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_missing_required_field_fallback(self, pipeline):
+    async def test_missing_required_field_fallback_records_fallback_reason(self, pipeline):
+        """A schema-invalid response must fall back and record *why*.
+
+        This replaces a duplicate of ``test_missing_required_field_fallback`` that
+        shadowed the original name (so only one of the two ever ran) and asserted
+        strictly less. The fallback reason/audit trail is part of the contract.
+        """
         invalid_json = json.dumps({
             "target": "location_001",
         })
@@ -404,6 +410,9 @@ class TestProposalPipelineSchemaValidation:
         
         assert isinstance(proposal, InputIntentProposal)
         assert proposal.is_fallback == True
+        assert proposal.audit.fallback_used == True
+        assert proposal.audit.fallback_reason
+        assert proposal.audit.validation_status == ValidationStatus.FAILED
 
 
 class TestProposalPipelineTimeout:

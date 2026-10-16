@@ -94,6 +94,12 @@ def pg_database(monkeypatch):
         # connections these tests use, so their rows land in the public schema. Clean them up
         # here; otherwise a later test (e.g. the 025 downgrade guard) starts from polluted state.
         conn.execute(text("DELETE FROM state_deltas WHERE session_id = ANY(:ids)"), {"ids": session_ids})
+        # ``validation_reports``/``llm_stage_results`` reference ``turn_transactions``,
+        # so they must be removed before the transactions themselves. Phase 2 records
+        # an authorization validation report on the refusal path, which made this
+        # pre-existing gap in the cleanup list observable.
+        conn.execute(text("DELETE FROM validation_reports WHERE session_id = ANY(:ids)"), {"ids": session_ids})
+        conn.execute(text("DELETE FROM validation_reports WHERE transaction_id IN (SELECT id FROM turn_transactions WHERE session_id = ANY(:ids))"), {"ids": session_ids})
         conn.execute(text("DELETE FROM llm_stage_results WHERE transaction_id IN (SELECT id FROM turn_transactions WHERE session_id = ANY(:ids))"), {"ids": session_ids})
         conn.execute(text("DELETE FROM game_events WHERE session_id = ANY(:ids)"), {"ids": session_ids})
         conn.execute(text("DELETE FROM event_logs WHERE session_id = ANY(:ids)"), {"ids": session_ids})

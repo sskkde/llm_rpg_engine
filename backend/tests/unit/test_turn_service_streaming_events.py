@@ -280,11 +280,14 @@ class TestTurnEventCallbackReceivesEvents:
         test_quest_templates,
     ):
         narration_text = "古老的山门广场铺满了青石板，岁月在上面留下了深深的痕迹。"
+        # Phase 2: the production narration stage speaks the strict contract, so the
+        # injected provider answers with a contract_version=2 payload (the previous
+        # shape carried tone/style_tags, which the strict contract rejects).
         mock_provider = ExactMockLLMProvider(
             content=json.dumps({
+                "contract_version": 2,
                 "text": narration_text,
-                "tone": "neutral",
-                "style_tags": ["descriptive"],
+                "confidence": 1.0,
             }),
         )
         real_llm_service = LLMService(provider=mock_provider, db_session=db)
@@ -339,11 +342,14 @@ class TestTurnEventCallbackReceivesEvents:
         test_quest_templates,
     ):
         narration_text = "古老的山门广场铺满了青石板，岁月在上面留下了深深的痕迹。"
+        # Phase 2: the production narration stage speaks the strict contract, so the
+        # injected provider answers with a contract_version=2 payload (the previous
+        # shape carried tone/style_tags, which the strict contract rejects).
         mock_provider = ExactMockLLMProvider(
             content=json.dumps({
+                "contract_version": 2,
                 "text": narration_text,
-                "tone": "neutral",
-                "style_tags": ["descriptive"],
+                "confidence": 1.0,
             }),
         )
         real_llm_service = LLMService(provider=mock_provider, db_session=db)

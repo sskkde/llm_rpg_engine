@@ -322,11 +322,12 @@ class TestLLMNarrationReplacement:
         db.add(settings)
         db.commit()
 
+        # Phase 2: the production narration stage speaks contract_version=2.
         mock_provider = MockLLMProvider(responses={
             "narration": json.dumps({
+                "contract_version": 2,
                 "text": "古老的山门广场铺满了青石板，岁月在上面留下了深深的痕迹。",
-                "tone": "neutral",
-                "style_tags": ["descriptive"],
+                "confidence": 1.0,
             }),
         })
         real_llm_service = LLMService(provider=mock_provider, db_session=db)
@@ -583,8 +584,9 @@ class TestNoSecondTurnRow:
 
         mock_provider = MockLLMProvider(responses={
             "narration": json.dumps({
+                "contract_version": 2,
                 "text": "LLM生成的叙事文本。",
-                "tone": "neutral",
+                "confidence": 1.0,
             }),
         })
         real_llm_service = LLMService(provider=mock_provider, db_session=db)
@@ -712,8 +714,9 @@ class TestNarrationContextSecurity:
 
         mock_provider = ExactMockLLMProvider(
             json.dumps({
+                "contract_version": 2,
                 "text": "柳师姐私藏逆鳞令，这个秘密浮现在你眼前。",
-                "tone": "neutral",
+                "confidence": 1.0,
             })
         )
         real_llm_service = LLMService(provider=mock_provider, db_session=db)

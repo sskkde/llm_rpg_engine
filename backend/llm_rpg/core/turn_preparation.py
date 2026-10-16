@@ -302,21 +302,18 @@ class TurnWriteBuffer:
 
         validation_report_repo = ValidationReportRepository(db)
         for plan in self.validation_reports:
-            # Same failure semantics as ``turn_service._create_validation_report``:
-            # an audit-class report that cannot be written is logged, not raised.
-            # W2-3 owns any change to that policy; this stage only moves the write.
-            try:
-                validation_report_repo.create(asdict(plan))
-            except Exception as e:
-                logger.warning("Failed to create validation_report: %s", e)
+            # Phase 2: this runs inside the managed turn unit of work, where a
+            # necessary write failure must propagate so the whole turn rolls back.
+            # Logging and continuing would let a turn commit with missing audit rows
+            # and -- because the final write section also persists the claim CAS --
+            # leave a durable turn whose audit trail is incomplete.
+            validation_report_repo.create(asdict(plan))
 
         game_event_repo = GameEventRepository(db)
         for plan in self.game_events:
-            # Same failure semantics as ``turn_service._create_game_event``.
-            try:
-                game_event_repo.create(asdict(plan))
-            except Exception as e:
-                logger.warning("Failed to create game_event: %s", e)
+            # Same rule as ``turn_service._create_game_event``: a fact event is a
+            # necessary write inside the managed transaction.
+            game_event_repo.create(asdict(plan))
 
         for plan in self.event_logs:
             structured_action = plan.structured_action or {}

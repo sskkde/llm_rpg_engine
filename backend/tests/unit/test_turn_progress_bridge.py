@@ -119,6 +119,7 @@ class TestWorkerDbSessionClosedOnSuccess:
         mock_result.recommended_actions = []
         mock_result.player_state = {}
         mock_result.time_advance_result = None
+        mock_result.action_resolution = None
 
         mock_session = MagicMock()
         mock_session.close = MagicMock()

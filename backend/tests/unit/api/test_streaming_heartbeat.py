@@ -222,6 +222,7 @@ class TestHeartbeatEmittedOnIdle:
         mock_result.recommended_actions = []
         mock_result.player_state = {}
         mock_result.time_advance_result = None
+        mock_result.action_resolution = None
         
         def slow_execute_turn_service(*args, **kwargs):
             time.sleep(2.5)
@@ -307,6 +308,7 @@ class TestHardDeadlineExceeded:
         mock_result.recommended_actions = []
         mock_result.player_state = {}
         mock_result.time_advance_result = None
+        mock_result.action_resolution = None
         
         with patch('llm_rpg.api.streaming.execute_turn_service', return_value=mock_result):
             with patch.dict(os.environ, {
@@ -351,6 +353,7 @@ class TestHeartbeatElapsedSeconds:
         mock_result.recommended_actions = []
         mock_result.player_state = {}
         mock_result.time_advance_result = None
+        mock_result.action_resolution = None
         
         def slow_execute_turn_service(*args, **kwargs):
             time.sleep(2.5)

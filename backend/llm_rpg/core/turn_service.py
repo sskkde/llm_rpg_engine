@@ -35,7 +35,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections.abc import Callable
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Literal
 
 from .turn_progress import TurnProgressEvent, emit_stage
 from datetime import datetime
@@ -132,6 +132,53 @@ from ..models.states import CanonicalState
 
 from ..llm.service import LLMService, MockLLMProvider
 
+# Phase 2: the LLM authority chain. A production model output is a strict
+# contract, then an authorization decision, then a domain adjudication; the
+# engine writes only what the last two produced.
+from ..models.action_contract import (
+    AUTHORIZED_PLAYER_ACTIONS,
+    NarrationV2,
+    NPCActionV2,
+    PlayerIntentV2,
+    SceneEventV2,
+    WorldTickV2,
+)
+from ..rules.action_schema import ActorRole, normalize_production_action_type
+from .action_authorization import (
+    UNAVAILABLE_NPC_STATUSES,
+    npc_canonical_key,
+    AuthorizationContext,
+    AuthorizationOutcome,
+    authorize_deterministic_player_intent,
+    authorize_npc_action,
+    authorize_player_intent,
+    authorize_scene_event,
+    authorize_world_tick,
+    build_player_perspective,
+    location_canonical_key,
+    resolve_npc_by_name,
+    resolve_npc_template_reference,
+)
+from .action_reason import (
+    ActionDetailCode,
+    ActionReasonCode,
+    ActionStatus,
+    public_reason_for_detail,
+)
+from .action_resolution import (
+    CognitionKind,
+    MovementResolutionContext,
+    ResolvedAction,
+    ResolvedCognition,
+    ResolvedEvent,
+    ResolvedEventKind,
+    reject_action,
+    resolve_npc_action,
+    resolve_player_action,
+    resolve_scene_reference,
+    resolve_world_reference,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,7 +239,19 @@ class LLMStageResult:
     default_model: Optional[str] = None  # Resolved model name
     config_source: Optional[str] = None  # Where config was resolved from
     fallback_used: bool = False  # Whether any fallback was used
-    
+
+    # Phase 2 production chain. ``contract`` holds the validated
+    # contract_version=2 DTO (or, for the NPC stage, a dict of
+    # ``{npc_id: NPCActionV2}``); it is deliberately excluded from
+    # ``to_result_json_dict`` so no contract object ever reaches a JSON column.
+    contract: Optional[Any] = None
+    #: Stable contract reason code when the strict contract was not satisfied.
+    contract_reason_code: Optional[str] = None
+    #: Authorization outcome for this stage's proposal.
+    authorization: Optional[Any] = None
+    #: Engine adjudication of this stage's proposal.
+    resolution: Optional[Any] = None
+
     def to_result_json_dict(self) -> Dict[str, Any]:
         """Convert LLMStageResult to a dict for storage in result_json."""
         return {
@@ -207,6 +266,7 @@ class LLMStageResult:
             "default_model": self.default_model,
             "config_source": self.config_source,
             "fallback_used": self.fallback_used,
+            "contract_reason_code": self.contract_reason_code,
         }
 
 
@@ -320,6 +380,10 @@ class TurnResult:
     idempotency_key: Optional[str] = None
     recovery_status: Optional[str] = None
     presentation_version: int = 0
+    #: Phase 2 public action-resolution summary. Only committed turns carry a
+    #: value; a recovered legacy snapshot without one reports ``None`` rather than
+    #: running a fresh authorization or model call.
+    action_resolution: Optional[Dict[str, Any]] = None
 
 
 def _run_async_safe(coro):
@@ -489,9 +553,23 @@ def _build_input_intent_context(
     if session and session.world_id:
         location_repo = LocationRepository(db)
         all_locations = location_repo.get_by_world(session.world_id)
+        # Phase 2: only places the player can actually reach are offered. A concealed
+        # location must not be disclosed to the model merely by being listed, so the
+        # prompt uses the same reachability rule the authorization layer enforces.
+        from .action_authorization import location_is_reachable
+
+        auth_ctx = _build_authorization_context(
+            db=db,
+            session_id=session_id,
+            world_id=session.world_id,
+            turn_no=0,
+            canonical_state=canonical_state,
+            current_location_id=context.get("current_location_id"),
+        )
         context["available_locations"] = [
             {"id": loc.id, "name": loc.name, "code": loc.code}
             for loc in all_locations
+            if location_is_reachable(auth_ctx, loc)[0]
         ]
     
     player_state = canonical_state.player_state
@@ -670,6 +748,297 @@ def _validate_input_intent_proposal(
 
 
 
+def _contract_fallback_reason(outcome: Any) -> str:
+    """Map a production-contract outcome onto the existing fallback vocabulary.
+
+    A contract-incompatible output is recorded explicitly (so an old template's
+    answer is never silently reinterpreted), while "no output at all" keeps the
+    pre-existing fallback wording used by the timeout/provider-error paths.
+    """
+    code = getattr(outcome, "reason_code", None) or "contract_unavailable"
+    if getattr(outcome, "contract_incompatible", False):
+        return f"contract_incompatible: {code}"
+    detail = getattr(outcome, "detail", "") or ""
+    if detail:
+        return f"{code}: {detail[:200]}"
+    return code
+
+
+def _player_intent_projection(contract: PlayerIntentV2) -> Dict[str, Any]:
+    """JSON-safe projection of a ``PlayerIntentV2`` for audit and existing readers.
+
+    ``intent_type`` is the canonical action type so the pre-existing per-action
+    time rules keep working unchanged; ``intent`` keeps the exact wire parameters.
+    """
+    from ..rules.action_schema import normalize_production_action_type
+
+    intent = contract.intent
+    return {
+        "contract_version": 2,
+        "intent_type": normalize_production_action_type(intent.action_type),
+        "intent": intent.model_dump(mode="json"),
+        "needs_clarification": contract.needs_clarification,
+        "clarification_question": contract.clarification_question,
+        "confidence": contract.confidence,
+        "visibility": "player_visible",
+    }
+
+
+def _build_authorization_context(
+    *,
+    db: Session,
+    session_id: str,
+    world_id: str,
+    turn_no: int,
+    canonical_state: CanonicalState,
+    current_location_id: Optional[str] = None,
+    visible_npc_ids: Optional[Any] = None,
+    available_memory_ids: Optional[Any] = None,
+    allowed_event_ids: Optional[Any] = None,
+    legal_recommended_actions: Optional[Any] = None,
+) -> AuthorizationContext:
+    """Build the read-only authorization context for one turn."""
+    return AuthorizationContext(
+        db=db,
+        session_id=session_id,
+        world_id=world_id,
+        turn_no=turn_no,
+        canonical_state=canonical_state,
+        current_location_id=current_location_id,
+        visible_npc_ids=frozenset(visible_npc_ids or ()),
+        available_memory_ids=(
+            None if available_memory_ids is None else frozenset(available_memory_ids)
+        ),
+        allowed_event_ids=frozenset(allowed_event_ids or ()),
+        legal_recommended_actions=tuple(legal_recommended_actions or ()),
+    )
+
+
+def _planned_game_event_ids(write_buffer: Optional[Any]) -> FrozenSet[str]:
+    """Ids of this turn's already-planned engine fact events.
+
+    A world/scene reference may only point at events the engine produced *in this
+    turn*; an id from an earlier turn is not an execution grant.
+    """
+    if write_buffer is None:
+        return frozenset()
+    return frozenset(
+        planned.id for planned in write_buffer.planned_game_events() if getattr(planned, "id", None)
+    )
+
+
+def _apply_authorization_to_stage(
+    stage_result: LLMStageResult,
+    outcome: AuthorizationOutcome,
+    *,
+    scope: str,
+) -> LLMStageResult:
+    """Fold an authorization decision into a stage result.
+
+    A rejected authorization makes the stage not-accepted with the coarse public
+    reason code; the restricted detail stays in ``authorization`` for audit only.
+    """
+    stage_result.authorization = outcome
+    if outcome.authorized:
+        return stage_result
+    stage_result.accepted = False
+    reason = outcome.public_reason or ActionReasonCode.INVALID_PARAMS
+    stage_result.fallback_reason = f"authorization_rejected: {reason.value}"
+    stage_result.validation_errors = [f"{scope}:{outcome.detail_code}"] if outcome.detail_code else []
+    return stage_result
+
+
+#: Contract reason codes that mean "the model answered, but not in the contract".
+_CONTRACT_INCOMPATIBLE_PREFIX = "contract_"
+
+
+def _action_reason_override(
+    *,
+    resolution: Optional[ResolvedAction],
+    intent_contract: Optional[PlayerIntentV2],
+    input_intent_result: Optional[LLMStageResult],
+) -> Optional[ActionReasonCode]:
+    """Refine the public reason code for a fallback action.
+
+    A contract-incompatible answer to an *authorized* action class is reported as
+    ``contract_failure`` rather than as the coarse outcome the deterministic parse
+    happened to produce, so the public summary distinguishes "the model was
+    unusable" from "the player asked for something the engine cannot do". An
+    unsupported action class keeps ``unsupported``: that is the more accurate
+    statement about the action, and the contract failure stays in audit.
+    """
+    if resolution is None or resolution.accepted:
+        return None
+    if resolution.reason_code is ActionReasonCode.UNSUPPORTED:
+        return None
+    if intent_contract is not None:
+        return None
+    reason_code = getattr(input_intent_result, "contract_reason_code", None)
+    if not reason_code or not str(reason_code).startswith(_CONTRACT_INCOMPATIBLE_PREFIX):
+        return None
+    return ActionReasonCode.CONTRACT_FAILURE
+
+
+def _build_action_resolution_summary(
+    *,
+    action_type: str,
+    resolution: Optional[ResolvedAction],
+    authorization: Optional[AuthorizationOutcome],
+    fallback_used: bool,
+    status_override: Optional[ActionStatus] = None,
+    reason_override: Optional[ActionReasonCode] = None,
+) -> Dict[str, Any]:
+    """Build the public ``action_resolution`` summary for a committed turn.
+
+    Only three public statuses and four coarse public reason codes exist, so the
+    summary never discloses whether a hidden entity exists. Restricted detail stays
+    in the authorization/audit records.
+
+    The summary is an *already-happened fact*: it is only written after the commit
+    and is read back verbatim on a same-key recovery. A recovered legacy snapshot
+    without one reports ``None`` instead of running a fresh authorization.
+    """
+    if status_override is not None:
+        status = status_override
+        reason_code = reason_override
+    elif resolution is None:
+        status = ActionStatus.REJECTED
+        reason_code = reason_override or ActionReasonCode.INVALID_PARAMS
+    elif resolution.status == ActionStatus.CLARIFICATION:
+        status = ActionStatus.CLARIFICATION
+        reason_code = None
+    elif resolution.accepted:
+        status = ActionStatus.ACCEPTED
+        reason_code = None
+    else:
+        status = ActionStatus.REJECTED
+        reason_code = resolution.reason_code or reason_override
+        if reason_code is None and authorization is not None:
+            reason_code = authorization.public_reason
+
+    return {
+        "version": 1,
+        "action_type": normalize_production_action_type(action_type or "unknown"),
+        "status": status.value,
+        "reason_code": reason_code.value if reason_code else None,
+        "fallback_used": bool(fallback_used),
+    }
+
+
+def _session_world_id(
+    db: Session,
+    session_id: str,
+    canonical_state: Optional[CanonicalState] = None,
+) -> str:
+    """Resolve the world id for authorization without trusting caller input."""
+    if canonical_state is not None:
+        world_state = getattr(canonical_state, "world_state", None)
+        world_id = getattr(world_state, "world_id", None)
+        if world_id:
+            return world_id
+    session = SessionRepository(db).get_by_id(session_id)
+    return session.world_id if session is not None else ""
+
+
+def _world_tick_projection(contract: WorldTickV2) -> Dict[str, Any]:
+    """JSON-safe projection of a ``WorldTickV2`` for audit and result_json.
+
+    Deliberately contains no candidate events, effects, deltas or time fields: the
+    world stage may only reference results the engine already decided.
+    """
+    return {
+        "contract_version": 2,
+        "referenced_event_ids": list(contract.referenced_event_ids),
+        "display_hint": contract.display_hint,
+        "confidence": contract.confidence,
+    }
+
+
+def _scene_event_projection(
+    contract: SceneEventV2,
+    authorization: Optional[AuthorizationOutcome] = None,
+) -> Dict[str, Any]:
+    """JSON-safe projection of an *authorized* ``SceneEventV2``.
+
+    The recommended actions come from the authorization result, not from the raw
+    contract: the engine keeps only the entries that exist in its own legal set, so
+    a model-invented hint can never reach the player through this projection.
+    """
+    authorized_actions = (
+        list(authorization.action.recommended_actions)
+        if authorization is not None and authorization.authorized and authorization.action
+        else []
+    )
+    authorized_refs = (
+        list(authorization.action.referenced_event_ids)
+        if authorization is not None and authorization.authorized and authorization.action
+        else []
+    )
+    return {
+        "contract_version": 2,
+        "referenced_event_ids": authorized_refs,
+        "recommended_actions": authorized_actions,
+        "display_hint": contract.display_hint,
+        "confidence": contract.confidence,
+    }
+
+
+def _npc_action_projection(
+    contract: NPCActionV2,
+    npc_id: str,
+    npc_name: Optional[str],
+    visible_to_player: bool,
+) -> Dict[str, Any]:
+    """JSON-safe projection of an authorized ``NPCActionV2``.
+
+    The actor id is server-bound; the wire never supplied it. Model text stays in
+    ``summary``/``visible_motivation``/``utterance``, which are presentation or
+    quotation fields only.
+    """
+    from ..models.action_contract import NPC_ACTION_ALIASES
+
+    return {
+        "contract_version": 2,
+        "npc_id": npc_id,
+        "npc_name": npc_name,
+        "action_type": NPC_ACTION_ALIASES.get(
+            contract.action.action_type, contract.action.action_type
+        ),
+        "target_id": getattr(contract.action, "target_id", None),
+        "utterance": getattr(contract.action, "utterance", None),
+        "summary": contract.summary,
+        "visible_motivation": contract.visible_motivation,
+        "visible_to_player": visible_to_player,
+        "used_memory_ids": list(contract.used_memory_ids),
+        "confidence": contract.confidence,
+    }
+
+
+def _npc_fallback_reaction(
+    npc_id: str,
+    npc_name: Optional[str],
+    reason: str,
+    detail_code: Optional[ActionDetailCode] = None,
+) -> Dict[str, Any]:
+    """JSON-safe deterministic NPC fallback: the engine's observe/idle result.
+
+    A failed NPC proposal falls back to an engine-owned wait; it never keeps a
+    partially accepted model action, and it does not advance world time.
+    """
+    reaction: Dict[str, Any] = {
+        "npc_id": npc_id,
+        "npc_name": npc_name,
+        "accepted": False,
+        "fallback_reason": reason,
+        "action_type": "idle",
+        "summary": f"{npc_name}等待着",
+    }
+    if detail_code is not None:
+        # Restricted-audit detail: never returned to clients.
+        reaction["authorization_detail"] = detail_code.value
+    return reaction
+
+
 def _execute_input_intent_stage(
     db: Session,
     session_id: str,
@@ -753,66 +1122,41 @@ def _execute_input_intent_stage(
         # input_context and provider configuration are plain data; no ORM attributes
         # are needed after ending the read transaction.
         _end_read_transaction(db)
-        proposal = _run_async_safe(
-            pipeline.generate_input_intent(
+        outcome = _run_async_safe(
+            pipeline.generate_player_intent_production(
                 raw_input=raw_input,
-                prompt_template_id="input_intent_v1",
+                context=input_context,
+                prompt_template_id="input_intent_v2",
                 session_id=session_id,
                 turn_no=turn_no,
-                context=input_context,
             )
         )
-        
-        is_valid, validation_errors = _validate_input_intent_proposal(proposal, input_context)
-        
-        if not is_valid:
+
+        if not outcome.accepted:
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
                 timeout=stage_config.timeout_seconds,
                 accepted=False,
-                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
-                raw_outcome=str(proposal)[:500] if proposal else None,
-                validation_errors=validation_errors,
+                fallback_reason=_contract_fallback_reason(outcome),
+                raw_outcome=outcome.raw_output_preview or None,
+                contract_reason_code=outcome.reason_code,
+                validation_errors=[_contract_fallback_reason(outcome)],
             )
-        
-        is_fallback = getattr(proposal, "is_fallback", False)
-        if is_fallback:
-            fallback_reason = "llm_proposal_fallback"
-            audit = getattr(proposal, "audit", None)
-            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
-                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
-            return LLMStageResult(
-                stage_name=stage_name,
-                enabled=True,
-                timeout=stage_config.timeout_seconds,
-                accepted=False,
-                fallback_reason=fallback_reason,
-                raw_outcome=str(proposal)[:500] if proposal else None,
-            )
-        
-        parsed_proposal: Dict[str, Any] = {
-            "intent_type": getattr(proposal, "intent_type", "unknown"),
-            "target": getattr(proposal, "target", None),
-            "target_type": getattr(proposal, "target_type", None),
-            "risk_level": getattr(proposal, "risk_level", "low"),
-            "raw_tokens": getattr(proposal, "raw_tokens", []),
-            "confidence": getattr(proposal, "confidence", 0.5),
-            "parameters": getattr(proposal, "parameters", {}),
-            "needs_clarification": getattr(proposal, "needs_clarification", False),
-            "clarification_question": getattr(proposal, "clarification_question", None),
-            "visibility": getattr(proposal, "visibility", "player_visible"),
-        }
-        
+
+        contract: PlayerIntentV2 = outcome.contract  # type: ignore[assignment]
+        parsed_proposal = _player_intent_projection(contract)
+
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
             timeout=stage_config.timeout_seconds,
-            raw_outcome=str(proposal)[:500],
+            raw_outcome=contract.model_dump_json()[:500],
             parsed_proposal=parsed_proposal,
             accepted=True,
             config_source=stage_config.config_source,
             fallback_used=stage_config.fallback_used,
+            contract=contract,
         )
         
     except asyncio.TimeoutError:
@@ -916,21 +1260,24 @@ def _execute_world_stage(
             fallback_reason=f"llm_config_error: {str(e)[:200]}",
         )
 
+    # The engine event ids this turn already produced are the *only* legal
+    # references, so the model is given exactly that list (an id it was not shown
+    # can never be authorized).
+    world_context["engine_event_ids"] = sorted(_planned_game_event_ids(write_buffer))
+
     try:
         # world_context and stage configuration are plain data, not ORM objects.
         _end_read_transaction(db)
-        proposal = _run_async_safe(
-            pipeline.generate_world_tick(
+        outcome = _run_async_safe(
+            pipeline.generate_world_tick_production(
                 world_context=world_context,
-                prompt_template_id="world_tick_v1",
+                prompt_template_id="world_tick_v2",
                 session_id=session_id,
                 turn_no=turn_no,
             )
         )
 
-        is_valid, validation_errors = _validate_world_proposal(proposal)
-
-        if not is_valid:
+        if not outcome.accepted:
             if transaction_id:
                 _create_validation_report(
                     db=db,
@@ -940,7 +1287,7 @@ def _execute_world_stage(
                     scope="proposal_world_tick",
                     target_ref_id=None,
                     is_valid=False,
-                    errors_json=validation_errors,
+                    errors_json=[_contract_fallback_reason(outcome)],
                     buffer=write_buffer,
                 )
             return LLMStageResult(
@@ -948,62 +1295,66 @@ def _execute_world_stage(
                 enabled=True,
                 timeout=stage_config.timeout_seconds,
                 accepted=False,
-                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
-                raw_outcome=str(proposal)[:500] if proposal else None,
-                validation_errors=validation_errors,
+                fallback_reason=_contract_fallback_reason(outcome),
+                raw_outcome=outcome.raw_output_preview or None,
+                contract_reason_code=outcome.reason_code,
+                validation_errors=[_contract_fallback_reason(outcome)],
             )
 
-        is_fallback = getattr(proposal, "is_fallback", False)
-        if is_fallback:
-            fallback_reason = "llm_proposal_fallback"
-            audit = getattr(proposal, "audit", None)
-            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
-                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
-            return LLMStageResult(
-                stage_name=stage_name,
-                enabled=True,
-                timeout=stage_config.timeout_seconds,
-                accepted=False,
-                fallback_reason=fallback_reason,
-                raw_outcome=str(proposal)[:500] if proposal else None,
+        contract: WorldTickV2 = outcome.contract  # type: ignore[assignment]
+        allowed_event_ids = _planned_game_event_ids(write_buffer)
+        auth_context = _build_authorization_context(
+            db=db,
+            session_id=session_id,
+            world_id=_session_world_id(db, session_id, canonical_state),
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            current_location_id=current_location_id,
+            allowed_event_ids=allowed_event_ids,
+        )
+        authorization = authorize_world_tick(auth_context, contract)
+
+        if not authorization.authorized:
+            if transaction_id:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="proposal_world_tick",
+                    target_ref_id=None,
+                    is_valid=False,
+                    errors_json=[str(authorization.detail_code)],
+                    buffer=write_buffer,
+                )
+            return _apply_authorization_to_stage(
+                LLMStageResult(
+                    stage_name=stage_name,
+                    enabled=True,
+                    timeout=stage_config.timeout_seconds,
+                    raw_outcome=contract.model_dump_json()[:500],
+                    contract=contract,
+                    contract_reason_code=outcome.reason_code,
+                    config_source=stage_config.config_source,
+                    fallback_used=stage_config.fallback_used,
+                ),
+                authorization,
+                scope="world_tick",
             )
 
-        parsed_proposal: Dict[str, Any] = {
-            "time_description": getattr(proposal, "time_description", ""),
-            "elapsed_minutes": getattr(proposal, "elapsed_minutes", None),
-            "time_category": getattr(proposal, "time_category", None),
-            "display_hint": getattr(proposal, "display_hint", None),
-            "candidate_events": [
-                {
-                    "event_type": getattr(e, "event_type", "unknown"),
-                    "description": getattr(e, "description", ""),
-                    "effects": getattr(e, "effects", {}),
-                    "importance": getattr(e, "importance", 0.5),
-                    "visibility": getattr(e, "visibility", "player_visible"),
-                }
-                for e in proposal.candidate_events
-            ],
-            "state_deltas": [
-                {
-                    "path": getattr(d, "path", ""),
-                    "operation": getattr(d, "operation", "set"),
-                    "value": getattr(d, "value", None),
-                    "reason": getattr(d, "reason", ""),
-                }
-                for d in proposal.state_deltas
-            ],
-            "confidence": getattr(proposal, "confidence", 0.5),
-        }
-
+        resolution = resolve_world_reference(authorization.action)
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
             timeout=stage_config.timeout_seconds,
-            raw_outcome=str(proposal)[:500],
-            parsed_proposal=parsed_proposal,
+            raw_outcome=contract.model_dump_json()[:500],
+            parsed_proposal=_world_tick_projection(contract),
             accepted=True,
             config_source=stage_config.config_source,
             fallback_used=stage_config.fallback_used,
+            contract=contract,
+            authorization=authorization,
+            resolution=resolution,
         )
 
     except asyncio.TimeoutError:
@@ -1272,6 +1623,11 @@ def _get_visible_npcs(
     
     CRITICAL: Never includes hidden_identity from NPCTemplateModel.
     Only includes public_identity, name, and role_type.
+
+    Phase 2: the stable ids the model may reference are included so the production
+    prompt can list them. ``npc_id`` is the session-state id (the only NPC id
+    namespace a player action may address); ``npc_template_id`` is exposed for
+    audit/traceability and is *not* an addressable id.
     """
     if not location_id:
         return []
@@ -1288,13 +1644,18 @@ def _get_visible_npcs(
     
     for npc_state in npc_states:
         if npc_state.current_location_id == location_id:
+            status_flags = npc_state.status_flags or {}
+            if str(status_flags.get("status", "alive")).lower() in UNAVAILABLE_NPC_STATUSES:
+                continue
             npc_template = npc_template_repo.get_by_id(npc_state.npc_template_id)
             if npc_template:
                 visible_npcs.append({
+                    "npc_id": npc_state.id,
+                    "npc_template_id": npc_state.npc_template_id,
                     "name": npc_template.name,
                     "public_identity": npc_template.public_identity,
                     "role_type": npc_template.role_type,
-                    "mood": npc_state.status_flags.get("mood", "neutral") if npc_state.status_flags else "neutral",
+                    "mood": status_flags.get("mood", "neutral"),
                 })
     
     return visible_npcs
@@ -1533,6 +1894,11 @@ def _get_active_npcs_at_location(
         active_npcs.append({
             "npc_id": npc_state.id,
             "npc_template_id": npc_state.npc_template_id,
+            # ``CanonicalState.npc_states`` is keyed by the NPC's canonical key
+            # (template code, falling back to the template id), while the session
+            # state row id is the actor binding and the DB scope. Both are carried
+            # explicitly so the two namespaces are never conflated.
+            "npc_canonical_id": npc_canonical_key(npc_template),
             "name": npc_template.name,
             "public_identity": npc_template.public_identity,
             "role_type": npc_template.role_type,
@@ -1910,7 +2276,12 @@ def _execute_npc_stage(
         )
     
     npc_reactions: List[Dict[str, Any]] = []
+    npc_contracts: Dict[str, Any] = {}
+    npc_resolutions: Dict[str, ResolvedAction] = {}
     working_recent_actions = list(recent_npc_actions) if recent_npc_actions else []
+    world_id_for_auth = _session_world_id(db, session_id, canonical_state)
+    visible_npc_ids = {npc["npc_id"] for npc in active_npcs}
+    allowed_event_ids = _planned_game_event_ids(write_buffer)
     
     for npc in active_npcs:
         npc_id = npc["npc_id"]
@@ -1939,112 +2310,87 @@ def _execute_npc_stage(
         try:
             # npc_context and the NPC fields retained from active_npcs are plain data.
             _end_read_transaction(db)
-            proposal = _run_async_safe(
-                pipeline.generate_npc_action(
+            outcome = _run_async_safe(
+                pipeline.generate_npc_action_production(
                     npc_id=npc_id,
                     npc_context=npc_context,
-                    prompt_template_id="npc_action_v1",
+                    prompt_template_id="npc_action_v2",
                     session_id=session_id,
                     turn_no=turn_no,
                 )
             )
             
-            # P10-C Phase 6: Normalize proposal (filter invalid used_memory_ids,
-            # validate new_memory_candidates) before validation/acceptance
-            normalized = None
-            if hasattr(proposal, "used_memory_ids"):
-                try:
-                    from .npc_decision_adapter import normalize_npc_action_proposal
-                    normalized = normalize_npc_action_proposal(
-                        proposal=proposal,
-                        db=db,
-                        session_id=session_id,
-                        npc_template_id=npc_template_id,
-                        available_memory_ids=npc_context.get("used_memory_ids"),
-                        current_turn=turn_no,
-                        is_major_npc=npc.get("is_major_npc", False),
-                    )
-                    proposal = normalized.proposal
-                except Exception:
-                    pass  # Non-fatal: proceed with un-normalized proposal
-            
-            is_valid, validation_errors = _validate_npc_action(proposal, npc_context)
-            
-            if not is_valid:
-                npc_reactions.append({
-                    "npc_id": npc_id,
-                    "npc_name": npc_name,
-                    "accepted": False,
-                    "fallback_reason": f"validation_failed: {', '.join(validation_errors[:3])}",
-                    "action_type": "idle",
-                    "summary": f"{npc_name}等待着",
-                })
+            if not outcome.accepted:
+                npc_reactions.append(_npc_fallback_reaction(
+                    npc_id, npc_name, _contract_fallback_reason(outcome)
+                ))
                 continue
             
-            is_fallback = getattr(proposal, "is_fallback", False)
-            if is_fallback:
-                fallback_reason = "llm_proposal_fallback"
-                audit = getattr(proposal, "audit", None)
-                if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
-                    fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
-                
-                npc_reactions.append({
-                    "npc_id": npc_id,
-                    "npc_name": npc_name,
-                    "accepted": False,
-                    "fallback_reason": fallback_reason,
-                    "action_type": getattr(proposal, "action_type", "idle"),
-                    "summary": getattr(proposal, "summary", f"{npc_name}等待着"),
-                })
+            contract: NPCActionV2 = outcome.contract  # type: ignore[assignment]
+            
+            # The actor is bound here, from the stage's own iteration over this
+            # session's active NPCs — never from the wire. The available memory set
+            # is exactly what this call supplied (``None`` means "none supplied",
+            # which permits no memory reference at all).
+            auth_context = _build_authorization_context(
+                db=db,
+                session_id=session_id,
+                world_id=world_id_for_auth,
+                turn_no=turn_no,
+                canonical_state=canonical_state,
+                current_location_id=current_location_id,
+                visible_npc_ids=visible_npc_ids,
+                available_memory_ids=npc_context.get("used_memory_ids"),
+                allowed_event_ids=allowed_event_ids,
+            )
+            authorization = authorize_npc_action(
+                auth_context,
+                contract,
+                npc_id=npc_id,
+                npc_template_id=npc_template_id,
+                npc_name=npc_name,
+            )
+            
+            if not authorization.authorized:
+                # An unauthorized NPC reference is refused, never normalized into
+                # an accepted action: memory ids, actor identity and targets are all
+                # permission-bearing, so a failure here must not be softened.
+                public_reason = authorization.public_reason or ActionReasonCode.INVALID_PARAMS
+                npc_reactions.append(_npc_fallback_reaction(
+                    npc_id,
+                    npc_name,
+                    f"authorization_rejected: {public_reason.value}",
+                    detail_code=authorization.detail_code,
+                ))
                 continue
             
-            visibility = getattr(proposal, "visibility", "player_visible")
-            visible_to_player = visibility == "player_visible"
+            action = authorization.action
+            resolution = resolve_npc_action(action)
+            reaction = _npc_action_projection(
+                contract, npc_id, npc_name, action.visible_to_player
+            )
+            reaction["accepted"] = True
+            reaction["npc_template_id"] = npc_template_id
+            reaction["npc_canonical_id"] = npc.get("npc_canonical_id") or npc_id
+            if action.used_memory_ids:
+                reaction["used_memory_ids"] = list(action.used_memory_ids)
             
-            reaction = {
-                "npc_id": npc_id,
-                "npc_name": npc_name,
-                "npc_template_id": npc_template_id,
-                "accepted": True,
-                "action_type": proposal.action_type,
-                "summary": proposal.summary,
-                "visible_to_player": visible_to_player,
-                "visible_motivation": getattr(proposal, "visible_motivation", ""),
-            }
+            npc_contracts[npc_id] = contract
+            npc_resolutions[npc_id] = resolution
             
-            # P10-C Phase 6: Carry memory fields through for post-commit writes
-            if hasattr(proposal, "used_memory_ids") and proposal.used_memory_ids:
-                reaction["used_memory_ids"] = list(proposal.used_memory_ids)
-            if hasattr(proposal, "new_memory_candidates") and proposal.new_memory_candidates:
-                reaction["new_memory_candidates"] = list(proposal.new_memory_candidates)
-            
-            if visible_to_player:
+            if action.visible_to_player:
                 working_recent_actions.append({
                     "npc_name": npc_name,
-                    "summary": proposal.summary,
+                    "summary": contract.summary,
                 })
             
             npc_reactions.append(reaction)
             
         except asyncio.TimeoutError:
-            npc_reactions.append({
-                "npc_id": npc_id,
-                "npc_name": npc_name,
-                "accepted": False,
-                "fallback_reason": "timeout",
-                "action_type": "idle",
-                "summary": f"{npc_name}等待着",
-            })
+            npc_reactions.append(_npc_fallback_reaction(npc_id, npc_name, "timeout"))
         except Exception as e:
             logger.warning("NPC action generation failed for %s: %s", npc_id, e)
-            npc_reactions.append({
-                "npc_id": npc_id,
-                "npc_name": npc_name,
-                "accepted": False,
-                "fallback_reason": f"error: {str(e)[:200]}",
-                "action_type": "idle",
-                "summary": f"{npc_name}等待着",
-            })
+            npc_reactions.append(_npc_fallback_reaction(npc_id, npc_name, f"error: {str(e)[:200]}"))
     
     accepted_count = sum(1 for r in npc_reactions if r.get("accepted", False))
     
@@ -2057,6 +2403,8 @@ def _execute_npc_stage(
         accepted=accepted_count > 0,
         config_source=stage_config.config_source,
         fallback_used=stage_config.fallback_used,
+        contract=npc_contracts or None,
+        resolution=npc_resolutions or None,
     )
 
 
@@ -2076,6 +2424,7 @@ def _execute_llm_stages(
     turn_event_callback: Optional[Callable[[dict], None]] = None,
     write_buffer: Optional[TurnWriteBuffer] = None,
     planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+    deterministic_recommended_actions: Optional[List[str]] = None,
     *,
     narration_context_out: Dict[str, Any],
     narration_forbidden_info_out: Optional[List[Any]] = None,
@@ -2157,8 +2506,10 @@ def _execute_llm_stages(
         state_deltas=state_deltas,
         current_location_id=current_location_id,
         use_mock=use_mock,
+        transaction_id=transaction_id,
         write_buffer=write_buffer,
         planned_quests=planned_quests,
+        deterministic_recommended_actions=deterministic_recommended_actions,
     )
     results.append(scene_result)
     _emit("scene_stage", "completed")
@@ -2352,16 +2703,29 @@ def _execute_narration_stage(
     try:
         # narration_context is the complete plain-data model input.
         _end_read_transaction(db)
-        proposal = _run_async_safe(
-            pipeline.generate_narration(
+        outcome = _run_async_safe(
+            pipeline.generate_narration_production(
                 visible_context=narration_context,
-                prompt_template_id="narration_v1",
+                prompt_template_id="narration_v2",
                 session_id=session_id,
                 turn_no=turn_no,
             )
         )
-        
-        narration_text = proposal.text if hasattr(proposal, "text") else ""
+
+        if not outcome.accepted:
+            return LLMStageResult(
+                stage_name=stage_name,
+                enabled=True,
+                timeout=stage_config.timeout_seconds,
+                accepted=False,
+                fallback_reason=_contract_fallback_reason(outcome),
+                raw_outcome=outcome.raw_output_preview or None,
+                contract_reason_code=outcome.reason_code,
+                validation_errors=[_contract_fallback_reason(outcome)],
+            )
+
+        contract: NarrationV2 = outcome.contract  # type: ignore[assignment]
+        narration_text = contract.text
         
         if not narration_text or not narration_text.strip():
             return LLMStageResult(
@@ -2370,7 +2734,7 @@ def _execute_narration_stage(
                 timeout=stage_config.timeout_seconds,
                 accepted=False,
                 fallback_reason="empty_narration_text",
-                raw_outcome=str(proposal)[:500] if proposal else None,
+                raw_outcome=contract.model_dump_json()[:500],
             )
         
         forbidden_leaks = _check_forbidden_info_leaks(narration_context, narration_text)
@@ -2383,21 +2747,6 @@ def _execute_narration_stage(
                 fallback_reason=f"forbidden_info_leak: {', '.join(forbidden_leaks[:3])}",
                 raw_outcome=narration_text[:500],
                 validation_errors=[f"Forbidden info detected: {info}" for info in forbidden_leaks],
-            )
-        
-        is_fallback = getattr(proposal, "is_fallback", False)
-        if is_fallback:
-            fallback_reason = "llm_proposal_fallback"
-            audit = getattr(proposal, "audit", None)
-            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
-                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
-            return LLMStageResult(
-                stage_name=stage_name,
-                enabled=True,
-                timeout=stage_config.timeout_seconds,
-                accepted=False,
-                fallback_reason=fallback_reason,
-                raw_outcome=narration_text[:500],
             )
         
         return LLMStageResult(
@@ -2641,20 +2990,23 @@ def _execute_scene_stage(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     use_mock: bool = False,
+    transaction_id: Optional[str] = None,
     write_buffer: Optional[TurnWriteBuffer] = None,
     planned_quests: Optional[Dict[str, QuestStatePlan]] = None,
+    deterministic_recommended_actions: Optional[List[str]] = None,
 ) -> LLMStageResult:
     """
     Execute the scene LLM stage.
     
     1. Check if enabled via feature flag
     2. Build scene context from committed state
-    3. Call ProposalPipeline.generate_scene_event()
-    4. Validate output
+    3. Call the strict production contract (``SceneEventV2``)
+    4. Authorize its references against this turn's engine events
     5. Return LLMStageResult with accepted/rejected status
     
-    The scene stage generates candidate scene events and recommended actions.
-    It does NOT mutate any state - proposals are candidates only.
+    The scene stage may only organize results the engine already decided: it
+    references this turn's engine events and selects from the engine's legal
+    recommended actions. It never creates facts, effects or state changes.
     """
     from ..llm.proposal_pipeline import ProposalPipeline, ProposalConfig
     
@@ -2682,6 +3034,12 @@ def _execute_scene_stage(
         planned_events=write_buffer.planned_event_logs() if write_buffer else None,
         planned_quests=planned_quests,
     )
+    # The engine's own recommended actions are the only legal set: the scene stage
+    # may select from them but can never invent a player-facing hint.
+    scene_context["deterministic_recommended_actions"] = list(
+        deterministic_recommended_actions or []
+    )
+    scene_context["engine_event_ids"] = sorted(_planned_game_event_ids(write_buffer))
     
     try:
         from ..services.settings import SystemSettingsService
@@ -2726,70 +3084,96 @@ def _execute_scene_stage(
         # scene_context and scene_id are plain data; no expired ORM value is reused.
         _end_read_transaction(db)
         scene_id = current_location_id or "unknown"
-        
-        proposal = _run_async_safe(
-            pipeline.generate_scene_event(
+
+        outcome = _run_async_safe(
+            pipeline.generate_scene_event_production(
                 scene_id=scene_id,
                 scene_context=scene_context,
-                prompt_template_id="scene_event_v1",
+                prompt_template_id="scene_event_v2",
                 session_id=session_id,
                 turn_no=turn_no,
             )
         )
-        
-        is_valid, validation_errors = _validate_scene_proposal(proposal, scene_context)
-        
-        if not is_valid:
+
+        if not outcome.accepted:
+            if transaction_id:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="proposal_scene_event",
+                    target_ref_id=scene_id,
+                    is_valid=False,
+                    errors_json=[_contract_fallback_reason(outcome)],
+                    buffer=write_buffer,
+                )
             return LLMStageResult(
                 stage_name=stage_name,
                 enabled=True,
                 timeout=stage_config.timeout_seconds,
                 accepted=False,
-                fallback_reason=f"validation_failed: {', '.join(validation_errors[:3])}",
-                raw_outcome=str(proposal)[:500] if proposal else None,
-                validation_errors=validation_errors,
+                fallback_reason=_contract_fallback_reason(outcome),
+                raw_outcome=outcome.raw_output_preview or None,
+                contract_reason_code=outcome.reason_code,
+                validation_errors=[_contract_fallback_reason(outcome)],
             )
-        
-        is_fallback = getattr(proposal, "is_fallback", False)
-        if is_fallback:
-            fallback_reason = "llm_proposal_fallback"
-            audit = getattr(proposal, "audit", None)
-            if audit and hasattr(audit, "fallback_reason") and audit.fallback_reason:
-                fallback_reason = f"llm_proposal_fallback: {audit.fallback_reason[:200]}"
-            return LLMStageResult(
-                stage_name=stage_name,
-                enabled=True,
-                timeout=stage_config.timeout_seconds,
-                accepted=False,
-                fallback_reason=fallback_reason,
-                raw_outcome=str(proposal)[:500],
+
+        contract: SceneEventV2 = outcome.contract  # type: ignore[assignment]
+        allowed_event_ids = _planned_game_event_ids(write_buffer)
+        auth_context = _build_authorization_context(
+            db=db,
+            session_id=session_id,
+            world_id=_session_world_id(db, session_id, canonical_state),
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            current_location_id=current_location_id,
+            allowed_event_ids=allowed_event_ids,
+            legal_recommended_actions=deterministic_recommended_actions,
+        )
+        authorization = authorize_scene_event(auth_context, contract)
+
+        if not authorization.authorized:
+            if transaction_id:
+                _create_validation_report(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    scope="proposal_scene_event",
+                    target_ref_id=scene_id,
+                    is_valid=False,
+                    errors_json=[str(authorization.detail_code)],
+                    buffer=write_buffer,
+                )
+            return _apply_authorization_to_stage(
+                LLMStageResult(
+                    stage_name=stage_name,
+                    enabled=True,
+                    timeout=stage_config.timeout_seconds,
+                    raw_outcome=contract.model_dump_json()[:500],
+                    contract=contract,
+                    contract_reason_code=outcome.reason_code,
+                    config_source=stage_config.config_source,
+                    fallback_used=stage_config.fallback_used,
+                ),
+                authorization,
+                scope="scene_event",
             )
-        
-        parsed_proposal: Dict[str, Any] = {
-            "scene_id": proposal.scene_id,
-            "scene_name": getattr(proposal, "scene_name", None),
-            "candidate_events": [
-                {
-                    "event_type": e.event_type,
-                    "description": e.description,
-                    "importance": getattr(e, "importance", 0.5),
-                }
-                for e in proposal.candidate_events
-            ],
-        }
-        
-        if hasattr(proposal, "recommended_actions") and proposal.recommended_actions:
-            parsed_proposal["recommended_actions"] = proposal.recommended_actions[:4]
-        
+
+        resolution = resolve_scene_reference(authorization.action)
         return LLMStageResult(
             stage_name=stage_name,
             enabled=True,
             timeout=stage_config.timeout_seconds,
-            raw_outcome=str(proposal)[:500],
-            parsed_proposal=parsed_proposal,
+            raw_outcome=contract.model_dump_json()[:500],
+            parsed_proposal=_scene_event_projection(contract, authorization),
             accepted=True,
             config_source=stage_config.config_source,
             fallback_used=stage_config.fallback_used,
+            contract=contract,
+            authorization=authorization,
+            resolution=resolution,
         )
         
     except asyncio.TimeoutError:
@@ -3161,12 +3545,29 @@ def execute_turn_service(
         session_state = _get_session_state_with_plan(db, session_id)
         current_location_id = session_state.current_location_id if session_state else None
         
-        # Create ValidationContext for this turn
+        # Create ValidationContext for this turn.
+        #
+        # Phase 2: the production player actions must carry an *explicit*
+        # perspective built from this session's committed state. Omitting it is what
+        # let a move skip the discovery check, so the perspective is part of the
+        # context itself and every validator that takes the context sees it.
+        player_perspective = build_player_perspective(
+            _build_authorization_context(
+                db=db,
+                session_id=session_id,
+                world_id=_session_world_id(db, session_id, canonical_state),
+                turn_no=turn_no,
+                canonical_state=canonical_state,
+                current_location_id=current_location_id,
+            )
+        )
         validation_context = ValidationContext.create(
             db=db,
             session_id=session_id,
             turn_no=turn_no,
             canonical_state=canonical_state,
+            perspective=player_perspective,
+            actor_id="player",
         )
         # current_location_id is already an ordinary string and the context carries
         # only the Session handle plus pure canonical data. W2-A1/A2/A3 leave no
@@ -3185,65 +3586,61 @@ def execute_turn_service(
             use_mock=use_mock,
         )
         _emit("input_intent", "completed")
-        
-        # Validate InputIntentProposal before using it
-        intent_proposal = None
+
+        # Record the intent validation outcome. The production intent was already
+        # validated by the strict contract at parse time and is authorized below;
+        # this row keeps the audit trail. There is deliberately no exception path
+        # here that could leave the stage accepted: a validation/report failure
+        # propagates and rolls the turn back instead of preserving an accepted
+        # intent, and a rejected intent is downgraded before it is used.
         if input_intent_result.accepted and input_intent_result.parsed_proposal:
-            from ..models.proposals import InputIntentProposal
-            try:
-                intent_proposal = InputIntentProposal(
-                    intent_type=input_intent_result.parsed_proposal.get("intent_type", "unknown"),
-                    target=input_intent_result.parsed_proposal.get("target"),
-                    target_type=input_intent_result.parsed_proposal.get("target_type"),
-                    risk_level=input_intent_result.parsed_proposal.get("risk_level", "low"),
-                    confidence=input_intent_result.parsed_proposal.get("confidence", 0.5),
-                    needs_clarification=input_intent_result.parsed_proposal.get("needs_clarification", False),
-                    clarification_question=input_intent_result.parsed_proposal.get("clarification_question"),
-                    visibility=input_intent_result.parsed_proposal.get("visibility", "player_visible"),
-                    audit={
-                        'proposal_type': 'input_intent',
-                        'source_engine': 'input_engine',
-                    },
-                )
-                is_valid_intent, intent_errors, intent_warnings = _validate_proposal(
-                    db=db,
-                    proposal=intent_proposal,
-                    proposal_type="input_intent",
-                    validation_context=validation_context,
-                    transaction_id=transaction_id,
-                    buffer=write_buffer,
-                )
-                if not is_valid_intent:
-                    logger.warning("InputIntentProposal validation failed: %s", intent_errors)
-                    input_intent_result = LLMStageResult(
-                        stage_name="input_intent",
-                        enabled=input_intent_result.enabled,
-                        timeout=input_intent_result.timeout,
-                        accepted=False,
-                        fallback_reason=f"validation_failed: {', '.join(intent_errors[:3])}",
-                        validation_errors=intent_errors,
-                    )
-            except Exception as e:
-                logger.warning("Failed to validate InputIntentProposal: %s", e)
+            intent_projection = input_intent_result.parsed_proposal
+            is_valid_intent = (
+                intent_projection.get("intent_type") in _VALID_INTENT_TYPES
+                and isinstance(intent_projection.get("intent"), dict)
+            )
+            if not is_valid_intent:
                 input_intent_result = LLMStageResult(
                     stage_name="input_intent",
                     enabled=input_intent_result.enabled,
                     timeout=input_intent_result.timeout,
                     accepted=False,
-                    fallback_reason=f"validation_failed: {type(e).__name__}",
+                    fallback_reason="validation_failed: malformed intent projection",
+                    validation_errors=["malformed_intent_projection"],
                 )
+            _create_validation_report(
+                db=db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                scope="proposal_input_intent",
+                is_valid=is_valid_intent,
+                errors_json=None if is_valid_intent else ["malformed_intent_projection"],
+                warnings_json=[],
+                buffer=write_buffer,
+            )
         
-        # Only an accepted, non-fallback proposal which passed validation can
-        # explicitly request clarification. Hidden/non-player-visible wording is
-        # discarded in favour of the deterministic player-facing template.
+        # Only an accepted contract whose explicit marker asks for clarification can
+        # request it. The question is bounded, must be player-visible, and still
+        # passes the narration leak check; otherwise the deterministic template is
+        # used. Hidden wording can never become the player-facing question.
+        # The clarification marker is only honoured for an *authorized* action class.
+        # Otherwise a model could answer "attack" with needs_clarification=true and
+        # convert an unsupported action into a free zero-time clarification turn,
+        # bypassing the refusal semantics of plan section 3.6.
+        _clarification_intent_type = normalize_production_action_type(
+            (input_intent_result.parsed_proposal or {}).get("intent_type") or ""
+        )
         if (
             input_intent_result.accepted
             and input_intent_result.parsed_proposal
-            and intent_proposal is not None
-            and intent_proposal.needs_clarification
+            and input_intent_result.parsed_proposal.get("needs_clarification") is True
+            and _clarification_intent_type in AUTHORIZED_PLAYER_ACTIONS
         ):
-            proposed_question = intent_proposal.clarification_question
-            if intent_proposal.visibility != "player_visible":
+            proposed_question = input_intent_result.parsed_proposal.get(
+                "clarification_question"
+            )
+            if input_intent_result.parsed_proposal.get("visibility", "player_visible") != "player_visible":
                 proposed_question = None
             if proposed_question:
                 proposed_question = proposed_question.strip()[:240]
@@ -3291,32 +3688,63 @@ def execute_turn_service(
                 clarification_question=proposed_question,
             )
 
-        # Step 6: Parse player input and determine action type
-        # Use LLM intent if accepted, otherwise fall back to deterministic parser
+        # Step 6: Determine the player's action.
+        #
+        # Two sources are possible and they are handled differently on purpose:
+        #
+        # * The model produced an accepted ``PlayerIntentV2`` contract. Its
+        #   references are then authorized against this turn's committed state
+        #   (the model may only cite ids the context supplied, never a name).
+        # * The model produced nothing usable (disabled stage, timeout, contract
+        #   violation). Only then does the deterministic parser run, and it goes
+        #   through the *same* authorization chain. No target or parameter from a
+        #   rejected proposal is ever reused.
         _emit("action_resolving", "started")
         action_type = "action"
         target = None
         input_intent_metadata: Optional[Dict[str, Any]] = None
         input_intent_fallback_reason: Optional[str] = None
-        
-        if input_intent_result.accepted and input_intent_result.parsed_proposal:
-            parsed_intent = input_intent_result.parsed_proposal
-            action_type = parsed_intent.get("intent_type", "action")
-            target = parsed_intent.get("target")
-            input_intent_metadata = parsed_intent
-        else:
-            # Fallback to deterministic parser
-            action_type, target = _parse_player_input(player_input)
-            input_intent_fallback_reason = input_intent_result.fallback_reason
 
-        # The deterministic parser is authoritative exactly here: the LLM produced no
-        # accepted proposal, so a "move" with no target is an explicitly ambiguous
-        # instruction. Such a turn is a zero-time clarification turn -- it persists the
-        # input and a recoverable result and performs no game action, no world-time
-        # advance and no scheduling/NPC/memory work. When the LLM *did* accept a
-        # proposal, only its explicit marker decides (handled above), so a provider
-        # timeout/parse failure never reclassifies an otherwise-resolved action.
-        if action_type == "move" and target is None:
+        auth_context = _build_authorization_context(
+            db=db,
+            session_id=session_id,
+            world_id=_session_world_id(db, session_id, canonical_state),
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            current_location_id=current_location_id,
+            visible_npc_ids={npc["npc_id"] for npc in _get_visible_npcs(db, session_id, current_location_id)},
+        )
+
+        intent_contract: Optional[PlayerIntentV2] = None
+        if input_intent_result.accepted and input_intent_result.contract is not None:
+            intent_contract = input_intent_result.contract  # type: ignore[assignment]
+            input_intent_metadata = input_intent_result.parsed_proposal
+
+        if intent_contract is not None:
+            # An accepted contract with an explicit clarification marker is the
+            # only model-side way to ask for clarification (handled above); here it
+            # is a plain action.
+            action_type = normalize_production_action_type(intent_contract.intent.action_type)
+            authorization = authorize_player_intent(auth_context, intent_contract)
+        else:
+            deterministic_action, deterministic_target = _parse_player_input(player_input)
+            input_intent_fallback_reason = input_intent_result.fallback_reason
+            action_type = normalize_production_action_type(deterministic_action)
+            target = deterministic_target
+            authorization = authorize_deterministic_player_intent(
+                auth_context, deterministic_action, deterministic_target
+            )
+
+        input_intent_result.authorization = authorization
+
+        # A move whose target the player did not state is an explicitly ambiguous
+        # instruction: it stays a zero-time clarification turn (no game action, no
+        # world-time advance, no scheduling/NPC/memory work) rather than becoming a
+        # rejected action.
+        if (
+            action_type == "move"
+            and authorization.detail_code is ActionDetailCode.MISSING_TARGET
+        ):
             return _commit_clarification_turn(
                 db=db,
                 session_id=session_id,
@@ -3335,121 +3763,131 @@ def execute_turn_service(
                 input_intent_metadata=input_intent_metadata,
                 clarification_question=None,
             )
-        
-        # Step 7: Execute action
+
+        # Step 7: Domain adjudication. The engine decides the actual result; the
+        # model never supplies a delta, an effect, a success flag or a duration.
         movement_result: Optional[MovementResult] = None
         state_deltas: Dict[str, Any] = {}
+        player_action_resolution: Optional[ResolvedAction] = None
+        # Planned GameEvent id of a refused action, used as the delta's causal source.
+        refused_action_event_id: Optional[str] = None
         # This turn's planned quest-progression updates (empty when nothing advanced);
         # ``check_quest_progression`` fills it in plan mode and Step 14a applies it.
         quest_plan: List[QuestStatePlan] = []
-        
-        if action_type == "move" and target:
-            from_location_id = current_location_id or ""
-            
-            # Resolve target location code for validation
-            from .movement_handler import _resolve_location_code
-            resolved_target_code = _resolve_location_code(target)
-            target_location_id = resolved_target_code or target
-            
-            # Step 7a: Check scene transition blocked paths first
-            scene_transition_resolver = SceneTransitionResolver()
-            game_state_for_transition = {
-                "player_location": from_location_id,
-                "current_turn": turn_no,
-            }
-            can_move, blocked_reason = scene_transition_resolver.can_move_to(
-                from_location=from_location_id,
-                to_location=target_location_id,
-                game_state=game_state_for_transition,
-            )
-            
-            if not can_move:
-                # Scene transition blocked - plan validation report and game event;
-                # both land in the final transaction (see write_buffer.flush below).
-                _create_validation_report(
-                    db=db,
-                    transaction_id=transaction_id,
-                    session_id=session_id,
-                    turn_no=turn_no,
-                    scope="scene_transition_validation",
-                    is_valid=False,
-                    errors_json=[blocked_reason or "Movement blocked by scene"],
-                    warnings_json=[],
-                    buffer=write_buffer,
-                )
-                write_buffer.add_game_event(
-                    transaction_id=transaction_id,
-                    session_id=session_id,
-                    turn_no=turn_no,
-                    event_type="movement_blocked",
-                    actor_id="player",
-                    target_ids=[target_location_id],
-                    visibility_scope="player_visible",
-                    public_payload={
-                        "from_location_id": from_location_id,
-                        "to_location_id": target_location_id,
-                        "blocked_reason": blocked_reason,
-                    },
-                )
-                logger.warning("Scene transition blocked: %s", blocked_reason)
-                movement_result = MovementResult(
-                    success=False,
-                    blocked_reason=blocked_reason or "Movement blocked by scene",
-                    previous_location_id=from_location_id,
-                )
-            else:
-                # Step 7b: Validate movement with MovementValidator
-                from llm_rpg.models.common import ProposedAction
-                
-                movement_action = ProposedAction(
-                    action_id="turn-move",
-                    actor_id="player",
-                    action_type="move",
-                    target_ids=[target_location_id],
-                    summary=f"移动到 {target_location_id}",
-                )
-                movement_validator = MovementValidator()
-                movement_validation = movement_validator.validate_movement(
-                    action=movement_action,
-                    state=canonical_state,
-                    context=validation_context,
-                )
-                
-                if not movement_validation.is_valid:
-                    # Plan the validation failure; written in the final transaction.
-                    _create_validation_report(
+
+        if authorization.authorized:
+            action = authorization.action
+            target = action.target_location_code or action.target_npc_id or target
+            if action.handler == "player_move":
+                player_action_resolution = resolve_player_action(
+                    action,
+                    MovementResolutionContext(
                         db=db,
-                        transaction_id=transaction_id,
                         session_id=session_id,
                         turn_no=turn_no,
-                        scope="movement_validation",
-                        is_valid=False,
-                        errors_json=movement_validation.errors,
-                        warnings_json=movement_validation.warnings,
-                        buffer=write_buffer,
-                    )
-                    logger.warning("Movement validation failed: %s", movement_validation.errors)
-                    movement_result = MovementResult(
-                        success=False,
-                        blocked_reason=movement_validation.errors[0] if movement_validation.errors else "Movement validation failed",
-                        previous_location_id=from_location_id,
-                    )
-                else:
-                    # Handle movement. The location write is *planned*: it is applied
-                    # in the final write section (Step 14a) so preparation stays
-                    # write-free. Every MovementResult field is identical either way.
-                    movement_result = handle_movement(
-                        db, session_id, target, defer_location_write=True,
+                        canonical_state=canonical_state,
+                        validation_context=validation_context,
+                        current_location_id=current_location_id,
+                        defer_location_write=True,
                         planned_session_state=session_story_state_plan.session_state_overlay(),
                         planned_player_state=session_story_state_plan.player_state_overlay(),
-                    )
-            
-            if movement_result.success:
-                state_deltas["location_id"] = movement_result.new_location_id
+                    ),
+                )
+                movement_result = player_action_resolution.movement_result
+                if movement_result is not None and movement_result.success:
+                    state_deltas["location_id"] = movement_result.new_location_id
+                elif movement_result is not None:
+                    state_deltas["blocked_reason"] = movement_result.blocked_reason
+                for event in player_action_resolution.events:
+                    if event.kind is ResolvedEventKind.MOVEMENT_BLOCKED:
+                        _create_validation_report(
+                            db=db,
+                            transaction_id=transaction_id,
+                            session_id=session_id,
+                            turn_no=turn_no,
+                            scope="movement_validation",
+                            is_valid=False,
+                            errors_json=[player_action_resolution.detail_message or "Movement blocked"],
+                            warnings_json=[],
+                            buffer=write_buffer,
+                        )
             else:
-                # Blocked movement - no state mutation
-                state_deltas["blocked_reason"] = movement_result.blocked_reason
-        
+                player_action_resolution = resolve_player_action(action, None)
+        else:
+            # Recognized but unauthorized / unavailable / handlerless: the action
+            # effect is refused with the existing per-class time cost. This is not a
+            # free clarification, and the refusal is not softened into success.
+            player_action_resolution = reject_action(
+                None,
+                authorization.detail_code or ActionDetailCode.ACTION_NOT_AUTHORIZED,
+                authorization.detail_message,
+                reason=authorization.public_reason,
+            )
+            if intent_contract is not None:
+                input_intent_result.accepted = False
+                input_intent_result.fallback_reason = (
+                    f"authorization_rejected: "
+                    f"{(authorization.public_reason or ActionReasonCode.INVALID_PARAMS).value}"
+                )
+                input_intent_result.contract = None
+                input_intent_result.parsed_proposal = None
+            # Restricted audit: the refusal's *detailed* reason never leaves the
+            # server, but the refusal itself must be traceable. A refused movement
+            # keeps the existing "movement_validation" scope so the audit vocabulary
+            # and its readers are unchanged; any other refusal is recorded as an
+            # action-authorization report.
+            _create_validation_report(
+                db=db,
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                scope=(
+                    "movement_validation"
+                    if action_type == "move"
+                    else "action_authorization"
+                ),
+                target_ref_id=target if isinstance(target, str) else None,
+                is_valid=False,
+                errors_json=[str(player_action_resolution.detail_code)],
+                warnings_json=[],
+                buffer=write_buffer,
+            )
+            # A refused action is still an engine-decided outcome, so it gets its own
+            # fact event. Without it the turn's time delta would have no action to
+            # point at and would fall back to the narration presentation event, which
+            # the plan forbids.
+            refused_action_event_id = write_buffer.add_game_event(
+                transaction_id=transaction_id,
+                session_id=session_id,
+                turn_no=turn_no,
+                event_type="action_resolved",
+                actor_id="player",
+                target_ids=[target] if isinstance(target, str) else None,
+                visibility_scope="player_visible",
+                public_payload={
+                    "action_type": normalize_production_action_type(action_type),
+                    "status": "rejected",
+                },
+                result_json={
+                    "reason_code": (
+                        player_action_resolution.reason_code.value
+                        if player_action_resolution.reason_code
+                        else None
+                    ),
+                    "authorization_detail": str(player_action_resolution.detail_code),
+                },
+            )
+            logger.warning(
+                "Player action refused session=%s turn=%s detail=%s",
+                session_id,
+                turn_no,
+                player_action_resolution.detail_code,
+            )
+
+        # A refused/unavailable action is a *committed failed turn*: it keeps the
+        # existing action-class time semantics and reports the refusal as an
+        # already-happened result. It is never reported as a success.
+
         _emit("action_resolving", "completed")
         
         # Step 8: Check quest progression
@@ -3661,6 +4099,7 @@ def execute_turn_service(
             turn_event_callback=turn_event_callback,
             write_buffer=write_buffer,
             planned_quests=planned_quests,
+            deterministic_recommended_actions=deterministic_recommended_actions,
             narration_context_out=frozen_narration_context,
             narration_forbidden_info_out=frozen_narration_forbidden_info,
         )
@@ -3729,6 +4168,12 @@ def execute_turn_service(
         event = write_buffer.flushed_event_log(planned_player_turn_event.id)
         
         # Step 14b: Validate all proposals before committing
+        #
+        # Phase 2: authorization and domain adjudication already happened inside
+        # each stage, so this section is a *structural* re-check of the accepted
+        # projections plus the existing knowledge/leak validators. A failure here
+        # must not preserve an accepted stage, and a validator *exception* is a
+        # service error: it rolls the turn back instead of being logged and ignored.
         _emit("validation", "started")
         from ..models.proposals import (
             WorldTickProposal, SceneEventProposal, NPCActionProposal, NarrationProposal,
@@ -3740,82 +4185,55 @@ def execute_turn_service(
                 continue
             
             if stage_result.stage_name == "world":
-                try:
-                    candidate_events = [
-                        CandidateEvent(
-                            event_type=e.get("event_type", "unknown"),
-                            description=e.get("description", ""),
-                            effects=e.get("effects", {}),
-                            importance=e.get("importance", 0.5),
-                        )
-                        for e in stage_result.parsed_proposal.get("candidate_events", [])
-                    ]
-                    state_deltas_list = [
-                        StateDeltaCandidate(
-                            path=d.get("path", ""),
-                            operation=d.get("operation", "set"),
-                            value=d.get("value"),
-                        )
-                        for d in stage_result.parsed_proposal.get("state_deltas", [])
-                    ]
-                    world_proposal = WorldTickProposal(
-                        time_description=stage_result.parsed_proposal.get("time_description", ""),
-                        candidate_events=candidate_events,
-                        state_deltas=state_deltas_list,
-                        audit=ProposalAuditMetadata(
-                            proposal_type=ProposalType.WORLD_TICK,
-                            source_engine=ProposalSource.WORLD_ENGINE,
-                        ),
-                    )
-                    is_valid, errors, warnings = _validate_proposal(
-                        db=db,
-                        proposal=world_proposal,
-                        proposal_type="world_tick",
-                        validation_context=validation_context,
-                        transaction_id=transaction_id,
-                    )
-                    if not is_valid:
-                        logger.warning("WorldTickProposal validation failed: %s", errors)
-                        stage_result.accepted = False
-                        stage_result.validation_errors = errors
-                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
-                except Exception as e:
-                    logger.warning("Failed to validate WorldTickProposal: %s", e)
+                world_proposal = WorldTickProposal(
+                    time_description="",
+                    candidate_events=[],
+                    state_deltas=[],
+                    audit=ProposalAuditMetadata(
+                        proposal_type=ProposalType.WORLD_TICK,
+                        source_engine=ProposalSource.WORLD_ENGINE,
+                    ),
+                )
+                is_valid, errors, warnings = _validate_proposal(
+                    db=db,
+                    proposal=world_proposal,
+                    proposal_type="world_tick",
+                    validation_context=validation_context,
+                    transaction_id=transaction_id,
+                )
+                if not is_valid:
+                    # A reference-only world proposal can legitimately carry no
+                    # candidates; only a structural failure rejects the stage.
+                    logger.warning("World-stage projection validation failed: %s", errors)
+                    stage_result.accepted = False
+                    stage_result.validation_errors = errors
+                    stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
                     
             elif stage_result.stage_name == "scene":
-                try:
-                    scene_id = stage_result.parsed_proposal.get("scene_id", "unknown")
-                    candidate_events = [
-                        CandidateEvent(
-                            event_type=e.get("event_type", "unknown"),
-                            description=e.get("description", ""),
-                        )
-                        for e in stage_result.parsed_proposal.get("candidate_events", [])
-                    ]
-                    scene_proposal = SceneEventProposal(
-                        scene_id=scene_id,
-                        scene_name=stage_result.parsed_proposal.get("scene_name"),
-                        candidate_events=candidate_events,
-                        recommended_actions=stage_result.parsed_proposal.get("recommended_actions", []),
-                        audit=ProposalAuditMetadata(
-                            proposal_type=ProposalType.SCENE_EVENT,
-                            source_engine=ProposalSource.SCENE_ENGINE,
-                        ),
-                    )
-                    is_valid, errors, warnings = _validate_proposal(
-                        db=db,
-                        proposal=scene_proposal,
-                        proposal_type="scene_event",
-                        validation_context=validation_context,
-                        transaction_id=transaction_id,
-                    )
-                    if not is_valid:
-                        logger.warning("SceneEventProposal validation failed: %s", errors)
-                        stage_result.accepted = False
-                        stage_result.validation_errors = errors
-                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
-                except Exception as e:
-                    logger.warning("Failed to validate SceneEventProposal: %s", e)
+                scene_id = current_location_id or "unknown"
+                scene_proposal = SceneEventProposal(
+                    scene_id=scene_id,
+                    candidate_events=[],
+                    recommended_actions=list(
+                        stage_result.parsed_proposal.get("recommended_actions", [])
+                    ),
+                    audit=ProposalAuditMetadata(
+                        proposal_type=ProposalType.SCENE_EVENT,
+                        source_engine=ProposalSource.SCENE_ENGINE,
+                    ),
+                )
+                is_valid, errors, warnings = _validate_proposal(
+                    db=db,
+                    proposal=scene_proposal,
+                    proposal_type="scene_event",
+                    validation_context=validation_context,
+                    transaction_id=transaction_id,
+                )
+                if not is_valid:
+                    logger.warning("Scene-stage projection validation failed: %s", errors)
+                    stage_result.accepted = False
+                    stage_result.validation_errors = errors
+                    stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
                     
             elif stage_result.stage_name == "npc":
                 npc_reactions = stage_result.parsed_proposal.get("npc_reactions", [])
@@ -3823,120 +4241,141 @@ def execute_turn_service(
                 for reaction in npc_reactions:
                     if not reaction.get("accepted"):
                         continue
-                    try:
-                        npc_proposal = NPCActionProposal(
-                            npc_id=reaction.get("npc_id", "unknown"),
-                            npc_name=reaction.get("npc_name"),
-                            action_type=reaction.get("action_type", "idle"),
-                            summary=reaction.get("summary", ""),
-                            visible_motivation=reaction.get("visible_motivation", ""),
-                            audit=ProposalAuditMetadata(
-                                proposal_type=ProposalType.NPC_ACTION,
-                                source_engine=ProposalSource.NPC_ENGINE,
-                            ),
-                        )
-                        
-                        npc_id = reaction.get("npc_id", "unknown")
-                        knowledge = "\n".join(
-                            part for part in [
-                                reaction.get("summary", ""),
-                                reaction.get("visible_motivation", ""),
-                            ]
-                            if part
-                        )
-                        npc_knowledge_validation = npc_knowledge_validator.validate_knowledge(
-                            npc_id=npc_id,
-                            knowledge=knowledge,
-                            state=canonical_state,
-                            context=validation_context,
-                        )
-                        
-                        if not npc_knowledge_validation.is_valid:
-                            _create_validation_report(
-                                db=db,
-                                transaction_id=transaction_id,
-                                session_id=session_id,
-                                turn_no=turn_no,
-                                scope="npc_knowledge_validation",
-                                target_ref_id=npc_id,
-                                is_valid=False,
-                                errors_json=npc_knowledge_validation.errors,
-                                warnings_json=npc_knowledge_validation.warnings,
-                            )
-                            logger.warning("NPC knowledge validation failed for %s: %s", npc_id, npc_knowledge_validation.errors)
-                            reaction["accepted"] = False
-                            reaction["fallback_reason"] = f"npc_knowledge_validation_failed: {', '.join(npc_knowledge_validation.errors[:3])}"
-                            continue
-                        
-                        is_valid, errors, warnings = _validate_proposal(
-                            db=db,
-                            proposal=npc_proposal,
-                            proposal_type="npc_action",
-                            validation_context=validation_context,
-                            transaction_id=transaction_id,
-                        )
-                        if not is_valid:
-                            logger.warning("NPCActionProposal validation failed for %s: %s", reaction.get("npc_id"), errors)
-                            reaction["accepted"] = False
-                            reaction["fallback_reason"] = f"validation_failed: {', '.join(errors[:3])}"
-                    except Exception as e:
-                        logger.warning("Failed to validate NPCActionProposal: %s", e)
-                        
-            elif stage_result.stage_name == "narration":
-                narration_leak_validator = NarrationLeakValidator()
-                try:
-                    narration_text = stage_result.parsed_proposal.get("text", "")
-                    narration_proposal = NarrationProposal(
-                        text=narration_text,
+                    npc_id = reaction.get("npc_id", "unknown")
+                    npc_proposal = NPCActionProposal(
+                        npc_id=npc_id,
+                        npc_name=reaction.get("npc_name"),
+                        action_type=reaction.get("action_type", "idle"),
+                        summary=reaction.get("summary", ""),
+                        visible_motivation=reaction.get("visible_motivation", ""),
                         audit=ProposalAuditMetadata(
-                            proposal_type=ProposalType.NARRATION,
-                            source_engine=ProposalSource.NARRATION_ENGINE,
+                            proposal_type=ProposalType.NPC_ACTION,
+                            source_engine=ProposalSource.NPC_ENGINE,
                         ),
                     )
                     
-                    forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
-                    narration_leak_validation = narration_leak_validator.validate_narration(
-                        text=narration_text,
-                        forbidden_info=forbidden_patterns,
+                    knowledge = "\n".join(
+                        part for part in [
+                            reaction.get("utterance", ""),
+                            reaction.get("summary", ""),
+                            reaction.get("visible_motivation", ""),
+                        ]
+                        if part
+                    )
+                    # Canonical NPC identity, not the session-state row id: the
+                    # validator reads ``CanonicalState.npc_states``, which is keyed
+                    # by the NPC's canonical key.
+                    canonical_npc_id = reaction.get("npc_canonical_id") or npc_id
+                    npc_knowledge_validation = npc_knowledge_validator.validate_knowledge(
+                        npc_id=canonical_npc_id,
+                        knowledge=knowledge,
                         state=canonical_state,
                         context=validation_context,
-                        db=db,
-                        session_id=session_id,
                     )
                     
-                    if not narration_leak_validation.is_valid:
+                    if not npc_knowledge_validation.is_valid:
+                        # The NPC text may not carry knowledge the NPC cannot have.
+                        # The action itself stays adjudicated, but the text is
+                        # dropped and the reaction is no longer accepted, so it can
+                        # never become a fact or a cognition source.
                         _create_validation_report(
                             db=db,
                             transaction_id=transaction_id,
                             session_id=session_id,
                             turn_no=turn_no,
-                            scope="narration_leak_validation",
+                            scope="npc_knowledge_validation",
+                            target_ref_id=canonical_npc_id,
                             is_valid=False,
-                            errors_json=narration_leak_validation.errors,
-                            warnings_json=narration_leak_validation.warnings,
+                            errors_json=npc_knowledge_validation.errors,
+                            warnings_json=npc_knowledge_validation.warnings,
                         )
-                        logger.warning("Narration leak validation failed: %s", narration_leak_validation.errors)
-                        stage_result.accepted = False
-                        stage_result.validation_errors = narration_leak_validation.errors
-                        stage_result.fallback_reason = f"leak_detected: {', '.join(narration_leak_validation.errors[:3])}"
+                        logger.warning(
+                            "NPC knowledge validation failed for %s: %s",
+                            canonical_npc_id,
+                            npc_knowledge_validation.errors,
+                        )
+                        reaction["accepted"] = False
+                        reaction["summary"] = ""
+                        reaction["visible_motivation"] = ""
+                        reaction["utterance"] = None
+                        reaction["fallback_reason"] = (
+                            "npc_knowledge_validation_failed: "
+                            f"{', '.join(npc_knowledge_validation.errors[:3])}"
+                        )
+                        continue
                     
                     is_valid, errors, warnings = _validate_proposal(
                         db=db,
-                        proposal=narration_proposal,
-                        proposal_type="narration",
+                        proposal=npc_proposal,
+                        proposal_type="npc_action",
                         validation_context=validation_context,
                         transaction_id=transaction_id,
                     )
                     if not is_valid:
-                        logger.warning("NarrationProposal validation failed: %s", errors)
-                        stage_result.accepted = False
-                        stage_result.validation_errors = errors
-                        stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
-                except Exception as e:
-                    logger.warning("Failed to validate NarrationProposal: %s", e)
+                        logger.warning(
+                            "NPC projection validation failed for %s: %s", npc_id, errors
+                        )
+                        reaction["accepted"] = False
+                        reaction["fallback_reason"] = f"validation_failed: {', '.join(errors[:3])}"
+                        
+            elif stage_result.stage_name == "narration":
+                narration_leak_validator = NarrationLeakValidator()
+                narration_text = stage_result.parsed_proposal.get("text", "")
+                narration_proposal = NarrationProposal(
+                    text=narration_text,
+                    audit=ProposalAuditMetadata(
+                        proposal_type=ProposalType.NARRATION,
+                        source_engine=ProposalSource.NARRATION_ENGINE,
+                    ),
+                )
+                
+                forbidden_patterns = ["隐藏身份", "真实身份", "hidden_identity", "secret_identity"]
+                narration_leak_validation = narration_leak_validator.validate_narration(
+                    text=narration_text,
+                    forbidden_info=forbidden_patterns,
+                    state=canonical_state,
+                    context=validation_context,
+                    db=db,
+                    session_id=session_id,
+                )
+                
+                if not narration_leak_validation.is_valid:
+                    _create_validation_report(
+                        db=db,
+                        transaction_id=transaction_id,
+                        session_id=session_id,
+                        turn_no=turn_no,
+                        scope="narration_leak_validation",
+                        is_valid=False,
+                        errors_json=narration_leak_validation.errors,
+                        warnings_json=narration_leak_validation.warnings,
+                    )
+                    logger.warning("Narration leak validation failed: %s", narration_leak_validation.errors)
+                    stage_result.accepted = False
+                    stage_result.validation_errors = narration_leak_validation.errors
+                    stage_result.fallback_reason = f"leak_detected: {', '.join(narration_leak_validation.errors[:3])}"
+                
+                is_valid, errors, warnings = _validate_proposal(
+                    db=db,
+                    proposal=narration_proposal,
+                    proposal_type="narration",
+                    validation_context=validation_context,
+                    transaction_id=transaction_id,
+                )
+                if not is_valid:
+                    logger.warning("Narration proposal validation failed: %s", errors)
+                    stage_result.accepted = False
+                    stage_result.validation_errors = errors
+                    stage_result.fallback_reason = f"validation_failed: {', '.join(errors[:3])}"
         _emit("validation", "completed")
         
-        # Step 15: Determine final recommended actions, scene summary, NPC reactions, and world progression
+        # Step 15: Determine final recommended actions, scene reference, NPC reactions
+        # and the world-stage reference.
+        #
+        # Phase 2: these are *reference* projections, not facts. The world stage may
+        # only point at events the engine already decided, and the scene stage may
+        # only select from the engine's legal recommended actions, so an accepted
+        # stage here can never invent world content.
         final_recommended_actions = deterministic_recommended_actions
         scene_event_summary: Optional[Dict[str, Any]] = None
         scene_fallback_reason: Optional[str] = None
@@ -3944,23 +4383,30 @@ def execute_turn_service(
         npc_fallback_reason: Optional[str] = None
         world_progression: Optional[Dict[str, Any]] = None
         world_fallback_reason: Optional[str] = None
+        world_reference: Optional[ResolvedAction] = None
+        scene_reference: Optional[ResolvedAction] = None
         
         for stage_result in llm_stage_results:
             if stage_result.stage_name == "world":
                 if stage_result.accepted and stage_result.parsed_proposal:
                     world_progression = stage_result.parsed_proposal
+                    world_reference = stage_result.resolution
                 else:
                     world_fallback_reason = stage_result.fallback_reason
             elif stage_result.stage_name == "scene":
                 if stage_result.accepted and stage_result.parsed_proposal:
-                    scene_recommended = stage_result.parsed_proposal.get("recommended_actions", [])
-                    if scene_recommended and isinstance(scene_recommended, list):
-                        final_recommended_actions = scene_recommended[:4]
+                    selected_actions = stage_result.parsed_proposal.get("recommended_actions", [])
+                    if selected_actions and isinstance(selected_actions, list):
+                        final_recommended_actions = selected_actions[:4]
                     scene_event_summary = {
-                        "scene_id": stage_result.parsed_proposal.get("scene_id"),
-                        "scene_name": stage_result.parsed_proposal.get("scene_name"),
-                        "candidate_events": stage_result.parsed_proposal.get("candidate_events", []),
+                        "scene_id": current_location_id,
+                        "contract_version": 2,
+                        "referenced_event_ids": list(
+                            stage_result.parsed_proposal.get("referenced_event_ids", [])
+                        ),
+                        "display_hint": stage_result.parsed_proposal.get("display_hint"),
                     }
+                    scene_reference = stage_result.resolution
                 else:
                     scene_fallback_reason = stage_result.fallback_reason
             elif stage_result.stage_name == "npc":
@@ -3969,31 +4415,35 @@ def execute_turn_service(
                 else:
                     npc_fallback_reason = stage_result.fallback_reason
 
-        # Step 15b: Validate world-stage time advice before scheduled-event settlement.
+        # Step 15b: The world stage may advise time, and the advice is recorded as
+        # explicitly *not* adopted: world time is adjudicated once, before the stage,
+        # from the action class alone. A model-supplied duration never settles time.
+        # The production wire carries no time field at all, so this path only fires
+        # for an internally injected stage result and stays a pure audit record.
         _world_stage_result = next(
             (sr for sr in llm_stage_results if sr.stage_name == "world" and sr.accepted),
             None,
         )
         if _world_stage_result is not None:
-            _refined_minutes = _resolve_elapsed_minutes(
+            _advised_minutes = _resolve_elapsed_minutes(
                 action_type=action_type,
                 intent_result=input_intent_result,
                 world_result=_world_stage_result,
             )
-            if _refined_minutes != _validator_result.accepted_elapsed_minutes:
+            if _advised_minutes != _validator_result.accepted_elapsed_minutes:
+                _advised_category = _resolved_category
                 _world_cat = getattr(_world_stage_result, "parsed_proposal", {})
-                _refined_category = _resolved_category
                 if isinstance(_world_cat, dict) and _world_cat.get("time_category"):
-                    _refined_category = _world_cat["time_category"]
-                _refined_validator_result = _validator.validate(TimeAdvanceProposal(
-                    elapsed_minutes=_refined_minutes,
-                    time_category=_refined_category,
+                    _advised_category = _world_cat["time_category"]
+                _advised_validator_result = _validator.validate(TimeAdvanceProposal(
+                    elapsed_minutes=_advised_minutes,
+                    time_category=_advised_category,
                 ))
                 time_advance_result["world_stage_suggestion"] = {
-                    "original_elapsed_minutes": _refined_validator_result.original_elapsed_minutes,
-                    "validated_elapsed_minutes": _refined_validator_result.accepted_elapsed_minutes,
-                    "category": _refined_validator_result.category,
-                    "adjusted": _refined_validator_result.adjusted,
+                    "original_elapsed_minutes": _advised_validator_result.original_elapsed_minutes,
+                    "validated_elapsed_minutes": _advised_validator_result.accepted_elapsed_minutes,
+                    "category": _advised_validator_result.category,
+                    "adjusted": _advised_validator_result.adjusted,
                     "adopted": False,
                     "reason": "rejected_after_adjudication",
                 }
@@ -4060,77 +4510,139 @@ def execute_turn_service(
         # stage succeeds and the presentation CAS accepts its generation.
         final_narration = narration
         
-        # Step 16b: Create game_events for world_tick, scene, NPC, and narration
-        if world_progression:
-            candidate_events = world_progression.get("candidate_events", [])
-            for i, world_event in enumerate(candidate_events[:3]):
+        # Step 16b: Persist the engine's adjudicated fact events.
+        #
+        # Only events the domain resolution produced get a row. The previous
+        # behaviour — turning model candidate events into world/scene fact events —
+        # is gone: a world/scene proposal may only *reference* engine results, so a
+        # model description can never be promoted into a committed fact.
+        player_action_event_id: Optional[str] = refused_action_event_id
+        if player_action_resolution is not None:
+            for engine_event in player_action_resolution.events:
+                if engine_event.game_event_type is None:
+                    continue
+                created_id = _create_game_event(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type=engine_event.game_event_type,
+                    actor_id=engine_event.actor_id,
+                    target_ids=list(engine_event.target_ids) or None,
+                    visibility_scope=engine_event.visibility_scope,
+                    public_payload=engine_event.public_payload,
+                    private_payload=engine_event.private_payload,
+                    result_json=engine_event.result_json,
+                )
+                if engine_event.is_action_cause and created_id is not None:
+                    player_action_event_id = created_id
+        
+        if world_reference is not None:
+            for engine_event in world_reference.events:
                 _create_game_event(
                     db=db,
                     transaction_id=transaction_id,
                     session_id=session_id,
                     turn_no=turn_no,
-                    event_type="world_tick",
-                    actor_id="world_engine",
-                    target_ids=None,
-                    visibility_scope=world_event.get("visibility", "player_visible"),
-                    public_payload={
-                        "event_type": world_event.get("event_type"),
-                        "description": world_event.get("description"),
-                        "importance": world_event.get("importance", 0.5),
-                    },
-                    result_json={"effects": world_event.get("effects", {})},
+                    event_type=engine_event.game_event_type or "world_tick",
+                    actor_id=engine_event.actor_id,
+                    target_ids=list(engine_event.target_ids) or None,
+                    visibility_scope=engine_event.visibility_scope,
+                    public_payload=engine_event.public_payload,
+                    private_payload=engine_event.private_payload,
+                    result_json=engine_event.result_json,
                 )
         
-        if scene_event_summary:
-            _create_game_event(
-                db=db,
-                transaction_id=transaction_id,
-                session_id=session_id,
-                turn_no=turn_no,
-                event_type="scene",
-                actor_id="scene_engine",
-                target_ids=[scene_event_summary.get("scene_id")] if scene_event_summary.get("scene_id") else None,
-                visibility_scope="player_visible",
-                public_payload={
-                    "scene_id": scene_event_summary.get("scene_id"),
-                    "scene_name": scene_event_summary.get("scene_name"),
-                    "candidate_events": scene_event_summary.get("candidate_events", []),
-                },
-                result_json={"fallback_reason": scene_fallback_reason},
-            )
+        if scene_reference is not None:
+            for engine_event in scene_reference.events:
+                _create_game_event(
+                    db=db,
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type=engine_event.game_event_type or "scene",
+                    actor_id=engine_event.actor_id,
+                    target_ids=list(engine_event.target_ids) or None,
+                    visibility_scope=engine_event.visibility_scope,
+                    public_payload=engine_event.public_payload,
+                    private_payload=engine_event.private_payload,
+                    result_json=engine_event.result_json,
+                )
         
+        # GameEvent ids of this turn's npc_decision rows. These are used only for
+        # the delta-causality audit; memory rows reference the EventLog id.
+        npc_event_ids: Dict[str, str] = {}
         for npc_reaction in npc_reactions_for_json:
             npc_id = npc_reaction.get("npc_id")
             npc_name = npc_reaction.get("npc_name")
             action_type_npc = npc_reaction.get("action_type")
             summary = npc_reaction.get("summary")
             visible_to_player = npc_reaction.get("visible_to_player", True)
+            accepted = bool(npc_reaction.get("accepted"))
             
-            _create_game_event(
+            if accepted:
+                # An accepted NPC action has an engine adjudication; it carries the
+                # fact row. A refused/fallen-back proposal is recorded as a decision
+                # audit with accepted=False and never as an NPC fact.
+                npc_event = ResolvedEvent(
+                    kind=ResolvedEventKind.NPC_OBSERVE,
+                    actor_id=npc_id or "unknown",
+                    action_type=action_type_npc or "idle",
+                    game_event_type="npc_decision",
+                    target_ids=("player",) if visible_to_player else (),
+                    visibility_scope="player_visible" if visible_to_player else "hidden",
+                    public_payload={
+                        "npc_name": npc_name,
+                        "action_type": action_type_npc,
+                        "summary": summary,
+                        "utterance": npc_reaction.get("utterance"),
+                    } if visible_to_player else None,
+                    private_payload={
+                        "npc_name": npc_name,
+                        "action_type": action_type_npc,
+                        "summary": summary,
+                        "visible_motivation": npc_reaction.get("visible_motivation"),
+                    } if not visible_to_player else None,
+                    result_json={
+                        "physical_effect": False,
+                        "used_memory_ids": list(npc_reaction.get("used_memory_ids", []) or []),
+                    },
+                )
+            else:
+                npc_event = ResolvedEvent(
+                    kind=ResolvedEventKind.NPC_IDLE,
+                    actor_id=npc_id or "unknown",
+                    action_type="idle",
+                    game_event_type="npc_decision",
+                    target_ids=(),
+                    visibility_scope="hidden",
+                    private_payload={
+                        "npc_name": npc_name,
+                        "action_type": "idle",
+                        "summary": None,
+                    },
+                    result_json={
+                        "accepted": False,
+                        "fallback_reason": npc_reaction.get("fallback_reason"),
+                        "authorization_detail": npc_reaction.get("authorization_detail"),
+                    },
+                )
+            
+            created_npc_event_id = _create_game_event(
                 db=db,
                 transaction_id=transaction_id,
                 session_id=session_id,
                 turn_no=turn_no,
-                event_type="npc_decision",
-                actor_id=npc_id,
-                target_ids=["player"] if visible_to_player else None,
-                visibility_scope="player_visible" if visible_to_player else "hidden",
-                public_payload={
-                    "npc_name": npc_name,
-                    "action_type": action_type_npc,
-                    "summary": summary,
-                } if visible_to_player else None,
-                private_payload={
-                    "npc_name": npc_name,
-                    "action_type": action_type_npc,
-                    "summary": summary,
-                    "visible_motivation": npc_reaction.get("visible_motivation"),
-                } if not visible_to_player else None,
-                result_json={
-                    "accepted": npc_reaction.get("accepted"),
-                    "fallback_reason": npc_reaction.get("fallback_reason"),
-                },
+                event_type=npc_event.game_event_type or "npc_decision",
+                actor_id=npc_event.actor_id,
+                target_ids=list(npc_event.target_ids) or None,
+                visibility_scope=npc_event.visibility_scope,
+                public_payload=npc_event.public_payload,
+                private_payload=npc_event.private_payload,
+                result_json=npc_event.result_json,
             )
+            if created_npc_event_id is not None and npc_id:
+                npc_event_ids[npc_id] = created_npc_event_id
         
         narration_event_id = _create_game_event(
             db=db,
@@ -4148,10 +4660,16 @@ def execute_turn_service(
             result_json={
                 "world_time": world_time,
                 "location_id": current_location_id,
+                "presentation_only": True,
             },
         )
         
-        # Step 16c: Create state_delta records for state changes
+        # Step 16c: Create state_delta records for the engine's adjudicated changes.
+        #
+        # The delta's causal source is the engine's *action* event, not the
+        # narration presentation event: a delta must point at the real reason a
+        # state changed. The narration event exists only for presentation and sits
+        # on the same transaction, so it can never be mistaken for the cause.
         state_deltas_created = _create_state_deltas_for_turn(
             db=db,
             transaction_id=transaction_id,
@@ -4165,7 +4683,7 @@ def execute_turn_service(
             player_state_after=player_state,
             npc_states_before=None,
             npc_states_after=None,
-            source_event_id=narration_event_id,
+            source_event_id=player_action_event_id or narration_event_id,
         )
         
         # Step 16d: Create llm_stage_result and validation_report records
@@ -4178,7 +4696,24 @@ def execute_turn_service(
             llm_stage_results=all_llm_stage_results,
         )
         
-        # Step 17: Update result_json with LLM stage results, scene summary, and NPC reactions
+        # Step 17: Update result_json with the action-resolution summary, LLM stage
+        # results, the scene reference and NPC reactions.
+        # ``fallback_used`` describes the *action resolution*: True when the
+        # player's action was not derived from an accepted production contract (a
+        # model outage, a contract-incompatible answer, or a refused proposal whose
+        # effect the deterministic path then re-derived). Individual stage fallbacks
+        # are recorded per stage in ``llm_stages`` instead.
+        action_resolution_summary = _build_action_resolution_summary(
+            action_type=action_type,
+            resolution=player_action_resolution,
+            authorization=authorization,
+            fallback_used=intent_contract is None,
+            reason_override=_action_reason_override(
+                resolution=player_action_resolution,
+                intent_contract=intent_contract,
+                input_intent_result=input_intent_result,
+            ),
+        )
         llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
         input_intent_stage_json = input_intent_result.to_result_json_dict()
         updated_result_json = {
@@ -4186,6 +4721,7 @@ def execute_turn_service(
             "recommended_actions": final_recommended_actions,
             "state_deltas": state_deltas,
             "action_type": action_type,
+            "action_resolution": action_resolution_summary,
             "movement_success": movement_result.success if movement_result else None,
             "new_location_id": movement_result.new_location_id if movement_result else None,
             "world_time_before": world_time_before,
@@ -4227,6 +4763,7 @@ def execute_turn_service(
                 "recovery_status": "complete",
                 "time_advance_result": time_advance_result,
                 "presentation_version": 0,
+                "action_resolution": action_resolution_summary,
             },
         }
         snapshot = updated_result_json["turn_result_v1"]
@@ -4262,8 +4799,8 @@ def execute_turn_service(
                 state_deltas=state_deltas,
                 current_location_id=current_location_id,
                 npc_reactions=npc_reactions_for_json,
-                world_progression=world_progression,
-                scene_event_summary=scene_event_summary,
+                player_resolution=player_action_resolution,
+                npc_resolutions=_npc_resolutions_for_turn(llm_stage_results),
                 canonical_state=canonical_state,
             )
             
@@ -4412,6 +4949,7 @@ def execute_turn_service(
             idempotency_key=claim_key,
             recovery_status="complete",
             presentation_version=1 if presentation_finalized else 0,
+            action_resolution=action_resolution_summary,
         )
     
     except Exception as e:
@@ -4613,6 +5151,14 @@ def _get_existing_turn_result(
         time_advance_result=snapshot.get("time_advance_result"),
         recovery_status="legacy_partial" if legacy_partial else snapshot.get("recovery_status", "complete"),
         presentation_version=snapshot.get("presentation_version", 0),
+        # A same-key recovery is read-only: it returns the saved summary verbatim.
+        # A legacy snapshot without one reports None rather than running a fresh
+        # authorization or model call to reconstruct it.
+        action_resolution=(
+            snapshot.get("action_resolution")
+            if isinstance(snapshot.get("action_resolution"), dict)
+            else None
+        ),
     )
 
 
@@ -4642,6 +5188,14 @@ def _commit_clarification_turn(
     question = clarification_question.strip()[:240] if clarification_question else ""
     if not question:
         question = "你想前往哪里？请告诉我具体地点。"
+
+    clarification_resolution = _build_action_resolution_summary(
+        action_type="move",
+        resolution=None,
+        authorization=None,
+        fallback_used=False,
+        status_override=ActionStatus.CLARIFICATION,
+    )
 
     if not heartbeat.stop() or heartbeat.lost:
         raise TurnClaimConflictError("claim_lost", session_id)
@@ -4673,6 +5227,7 @@ def _commit_clarification_turn(
         "recommended_actions": [],
         "state_deltas": {},
         "action_type": "clarification",
+        "action_resolution": clarification_resolution,
         "world_time_before": world_time_before,
         "world_time": world_time_before,
         "input_intent": input_intent_metadata,
@@ -4713,6 +5268,7 @@ def _commit_clarification_turn(
         "recovery_status": "complete",
         "time_advance_result": time_advance_result,
         "presentation_version": 0,
+        "action_resolution": clarification_resolution,
     }
     result_json["turn_result_v1"] = snapshot
     event.result_json = result_json
@@ -4758,6 +5314,7 @@ def _commit_clarification_turn(
         idempotency_key=claim_key,
         recovery_status="complete",
         presentation_version=1 if finalized else 0,
+        action_resolution=clarification_resolution,
     )
 
 
@@ -5049,6 +5606,69 @@ def _is_memory_stage_enabled(db: Session) -> bool:
     return True
 
 
+def _engine_action_record_text(action_type: str, npc_name: str) -> str:
+    """Engine-authored one-line record of an adjudicated NPC action.
+
+    Mirrors ``action_resolution._engine_action_record`` so the retrievable summary
+    never contains model-authored prose.
+    """
+    if action_type == "observe":
+        return f"{npc_name}观察了当前场景"
+    if action_type == "idle":
+        return f"{npc_name}在原地等待"
+    return f"{npc_name}执行了{action_type}动作"
+
+
+def _npc_resolutions_for_turn(
+    llm_stage_results: List[LLMStageResult],
+) -> Dict[str, ResolvedAction]:
+    """Collect the per-NPC engine adjudications from this turn's stage results."""
+    resolutions: Dict[str, ResolvedAction] = {}
+    for stage_result in llm_stage_results or ():
+        if stage_result.stage_name != "npc":
+            continue
+        if isinstance(stage_result.resolution, dict):
+            resolutions.update(stage_result.resolution)
+    return resolutions
+
+
+def _engine_memory_candidates(
+    resolution: Optional[ResolvedAction],
+    npc_name: str,
+    turn_no: int,
+    source_event_id: str,
+) -> List[Dict[str, Any]]:
+    """Build engine-authored private-memory candidates from an adjudicated NPC action.
+
+    Phase 2 boundary: the model no longer supplies ``memory_text``, ``source_id`` or
+    ``source_turn_no``. Every candidate here is derived from the engine's own
+    resolution of a committed event, so a memory can always be traced to a real
+    fact, and a quotation is tagged as overheard speech rather than knowledge.
+    """
+    if resolution is None:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    for cognition in resolution.cognition:
+        content = (cognition.content or "").strip()
+        if not content or cognition.kind is CognitionKind.FACT:
+            continue
+        candidates.append({
+            "memory_text": content,
+            "knowledge_source": (
+                "overheard_speech" if cognition.is_speech else "engine_adjudicated_event"
+            ),
+            "source_id": source_event_id,
+            "source_ref": f"event_log:{source_event_id}",
+            "source_turn_no": turn_no,
+            "salience": cognition.importance,
+            "confidence": cognition.confidence,
+            "tags": ["engine_derived", "speech" if cognition.is_speech else "observation"],
+            "memory_kind": "decision",
+        })
+    return candidates
+
+
 def _persist_turn_memories(
     db: Session,
     session_id: str,
@@ -5060,37 +5680,42 @@ def _persist_turn_memories(
     state_deltas: Optional[Dict[str, Any]] = None,
     current_location_id: Optional[str] = None,
     npc_reactions: Optional[List[Dict[str, Any]]] = None,
-    world_progression: Optional[Dict[str, Any]] = None,
-    scene_event_summary: Optional[Dict[str, Any]] = None,
+    player_resolution: Optional[ResolvedAction] = None,
+    npc_resolutions: Optional[Dict[str, ResolvedAction]] = None,
     canonical_state: Optional[CanonicalState] = None,
 ) -> Dict[str, Any]:
     """
     Persist necessary cognition within the managed turn transaction.
 
-    These summaries are retrieved as future-turn context; facts, beliefs,
-    relationships, and source-bound NPC memories likewise affect later decisions.
-    Every write below is therefore required to commit atomically with the turn.
+    These summaries are retrieved as future-turn context; facts, beliefs and
+    source-bound NPC memories likewise affect later decisions. Every write below is
+    therefore required to commit atomically with the turn.
 
-    Uses MemoryWriter to write to DB tables:
-    - memory_summaries: World Chronicle, Scene Summary, NPC Subjective Summary
-    - memory_facts: Location changes, quest progression, NPC beliefs
-    - npc_beliefs: NPC belief updates after observed events
-    - npc_relationship_memories: Relationship memory updates
-    
-    NPC subjective memory is NEVER included in player-visible output.
-    
+    Phase 2 fact/cognition boundary:
+
+    * Facts, beliefs, private memories and recall statistics are derived from the
+      engine's adjudicated resolutions of the events being committed in this same
+      unit of work. Nothing is derived from free model text.
+    * The turn summary is engine-derived. The raw player input is *not* copied into
+      it: the input is already recorded as an input/speech record, and repeating it
+      in a retrievable summary would let it read as an action-success fact.
+    * A speech act produces a "heard X say ..." belief with ``belief_type="speech"``.
+      It never becomes ``belief_type="fact"`` and never becomes a world truth.
+    * The model's ``new_memory_candidates`` are gone: private memory content is
+      authored by the engine from the adjudicated event.
+
     Returns metadata about persisted cognition. Managed write failures propagate.
     """
     from .memory_writer import MemoryWriter
     from .npc_memory import NPCMemoryManager
     from .summary import SummaryManager
     from .event_log import EventLog
-    
+
     memory_summary_repo = MemorySummaryRepository(db)
     memory_fact_repo = MemoryFactRepository(db)
     npc_belief_repo = NPCBeliefRepository(db)
     npc_relationship_repo = NPCRelationshipMemoryRepository(db)
-    
+
     result = {
         "summaries_created": 0,
         "facts_created": 0,
@@ -5099,7 +5724,7 @@ def _persist_turn_memories(
         "relationship_memories_created": 0,
         "fallback_reason": None,
     }
-    
+
     try:
         event_log = EventLog()
         npc_memory = NPCMemoryManager(
@@ -5111,7 +5736,7 @@ def _persist_turn_memories(
             session_id=session_id,
         )
         summary_manager = SummaryManager()
-        
+
         memory_writer = MemoryWriter(
             event_log=event_log,
             npc_memory_manager=npc_memory,
@@ -5122,18 +5747,20 @@ def _persist_turn_memories(
             npc_relationship_repo=npc_relationship_repo,
             session_id=session_id,
         )
-        
-        summary_parts = []
+
+        # 1. Engine-derived turn summary.
+        summary_parts: List[str] = []
         if action_type:
             summary_parts.append(f"玩家执行了{action_type}动作")
-        if player_input:
-            summary_parts.append(f"输入: {player_input[:100]}")
+        if player_resolution is not None and not player_resolution.accepted:
+            reason = player_resolution.reason_code.value if player_resolution.reason_code else "rejected"
+            summary_parts.append(f"该动作被拒绝（{reason}）")
         if movement_result and movement_result.success:
             summary_parts.append(f"移动到{movement_result.new_location_name}")
         if state_deltas and "quest_progression" in state_deltas:
             for qp in state_deltas["quest_progression"]:
                 summary_parts.append(f"任务进展: {qp.get('quest_name', '未知任务')}")
-        
+
         if summary_parts and canonical_state:
             from ..models.events import SceneEvent, EventType
             mock_events = [SceneEvent(
@@ -5144,82 +5771,84 @@ def _persist_turn_memories(
                 trigger="player_action",
                 summary="; ".join(summary_parts),
             )]
-            
+
             memory_writer.write_turn_summary(
                 turn_index=turn_no,
                 events=mock_events,
                 state=canonical_state,
             )
             result["summaries_created"] += 1
-        
-        if current_location_id and scene_event_summary and canonical_state:
-            candidate_events = scene_event_summary.get("candidate_events", [])
-            from ..models.events import SceneEvent, EventType
-            mock_events = [
-                SceneEvent(
-                    event_id=f"scene_{i}",
-                    event_type=EventType.SCENE_EVENT,
-                    turn_index=turn_no,
-                    scene_id=current_location_id,
-                    trigger=e.get("event_type", "scene"),
-                    summary=e.get("description", ""),
-                )
-                for i, e in enumerate(candidate_events[:3])
-            ]
-            
-            memory_writer.write_scene_summary(
-                scene_id=current_location_id,
-                start_turn=turn_no,
-                end_turn=turn_no,
-                events=mock_events,
-                state=canonical_state,
-            )
-            result["summaries_created"] += 1
-        
-        if state_deltas:
-            if "location_id" in state_deltas:
+
+        # 2. Facts from the player action's engine adjudication.
+        if player_resolution is not None:
+            for index, cognition in enumerate(player_resolution.cognition):
+                if cognition.kind is not CognitionKind.FACT:
+                    continue
+                fact_type = cognition.fact_type or "action"
                 memory_writer._persist_fact_to_db(
-                    fact_id=f"fact_loc_{session_id}_{turn_no}",
-                    fact_type="location_change",
-                    subject_ref="player",
-                    fact_key="current_location",
-                    fact_value=state_deltas["location_id"],
-                    confidence=1.0,
+                    fact_id=f"fact_{fact_type}_{session_id}_{turn_no}_{index}",
+                    fact_type=fact_type,
+                    subject_ref=cognition.subject_ref or "player",
+                    fact_key=cognition.fact_key or fact_type,
+                    fact_value=cognition.content,
+                    confidence=cognition.confidence,
                     source_event_id=event_id,
                 )
                 result["facts_created"] += 1
-            
-            if "quest_progression" in state_deltas:
-                for i, qp in enumerate(state_deltas["quest_progression"]):
-                    quest_name = qp.get("quest_name", "unknown")
-                    memory_writer._persist_fact_to_db(
-                        fact_id=f"fact_quest_{session_id}_{turn_no}_{i}",
-                        fact_type="quest_progress",
-                        subject_ref=quest_name,
-                        fact_key="progression",
-                        fact_value=qp.get("message", ""),
-                        confidence=0.9,
-                        source_event_id=event_id,
-                    )
-                    result["facts_created"] += 1
-        
+
+        # 3. Quest progression facts: the existing rule-driven progression, whose
+        #    values already come from the engine rather than from model text.
+        if state_deltas and "quest_progression" in state_deltas:
+            for i, qp in enumerate(state_deltas["quest_progression"]):
+                quest_name = qp.get("quest_name", "unknown")
+                memory_writer._persist_fact_to_db(
+                    fact_id=f"fact_quest_{session_id}_{turn_no}_{i}",
+                    fact_type="quest_progress",
+                    subject_ref=quest_name,
+                    fact_key="progression",
+                    fact_value=qp.get("message", ""),
+                    confidence=0.9,
+                    source_event_id=event_id,
+                )
+                result["facts_created"] += 1
+
+        # 4. NPC cognition from the adjudicated NPC resolutions.
         if npc_reactions and canonical_state:
             for reaction in npc_reactions:
-                if reaction.get("accepted") and reaction.get("npc_id"):
-                    npc_id = reaction.get("npc_id")
-                    npc_name = reaction.get("npc_name", "unknown")
-                    summary = reaction.get("summary", "")
-                    
+                if not reaction.get("accepted") or not reaction.get("npc_id"):
+                    continue
+
+                npc_id = reaction.get("npc_id")
+                npc_name = reaction.get("npc_name", "unknown")
+                npc_template_id = reaction.get("npc_template_id") or npc_id
+                summary = reaction.get("summary", "")
+                resolution = (npc_resolutions or {}).get(npc_id)
+                # ``memory_facts``/``npc_beliefs`` reference the turn's *EventLog*
+                # row (their existing FK target), while ``state_deltas`` references
+                # the engine *GameEvent*. The two id spaces are never mixed.
+                source_event_id = event_id
+
+                # The retrievable NPC summary is engine-authored: the model's
+                # ``summary`` stays a player-facing description on the event payload
+                # and is never copied into a retrievable memory record.
+                engine_summary = (
+                    _engine_action_record_text(
+                        reaction.get("action_type", "idle"), npc_name
+                    )
+                    if resolution is not None
+                    else ""
+                )
+                if engine_summary:
                     from ..models.events import NPCActionEvent, EventType
                     mock_events = [NPCActionEvent(
-                        event_id=f"npc_{npc_id}_{turn_no}",
+                        event_id=source_event_id,
                         event_type=EventType.NPC_ACTION,
                         turn_index=turn_no,
                         npc_id=npc_id,
                         action_type=reaction.get("action_type", "idle"),
-                        summary=summary,
+                        summary=engine_summary,
                     )]
-                    
+
                     memory_writer.write_npc_subjective_summary(
                         npc_id=npc_id,
                         start_turn=turn_no,
@@ -5228,118 +5857,95 @@ def _persist_turn_memories(
                         state=canonical_state,
                     )
                     result["npc_memories_created"] += 1
-                    
-                    if action_type and summary:
-                        mock_event = SceneEvent(
-                            event_id=event_id,
-                            event_type=EventType.SCENE_EVENT,
-                            turn_index=turn_no,
-                            scene_id=current_location_id or "unknown",
-                            trigger="player_action",
-                            summary=f"玩家执行了{action_type}: {summary[:100]}",
-                        )
-                        
-                        memory_writer.write_npc_belief_update(
-                            npc_id=npc_id,
-                            observed_event=mock_event,
-                            current_turn=turn_no,
-                            belief_type="fact",
-                            confidence=0.8,
-                        )
-                        result["npc_beliefs_created"] += 1
-                    
-                    # P10-C Phase 6: Post-commit source-bound memory writes
-                    # for accepted major NPC proposals with new_memory_candidates
-                    npc_template_id = reaction.get("npc_template_id", npc_id)
-                    if reaction.get("new_memory_candidates"):
-                        try:
-                            from ..models.proposals import NPCActionProposal, ProposalAuditMetadata, ProposalType, ProposalSource
-                            write_proposal = NPCActionProposal(
-                                npc_id=npc_id,
-                                action_type=reaction.get("action_type", "idle"),
-                                summary=summary,
-                                new_memory_candidates=reaction["new_memory_candidates"],
-                                used_memory_ids=reaction.get("used_memory_ids", []),
-                                audit=ProposalAuditMetadata(
-                                    proposal_type=ProposalType.NPC_ACTION,
-                                    source_engine=ProposalSource.NPC_ENGINE,
-                                ),
-                            )
-                            write_result = write_post_commit_memories(
-                                db=db,
-                                session_id=session_id,
-                                npc_template_id=npc_template_id,
-                                proposal=write_proposal,
-                                committed_event_ids=[event_id],
-                                source_turn_no=turn_no,
-                            )
-                            result["p10c_private_memories_written"] = (
-                                result.get("p10c_private_memories_written", 0)
-                                + len(write_result.written_ids)
-                            )
-                            if write_result.errors:
-                                logger.warning(
-                                    "P10-C post-commit memory errors session=%s npc=%s: %s",
-                                    session_id, npc_id, write_result.errors,
-                                )
-                        except Exception as pcm_err:
-                            if is_managed(db):
-                                raise
-                            logger.warning(
-                                "P10-C private-memory write failed session=%s npc=%s: %s",
-                                session_id, npc_id, pcm_err,
-                            )
 
-                    # P10-C: Update recall stats for used memories after commit
-                    # (retrieval no longer auto-commits recall stats in hot path)
-                    used_mem_ids = reaction.get("used_memory_ids")
-                    if used_mem_ids:
-                        try:
-                            updated_count = update_recall_stats_post_commit(
-                                db=db,
-                                session_id=session_id,
-                                npc_template_id=npc_template_id,
-                                used_memory_ids=used_mem_ids,
-                                current_turn=turn_no,
-                            )
-                            if updated_count > 0:
-                                result["p10c_recall_stats_updated"] = (
-                                    result.get("p10c_recall_stats_updated", 0)
-                                    + updated_count
-                                )
-                        except Exception as recall_err:
-                            if is_managed(db):
-                                raise
-                            logger.warning(
-                                "P10-C recall stats update failed session=%s npc=%s: %s",
-                                session_id, npc_id, recall_err,
-                            )
-        
-        if world_progression:
-            candidate_events = world_progression.get("candidate_events", [])
-            for i, event in enumerate(candidate_events[:3]):
-                event_type = event.get("event_type", "unknown")
-                description = event.get("description", "")
-                if description:
-                    memory_writer._persist_fact_to_db(
-                        fact_id=f"fact_world_{session_id}_{turn_no}_{i}",
-                        fact_type="world_event",
-                        subject_ref="world",
-                        fact_key=event_type,
-                        fact_value=description[:200],
-                        confidence=event.get("importance", 0.5),
-                        source_event_id=event_id,
+                for cognition in (resolution.cognition if resolution else []):
+                    if cognition.kind is not CognitionKind.BELIEF:
+                        continue
+                    from ..models.events import SceneEvent, EventType
+                    observed = SceneEvent(
+                        event_id=source_event_id,
+                        event_type=EventType.SCENE_EVENT,
+                        turn_index=turn_no,
+                        scene_id=current_location_id or "unknown",
+                        trigger="npc_action",
+                        summary=cognition.content,
                     )
-                    result["facts_created"] += 1
-        
+                    memory_writer.write_npc_belief_update(
+                        npc_id=npc_id,
+                        observed_event=observed,
+                        current_turn=turn_no,
+                        belief_type=cognition.belief_type or "observation",
+                        confidence=cognition.confidence,
+                    )
+                    result["npc_beliefs_created"] += 1
+
+                # Engine-authored private memories (memory-first feature gate and
+                # major-NPC scope still apply; the content is never model text).
+                engine_candidates = _engine_memory_candidates(
+                    resolution, npc_name, turn_no, source_event_id
+                )
+                if engine_candidates:
+                    from ..models.proposals import (
+                        NPCActionProposal,
+                        ProposalAuditMetadata,
+                        ProposalType,
+                        ProposalSource,
+                    )
+                    write_proposal = NPCActionProposal(
+                        npc_id=npc_id,
+                        action_type=reaction.get("action_type", "idle"),
+                        summary=summary,
+                        new_memory_candidates=engine_candidates,
+                        used_memory_ids=list(reaction.get("used_memory_ids", []) or []),
+                        audit=ProposalAuditMetadata(
+                            proposal_type=ProposalType.NPC_ACTION,
+                            source_engine=ProposalSource.NPC_ENGINE,
+                        ),
+                    )
+                    write_result = write_post_commit_memories(
+                        db=db,
+                        session_id=session_id,
+                        npc_template_id=npc_template_id,
+                        proposal=write_proposal,
+                        committed_event_ids=[source_event_id],
+                        source_turn_no=turn_no,
+                    )
+                    result["p10c_private_memories_written"] = (
+                        result.get("p10c_private_memories_written", 0)
+                        + len(write_result.written_ids)
+                    )
+                    if write_result.errors:
+                        logger.warning(
+                            "Private-memory write errors session=%s npc=%s: %s",
+                            session_id, npc_id, write_result.errors,
+                        )
+
+                # Recall statistics for the memories this decision actually used.
+                # The id set was validated against the set supplied to this call by
+                # the authorization layer, and the check runs regardless of the
+                # memory-first toggle.
+                used_mem_ids = reaction.get("used_memory_ids")
+                if used_mem_ids:
+                    updated_count = update_recall_stats_post_commit(
+                        db=db,
+                        session_id=session_id,
+                        npc_template_id=npc_template_id,
+                        used_memory_ids=used_mem_ids,
+                        current_turn=turn_no,
+                    )
+                    if updated_count > 0:
+                        result["p10c_recall_stats_updated"] = (
+                            result.get("p10c_recall_stats_updated", 0)
+                            + updated_count
+                        )
+
     except Exception as e:
         if is_managed(db):
             raise
         logger.warning("Memory persistence failed for session %s turn %s: %s", session_id, turn_no, e)
         result["fallback_reason"] = f"memory_write_error: {str(e)[:200]}"
-    
-    return result
 
+    return result
 
 def _retrieve_memories_for_context(
     db: Session,
@@ -5572,6 +6178,11 @@ def _create_game_event(
         })
         return event.id
     except Exception as e:
+        # A fact event is a necessary write: inside the managed turn transaction a
+        # failure must propagate so the whole turn rolls back instead of leaving a
+        # committed state whose event sourcing is missing.
+        if is_managed(db):
+            raise
         logger.warning("Failed to create game_event: %s", e)
         return None
 
@@ -5615,6 +6226,10 @@ def _create_state_delta(
         })
         return delta.id
     except Exception as e:
+        # Delta audit rows are necessary writes for the same reason as fact
+        # events: a managed-turn failure must roll the turn back, not be logged.
+        if is_managed(db):
+            raise
         logger.warning("Failed to create state_delta: %s", e)
         return None
 
@@ -5773,6 +6388,10 @@ def _create_llm_stage_result(
         })
         return record.id
     except Exception as e:
+        # Necessary write inside the managed turn transaction: propagate so the turn
+        # rolls back rather than committing with a missing audit row.
+        if is_managed(db):
+            raise
         logger.warning("Failed to create llm_stage_result: %s", e)
         return None
 
@@ -5830,6 +6449,10 @@ def _create_validation_report(
         })
         return record.id
     except Exception as e:
+        # Necessary write inside the managed turn transaction: propagate so the turn
+        # rolls back rather than committing with a missing audit row.
+        if is_managed(db):
+            raise
         logger.warning("Failed to create validation_report: %s", e)
         return None
 

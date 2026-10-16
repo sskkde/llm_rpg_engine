@@ -18,6 +18,7 @@
 - **提交后旁白**：旁白模型调用发生在权威提交**之后**，只消费本回合冻结、白名单可见的上下文（含最终裁决后的时间与仍被接受的反应）；表现采用 `template → finalized` CAS，并同时定稿该回合 narration `game_event` 的表现文本。旁白生成/定稿失败保留模板，不回滚已提交事实。同键恢复为只读；历史部分状态标为 `legacy_partial`。
 - **非回合写者的锁协议**：可修改状态指纹集合的非回合写者（当前为放弃任务）在读取之前取得同一会话级 advisory 锁，顺序为「会话锁 → 读取 → 校验 → 写入 → 单次提交」，因此不能落入回合的「重验 → 提交」窗口。
 - **流式语义边界**：当前不提供逐片 SSE 续传；断开后可恢复已提交结果，但不保证从断点续发先前片段。外部 LLM 调用不承诺 exactly-once；数据库事务不能撤销已发生的外部调用。
+- **生产 LLM 权限边界（阶段二，2026-10-16）**：生产模型输出只以 `contract_version=2` 严格契约进入回合路径（递归 `extra=forbid`，仅允许去首尾空白与剥离整串代码围栏；拒绝重复键、非有限常量、尾随内容与未知字段），且**不经过宽松修复器**。模型只能引用本次上下文给出的稳定 ID；actor、session、transaction、turn、source、可见性上限与审计元数据由服务端生成。动作合法性、目标权限、实际结果与耗时由引擎裁决：`attack`/`interact`/`action`/`unknown` 及其余未授权动作明确返回 `unsupported`/无效果，不假装成功。world/scene 阶段为**引用型**（只引用本回合引擎事件、从引擎合法推荐动作中选择，不创建事实、effects 或时间变化）。模型自由文本不得成为 `memory_facts`、`npc_beliefs`（断言真相的类型）、`memory_summaries` 或事件公开载荷；话语只形成「听见某人如此声称」的 `belief_type="speech"` 记忆，不升级为世界真相。`used_memory_ids` 的权限检查不随 `NPC_MEMORY_FIRST_ENABLED` 关闭，空可用集合不允许引用任何记忆。受管事务下 `game_events`/`state_deltas`/校验报告/认知写入失败必须传播并整体回滚。`state_deltas.source_event_id` 指向引擎动作事实事件，**不指向 narration 表现事件**。公开 `action_resolution` 摘要只含四个粗粒度原因码（不泄露隐藏实体是否存在），同键恢复只读保存值，表现 CAS 不得修改它。证据见 [`../../.omo/evidence/phase2/20261016-p2-authority/`](../../.omo/evidence/phase2/20261016-p2-authority/)。
 
 ### Measured gaps and limitations
 

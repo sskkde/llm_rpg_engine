@@ -1,0 +1,16 @@
+items:
+  - id: lantern
+    name: 桥头灯笼
+    description: 守望屋门口挂着的旧灯笼，渡守夜间靠它照桥。
+    tags:
+      - tool
+    item_type: tool
+    quantity: 1
+
+  - id: herb_bundle
+    name: 药篓
+    description: 采药人随身背着的药篓，里面是刚采的草药。
+    tags:
+      - container
+    item_type: container
+    quantity: 1

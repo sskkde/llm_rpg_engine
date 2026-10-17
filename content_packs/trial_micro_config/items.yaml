@@ -1,0 +1,8 @@
+items:
+  - id: trial_token
+    name: 试炼令牌
+    description: 试炼峰阵法中唯一的令牌，先到先得。
+    tags:
+      - quest
+    item_type: quest
+    quantity: 1

@@ -1,0 +1,38 @@
+player:
+  location_id: east_bank
+  alive: true
+
+characters:
+  - id: ferryman
+    location_id: east_bank
+    alive: true
+  - id: herbalist
+    location_id: watch_house
+    alive: true
+
+items:
+  - id: lantern
+    owner: location:watch_house
+  - id: herb_bundle
+    owner: character:herbalist
+
+routes:
+  - from: east_bank
+    to: west_bank
+    open: true
+  - from: east_bank
+    to: watch_house
+    open: true
+  - from: watch_house
+    to: east_bank
+    open: true
+  - from: east_bank
+    to: bridge
+    open: true
+  - from: bridge
+    to: east_bank
+    open: true
+
+flags:
+  bridge_closed_once: false
+  bridge_reopened: false

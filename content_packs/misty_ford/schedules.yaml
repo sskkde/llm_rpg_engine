@@ -1,0 +1,17 @@
+# 有限日程：只提供候选行动与决策边界，不按表传送。
+schedules:
+  - id: ferryman_patrol
+    character_id: ferryman
+    activity: patrol
+    location_id: east_bank
+    at_tick: 2
+    window_ticks: 1
+    default_activity: false
+
+  - id: herbalist_gather
+    character_id: herbalist
+    activity: gather_herbs
+    location_id: watch_house
+    at_tick: 0
+    window_ticks: 12
+    default_activity: true

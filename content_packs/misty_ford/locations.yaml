@@ -1,0 +1,60 @@
+locations:
+  - id: east_bank
+    name: 东岸
+    description: 渡口东岸，石阶下就是通往西岸的桥头。
+    tags:
+      - safe
+      - river
+    parent_id: null
+    access_rules:
+      always_accessible: true
+
+  - id: watch_house
+    name: 守望屋
+    description: 桥头旁的旧木屋，采药人常在此整理药篓。
+    tags:
+      - safe
+      - indoor
+    parent_id: east_bank
+    access_rules:
+      always_accessible: true
+
+  - id: bridge
+    name: 石桥
+    description: 横跨雾渡的石桥，桥面湿滑，雾大时看不清对岸。
+    tags:
+      - bridge
+      - exposed
+    parent_id: east_bank
+    access_rules:
+      always_accessible: true
+
+  - id: west_bank
+    name: 西岸
+    description: 渡口西岸，对岸的山道自此向西延伸。
+    tags:
+      - safe
+      - river
+    parent_id: bridge
+    access_rules:
+      always_accessible: true
+
+routes:
+  # 桥路本身：+4 关闭、+9 重开。这是本场景被动态开闭的唯一路线。
+  - from: east_bank
+    to: west_bank
+    open: true
+    travel_ticks: 3
+    bidirectional: false
+
+  - from: east_bank
+    to: watch_house
+    open: true
+    travel_ticks: 1
+    bidirectional: true
+
+  - from: east_bank
+    to: bridge
+    open: true
+    travel_ticks: 1
+    bidirectional: true

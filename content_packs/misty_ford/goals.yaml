@@ -1,0 +1,62 @@
+# 有限计划：Goal 只在决策边界重选（schedule 到点 / 步骤完成 / 步骤失败 / 显式取消）。
+# 同优先级按稳定 id 字典序决定。
+recipes:
+  - id: cross_bridge_recipe
+    steps:
+      - action: move
+        target: west_bank
+        ticks: 3
+
+  - id: guard_bridge_recipe
+    steps:
+      - action: wait
+        ticks: 4
+
+  - id: gather_herbs_recipe
+    steps:
+      - action: wait
+        ticks: 12
+
+goals:
+  - id: cross_bridge
+    character_id: ferryman
+    priority: 80
+    description: 把行人送过桥：渡守自己先过桥查看桥况。
+    preconditions:
+      all:
+        - type: actor_alive
+          actor: ferryman
+        - type: route_open
+          from: east_bank
+          to: west_bank
+    completion:
+      all:
+        - type: actor_at_location
+          actor: ferryman
+          location: west_bank
+    recipe: cross_bridge_recipe
+    initial_status: active
+
+  - id: guard_bridge
+    character_id: ferryman
+    priority: 40
+    description: 桥不通时守在桥头等待，这是渡守的 fallback。
+    preconditions:
+      all:
+        - type: actor_alive
+          actor: ferryman
+    completion: null
+    recipe: guard_bridge_recipe
+    initial_status: inactive
+
+  - id: gather_herbs
+    character_id: herbalist
+    priority: 30
+    description: 采药人在守望屋整理药篓，不参与桥路事务。
+    preconditions:
+      all:
+        - type: actor_alive
+          actor: herbalist
+    completion: null
+    recipe: gather_herbs_recipe
+    initial_status: active

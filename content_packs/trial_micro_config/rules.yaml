@@ -1,0 +1,150 @@
+# Golden trace A：以 content_v1 配置复刻阶段三固定切片的 +2/+5/+6/+7/+8/+9 轨迹。
+#
+# 规则间定序唯一来源是 step_key 字典序（`rule:<id>@<tick>`），
+# 因此同 tick 同 phase 的 `item_contest_a` 必然先于 `item_contest_b` 结算。
+rules:
+  - id: npc_a_depart
+    name: 甲师兄动身
+    description: +2 甲师兄自广场出发前往试炼峰，预计 +5 抵达。
+    trigger:
+      type: on_time_crossed
+      due_tick: 2
+      phase: environment
+    condition:
+      all:
+        - type: actor_alive
+          actor: npc_a
+        - type: actor_at_location
+          actor: npc_a
+          location: plaza
+        - type: route_open
+          from: plaza
+          to: trial_peak
+    effects:
+      - type: npc_action_start
+        actor: npc_a
+        action: move
+        target: trial_peak
+        ticks: 3
+    fire_policy:
+      mode: once_per_instance
+    priority: 60
+
+  - id: item_contest_a
+    name: 甲师兄取令牌
+    description: +5 物品阶段甲师兄取走试炼峰上的令牌。
+    trigger:
+      type: on_time_crossed
+      due_tick: 5
+      phase: item
+    condition:
+      all:
+        - type: actor_alive
+          actor: npc_a
+        - type: actor_at_location
+          actor: npc_a
+          location: trial_peak
+        - type: item_owner_is
+          item: trial_token
+          owner: location:trial_peak
+    effects:
+      - type: item_transfer
+        item: trial_token
+        to: character:npc_a
+    fire_policy:
+      mode: once_per_instance
+    priority: 55
+
+  - id: item_contest_b
+    name: 乙师弟抢令牌
+    description: +5 同刻乙师弟也来取，但令牌已被甲师兄取走，必须明确失败且不复制实例。
+    trigger:
+      type: on_time_crossed
+      due_tick: 5
+      phase: item
+    condition:
+      all:
+        - type: actor_alive
+          actor: npc_b
+        - type: actor_at_location
+          actor: npc_b
+          location: trial_peak
+    effects:
+      - type: item_transfer
+        item: trial_token
+        to: character:npc_b
+    fire_policy:
+      mode: once_per_instance
+    priority: 55
+
+  - id: npc_b_use_token
+    name: 乙师弟试用令牌
+    description: +6 乙师弟试图使用并不属于他的令牌，得到明确的无效果失败。
+    trigger:
+      type: on_time_crossed
+      due_tick: 6
+      phase: item
+    condition:
+      all:
+        - type: actor_alive
+          actor: npc_b
+        - type: item_owner_is
+          item: trial_token
+          owner: character:npc_a
+    effects:
+      - type: item_use
+        item: trial_token
+        actor: npc_b
+    fire_policy:
+      mode: once_per_instance
+    priority: 50
+
+  - id: trial_bell
+    name: 试炼钟声
+    description: +7 峰顶钟声与阵法扰动，可感知中断，实际截断玩家持续动作。
+    trigger:
+      type: on_time_crossed
+      due_tick: 7
+      phase: environment
+    condition:
+      all:
+        - type: flag_equals
+          key: trial_interrupt_fired
+          value: false
+    effects:
+      - type: interrupt
+        kind: trial_bell
+        message: 试炼钟声自峰顶传来，阵法微微扰动。
+      - type: flag_set
+        key: trial_interrupt_fired
+        value: true
+    fire_policy:
+      mode: once_per_instance
+    priority: 70
+
+  - id: npc_b_depart
+    name: 乙师弟下山
+    description: +8 乙师弟自试炼峰出发返回广场，预计 +9 抵达。
+    trigger:
+      type: on_time_crossed
+      due_tick: 8
+      phase: npc_move
+    condition:
+      all:
+        - type: actor_alive
+          actor: npc_b
+        - type: actor_at_location
+          actor: npc_b
+          location: trial_peak
+        - type: route_open
+          from: trial_peak
+          to: plaza
+    effects:
+      - type: npc_action_start
+        actor: npc_b
+        action: move
+        target: plaza
+        ticks: 1
+    fire_policy:
+      mode: once_per_instance
+    priority: 40

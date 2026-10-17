@@ -1,0 +1,81 @@
+# 雾渡封桥：桥路按时关闭、按时重开；另有一条物品转移规则。
+#
+# 规则间定序唯一来源是 step_key 字典序（`rule:<id>@<tick>`）。
+# `close_bridge` / `reopen_bridge` 落在 environment 阶段（先于 npc_move 的到达/完成重检），
+# 这正是「先 reopen，再完成/选择」的保证。
+rules:
+  - id: close_bridge
+    name: 封桥
+    description: +4 该会话的东岸→西岸桥路关闭，只影响本会话。
+    trigger:
+      type: on_time_crossed
+      due_tick: 4
+      phase: environment
+    condition:
+      all:
+        - type: flag_equals
+          key: bridge_closed_once
+          value: false
+    effects:
+      - type: route_set_open
+        from: east_bank
+        to: west_bank
+        open: false
+      - type: flag_set
+        key: bridge_closed_once
+        value: true
+    fire_policy:
+      mode: once_per_instance
+    priority: 90
+
+  - id: reopen_bridge
+    name: 重开桥
+    description: +9 环境阶段先重开桥路，随后 NPC 的 wait 完成才会重新选择渡桥目标。
+    trigger:
+      type: on_time_crossed
+      due_tick: 9
+      phase: environment
+    condition:
+      all:
+        - type: flag_equals
+          key: bridge_closed_once
+          value: true
+        - type: flag_equals
+          key: bridge_reopened
+          value: false
+    effects:
+      - type: route_set_open
+        from: east_bank
+        to: west_bank
+        open: true
+      - type: flag_set
+        key: bridge_reopened
+        value: true
+    fire_policy:
+      mode: once_per_instance
+    priority: 90
+
+  - id: herbalist_takes_lantern
+    name: 采药人取灯笼
+    description: +6 采药人把守望屋门口的灯笼收进自己手里；这是第二个具名物品实例的 owner 变化。
+    trigger:
+      type: on_time_crossed
+      due_tick: 6
+      phase: item
+    condition:
+      all:
+        - type: actor_alive
+          actor: herbalist
+        - type: actor_at_location
+          actor: herbalist
+          location: watch_house
+        - type: item_owner_is
+          item: lantern
+          owner: location:watch_house
+    effects:
+      - type: item_transfer
+        item: lantern
+        to: character:herbalist
+    fire_policy:
+      mode: once_per_instance
+    priority: 30

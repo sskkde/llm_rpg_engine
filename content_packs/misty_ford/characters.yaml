@@ -1,0 +1,21 @@
+characters:
+  - id: ferryman
+    name: 渡守
+    description: 守着东岸桥头的老渡守，职责是把行人送过桥。
+    tags:
+      - ferry
+      - major
+    public_identity: 雾渡渡守
+    personality: 沉默守职，桥不通就守在桥头。
+    initial_location_id: east_bank
+    alive: true
+
+  - id: herbalist
+    name: 采药人
+    description: 在守望屋整理药篓的采药人，不关心桥路。
+    tags:
+      - civilian
+    public_identity: 采药人
+    personality: 只在意自己的药材。
+    initial_location_id: watch_house
+    alive: true

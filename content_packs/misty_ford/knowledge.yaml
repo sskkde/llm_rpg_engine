@@ -1,0 +1,60 @@
+# 事件派生认知：按事件发生当时的视角求观察者。
+#
+# `route_changed` 用 at_location：事件发生在 east_bank，
+# 因此只有身在东岸的渡守会记住封桥；身在守望屋的采药人（非观察者对照）不会。
+knowledge_rules:
+  - id: route_change_at_location
+    source_event_types:
+      - route_changed
+    observers: at_location
+    memory_kind: observation
+    visibility: npc_private
+    template: 东岸通往西岸的桥路状态改变了。
+
+  - id: travel_started_actor
+    source_event_types:
+      - npc_travel_started
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我自{location}出发前往{target}。
+
+  - id: travel_arrived_actor
+    source_event_types:
+      - npc_arrived
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我抵达了{location}。
+
+  - id: travel_failed_actor
+    source_event_types:
+      - npc_travel_failed
+    observers: actor
+    memory_kind: observation
+    visibility: npc_private
+    template: 我没能过桥。
+
+  - id: plan_selected_actor
+    source_event_types:
+      - plan_selected
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我决定去做{target}这件事。
+
+  - id: plan_achieved_actor
+    source_event_types:
+      - plan_achieved
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我做到了。
+
+  - id: item_acquired_actor
+    source_event_types:
+      - item_acquired
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我收起了{item}。

@@ -1,0 +1,12 @@
+schema_version: 2
+id: misty_ford
+name: 雾渡封桥
+version: 1.0.0
+description: 第二场景（纯配置）：东岸、守望屋、石桥、西岸四地，渡守与采药人两名 NPC；桥路按时关闭、到达失败、守桥 fallback、重开后重选渡桥。
+author: llm_rpg_engine
+genre: wuxia
+theme: river_crossing
+tags:
+  - wuxia
+  - content_v1
+  - golden_trace_b

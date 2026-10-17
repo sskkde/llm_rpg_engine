@@ -1,0 +1,20 @@
+characters:
+  - id: npc_a
+    name: 甲师兄
+    description: 外门执事弟子，行动果断，先取为快。
+    tags:
+      - outer_disciple
+    public_identity: 外门执事弟子
+    personality: 行动果断，先取为快。
+    initial_location_id: plaza
+    alive: true
+
+  - id: npc_b
+    name: 乙师弟
+    description: 外门新入弟子，谨慎，但总慢人一步。
+    tags:
+      - outer_disciple
+    public_identity: 外门新入弟子
+    personality: 谨慎，但总慢人一步。
+    initial_location_id: trial_peak
+    alive: true

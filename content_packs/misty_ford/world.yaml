@@ -1,0 +1,14 @@
+world:
+  id: misty_ford
+  name: 雾渡
+  description: 一条被雾笼罩的渡口，东岸与西岸之间只有一座石桥可通行。
+  tags:
+    - wuxia
+    - river
+  genre: wuxia
+  theme: river_crossing
+  lore_summary: 雾起时桥路难行；渡守守着东岸，采药人守在守望屋。
+  status: active
+  start_hour: 8
+  start_minute: 0
+  start_tick: 0

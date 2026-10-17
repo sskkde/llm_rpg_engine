@@ -1,0 +1,40 @@
+locations:
+  - id: mountain_gate
+    name: 山门
+    description: 宗门外门入口，石阶向上通往广场。
+    tags:
+      - safe
+    parent_id: null
+    access_rules:
+      always_accessible: true
+
+  - id: plaza
+    name: 广场
+    description: 外门弟子聚集的广场，可远望试炼峰。
+    tags:
+      - safe
+    parent_id: mountain_gate
+    access_rules:
+      always_accessible: true
+
+  - id: trial_peak
+    name: 试炼峰
+    description: 峰顶设有试炼阵法，令牌原本置于此处。
+    tags:
+      - safe
+    parent_id: plaza
+    access_rules:
+      always_accessible: true
+
+routes:
+  - from: mountain_gate
+    to: plaza
+    open: true
+    travel_ticks: 3
+    bidirectional: true
+
+  - from: plaza
+    to: trial_peak
+    open: true
+    travel_ticks: 3
+    bidirectional: true

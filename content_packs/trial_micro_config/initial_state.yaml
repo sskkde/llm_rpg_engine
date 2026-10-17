@@ -1,0 +1,33 @@
+player:
+  location_id: mountain_gate
+  alive: true
+
+characters:
+  - id: npc_a
+    location_id: plaza
+    alive: true
+  - id: npc_b
+    location_id: trial_peak
+    alive: true
+
+items:
+  - id: trial_token
+    owner: location:trial_peak
+
+routes:
+  - from: mountain_gate
+    to: plaza
+    open: true
+  - from: plaza
+    to: mountain_gate
+    open: true
+  - from: plaza
+    to: trial_peak
+    open: true
+  - from: trial_peak
+    to: plaza
+    open: true
+
+flags:
+  trial_interrupt_fired: false
+  npc_b_used_token: false

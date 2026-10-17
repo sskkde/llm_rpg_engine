@@ -1,0 +1,49 @@
+# 事件派生认知规则：只从已裁定的引擎事件生成，按事件发生当时的视角求观察者。
+knowledge_rules:
+  - id: travel_started_actor
+    source_event_types:
+      - npc_travel_started
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我自{location}出发前往{target}。
+
+  - id: travel_arrived_actor
+    source_event_types:
+      - npc_arrived
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我抵达了{location}。
+
+  - id: item_acquired_actor
+    source_event_types:
+      - item_acquired
+    observers: actor
+    memory_kind: action
+    visibility: npc_private
+    template: 我取得了{item}。
+
+  - id: item_take_failed_actor
+    source_event_types:
+      - item_take_failed
+    observers: actor
+    memory_kind: observation
+    visibility: npc_private
+    template: 我想取{item}，但已经晚了。
+
+  - id: item_use_failed_actor
+    source_event_types:
+      - item_use_failed
+    observers: actor
+    memory_kind: observation
+    visibility: npc_private
+    template: 我想使用{item}，但它不属于我。
+
+  - id: world_interrupt_all_alive
+    source_event_types:
+      - world_interrupt
+    observers: all_alive
+    memory_kind: observation
+    visibility: npc_private
+    template: 试炼钟声响起，峰顶阵法出现扰动。

@@ -1,0 +1,14 @@
+world:
+  id: trial_micro
+  name: 试炼峰时间纵切片
+  description: 山门、广场与试炼峰之间的一小段真实时间，只有一枚令牌。
+  tags:
+    - xianxia
+    - trial
+  genre: xianxia
+  theme: cultivation_trial
+  lore_summary: 试炼峰前的一小段真实时间：山门、广场与试炼峰之间，只有一枚令牌。
+  status: active
+  start_hour: 8
+  start_minute: 0
+  start_tick: 0

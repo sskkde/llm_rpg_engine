@@ -1096,3 +1096,146 @@ def _no_secret_value_present(data, pattern):
             if not _no_secret_value_present(item, pattern):
                 return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 rewind guards (append-only coverage)
+# ---------------------------------------------------------------------------
+
+
+def _rewind_sensitive_rows(db, session_id):
+    rows = {}
+    for model in (SessionNPCStateModel, SessionInventoryItemModel, SessionStateModel):
+        records = db.query(model).filter_by(session_id=session_id).order_by(model.id).all()
+        rows[model.__tablename__] = [
+            tuple((column.name, getattr(record, column.name)) for column in model.__table__.columns)
+            for record in records
+        ]
+    return rows
+
+
+class TestPhase3SnapshotRewindGuards:
+    def test_phase3_profile_refuses_apply_and_readonly_restore_without_writes(
+        self, db_session, monkeypatch
+    ):
+        from llm_rpg.core.instance_snapshot_service import SnapshotRewindRefusedError
+        from llm_rpg.core.time_simulation import (
+            PROFILE_ID,
+            PROFILE_RULESET_KEY,
+            PROFILE_SCHEMA_VERSION,
+        )
+
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        world.ruleset_json = {
+            PROFILE_RULESET_KEY: {
+                "id": PROFILE_ID,
+                "schema_version": PROFILE_SCHEMA_VERSION,
+            }
+        }
+        db_session.commit()
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=setup["session"].id,
+        )
+        before = _rewind_sensitive_rows(db_session, setup["session"].id)
+        snapshot_count = len(
+            InstanceSnapshotRepository(db_session).list_by_instance(
+                setup["playthrough_instance"].id
+            )
+        )
+
+        with pytest.raises(SnapshotRewindRefusedError):
+            apply_snapshot(db_session, snap.id)
+        db_session.expire_all()
+        assert _rewind_sensitive_rows(db_session, setup["session"].id) == before
+        assert len(
+            InstanceSnapshotRepository(db_session).list_by_instance(
+                setup["playthrough_instance"].id
+            )
+        ) == snapshot_count
+
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "false")
+        with pytest.raises(SnapshotRewindRefusedError):
+            restore_snapshot(db_session, snap.id)
+        db_session.expire_all()
+        assert _rewind_sensitive_rows(db_session, setup["session"].id) == before
+
+    def test_existing_phase3_run_marker_refuses_apply_without_writes(
+        self, db_session, monkeypatch
+    ):
+        from llm_rpg.core.instance_snapshot_service import SnapshotRewindRefusedError
+        from llm_rpg.core.time_simulation import PHASE3_NAMESPACE
+
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=setup["session"].id,
+        )
+
+        state = SessionStateRepository(db_session).get_by_session(setup["session"].id)
+        state.global_flags_json = {
+            **state.global_flags_json,
+            PHASE3_NAMESPACE: {"marker": "test"},
+        }
+        db_session.commit()
+        before = _rewind_sensitive_rows(db_session, setup["session"].id)
+
+        with pytest.raises(SnapshotRewindRefusedError):
+            apply_snapshot(db_session, snap.id)
+        db_session.expire_all()
+        assert _rewind_sensitive_rows(db_session, setup["session"].id) == before
+
+    def test_phase3_namespace_in_snapshot_payload_refuses_apply_without_writes(
+        self, db_session, monkeypatch
+    ):
+        from llm_rpg.core.instance_snapshot_service import SnapshotRewindRefusedError
+        from llm_rpg.core.time_simulation import PHASE3_NAMESPACE
+
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=setup["session"].id,
+        )
+        payload = dict(snap.snapshot_json)
+        session_state = dict(payload["session_state"])
+        global_flags = dict(session_state["global_flags_json"])
+        global_flags[PHASE3_NAMESPACE] = {"marker": "payload"}
+        session_state["global_flags_json"] = global_flags
+        payload["session_state"] = session_state
+        snap.snapshot_json = payload
+        snap.checksum = compute_checksum(payload)
+        db_session.commit()
+        before = _rewind_sensitive_rows(db_session, setup["session"].id)
+
+        with pytest.raises(SnapshotRewindRefusedError):
+            apply_snapshot(db_session, snap.id)
+        db_session.expire_all()
+        assert _rewind_sensitive_rows(db_session, setup["session"].id) == before
+
+    def test_ordinary_session_apply_remains_compatible(self, db_session, monkeypatch):
+        monkeypatch.setenv("INSTANCE_SNAPSHOT_ENABLED", "true")
+        world = _seed_world(db_session)
+        setup = _setup_session_with_state(db_session, world)
+        snap = create_baseline_snapshot(
+            db_session,
+            playthrough_instance_id=setup["playthrough_instance"].id,
+            session_id=setup["session"].id,
+        )
+        state_repo = SessionStateRepository(db_session)
+        state = state_repo.get_by_session(setup["session"].id)
+        state_repo.update(state.id, {"active_mode": "combat"})
+
+        result = apply_snapshot(db_session, snap.id)
+
+        assert result["applied_snapshot_id"] == snap.id
+        assert result["checkpoint_snapshot_id"]
+        assert state_repo.get_by_session(setup["session"].id).active_mode == "exploration"

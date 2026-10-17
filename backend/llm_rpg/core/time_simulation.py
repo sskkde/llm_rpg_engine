@@ -28,6 +28,7 @@ scheduler) or as a valid cursor (which would skip world time).
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
@@ -165,6 +166,8 @@ class StepKind:
     NPC_USE_ITEM = "npc_use_item"
     ENVIRONMENT_INTERRUPT = "environment_interrupt"
     PLAYER_CONTINUOUS_COMPLETE = "player_continuous_complete"
+    CONTENT_RULE_FIRE = "content_rule_fire"
+    NPC_WAIT_COMPLETE = "npc_wait_complete"
 
     ALL = frozenset(
         {
@@ -174,6 +177,8 @@ class StepKind:
             NPC_USE_ITEM,
             ENVIRONMENT_INTERRUPT,
             PLAYER_CONTINUOUS_COMPLETE,
+            CONTENT_RULE_FIRE,
+            NPC_WAIT_COMPLETE,
         }
     )
 
@@ -218,6 +223,11 @@ class PlanStatus:
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
+
+
+def route_key(from_code: str, to_code: str) -> str:
+    """Stable directed-edge key shared by route defaults and session overrides."""
+    return f"{from_code}->{to_code}"
 
 
 def travel_step_key(actor_code: str, kind: str, tick: int) -> str:
@@ -567,6 +577,12 @@ class WorkingState:
     item_owner_ref: Optional[str] = None
     routes_open: Dict[str, bool] = field(default_factory=dict)
     one_shot: Dict[str, bool] = field(default_factory=dict)
+    # Runtime value types live in content.runtime_models; Any avoids a core/content import cycle.
+    item_instances: Dict[str, Any] = field(default_factory=dict)
+    flags: Dict[str, Any] = field(default_factory=dict)
+    npc_goals: Dict[str, str] = field(default_factory=dict)
+    npc_current_plans: Dict[str, Any] = field(default_factory=dict)
+    route_overrides: Dict[str, bool] = field(default_factory=dict)
 
     def copy(self) -> "WorkingState":
         """Deep-enough copy: the advance must never mutate its input."""
@@ -585,13 +601,21 @@ class WorkingState:
             item_owner_ref=self.item_owner_ref,
             routes_open=dict(self.routes_open),
             one_shot=dict(self.one_shot),
+            item_instances=copy.deepcopy(self.item_instances),
+            flags=copy.deepcopy(self.flags),
+            npc_goals=copy.deepcopy(self.npc_goals),
+            npc_current_plans=copy.deepcopy(self.npc_current_plans),
+            route_overrides=copy.deepcopy(self.route_overrides),
         )
 
     def route_key(self, from_code: str, to_code: str) -> str:
-        return f"{from_code}->{to_code}"
+        return route_key(from_code, to_code)
 
     def route_is_open(self, from_code: str, to_code: str) -> bool:
-        return bool(self.routes_open.get(self.route_key(from_code, to_code), False))
+        key = self.route_key(from_code, to_code)
+        if key in self.route_overrides:
+            return bool(self.route_overrides[key])
+        return bool(self.routes_open.get(key, False))
 
     def npc_is_alive(self, actor_code: str) -> bool:
         return bool(self.npc_alive.get(actor_code, True))
@@ -763,6 +787,7 @@ __all__ = [
     "PlayerActionStatus",
     "PlanStatus",
     "ScheduledStep",
+    "route_key",
     "travel_step_key",
     "encode_step_conditions",
     "is_phase3_conditions",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Container, List, Optional, Sequence, Set
+from typing import Any, Container, List, Optional, Protocol, Sequence, Set
 
 from .time_simulation import (
     ACTION_INTERRUPTED,
@@ -23,14 +23,23 @@ from .time_simulation import (
     TimeSimulationStateError,
     WorkingState,
 )
-from .time_simulation_rules import TrialRules
+
+
+class WorldRules(Protocol):
+    """Minimal duck-typed rule contract consumed by the pure advancer."""
+
+    def player_completion_step(self, player_action: PlayerActionSpec) -> Optional[ScheduledStep]: ...
+
+    def apply_step(
+        self, *, state: WorkingState, step: ScheduledStep, player_action: PlayerActionSpec
+    ) -> Any: ...
 
 
 class WorldAdvancer:
     """Advance one action against a single evolving copy of world state."""
 
     def __init__(
-        self, rules: TrialRules, *, max_steps: int = MAX_STEPS_PER_ADVANCE
+        self, rules: WorldRules, *, max_steps: int = MAX_STEPS_PER_ADVANCE
     ) -> None:
         self.rules = rules
         self.max_steps = max_steps
@@ -299,8 +308,10 @@ class WorldAdvancer:
                 pending_by_key[step.step_key] = step
         result_pending = sorted(pending_by_key.values(), key=lambda item: item.order_key)
 
+        # Legacy rule objects need not expose profile_id; keep their phase3 identity.
+        profile_id = getattr(self.rules, "profile_id", PROFILE_ID) or PROFILE_ID
         return AdvanceResult(
-            profile_id=PROFILE_ID,
+            profile_id=profile_id,
             start_tick=start_tick,
             target_tick=target_tick,
             actual_end_tick=actual_end_tick,

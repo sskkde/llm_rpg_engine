@@ -219,6 +219,60 @@ class ContentPackPublishAsVersionRequest(BaseModel):
     publish: bool = Field(default=False, description="If true, publish the version immediately after creation")
 
 
+class ContentPackPublishRequest(BaseModel):
+    version: Optional[str] = None
+    dry_run: Optional[bool] = None
+
+
+class ContentPackPublishResponse(BaseModel):
+    dry_run: bool = False
+    package_id: Optional[str] = None
+    pack_version: Optional[str] = None
+    source_hash: Optional[str] = None
+    runtime_hash: Optional[str] = None
+    bundle_schema_version: Optional[int] = None
+    engine_rules_version: Optional[int] = None
+    counts: Optional[Dict[str, int]] = None
+    ref_map: Optional[Dict[str, str]] = None
+    version_id: Optional[str] = None
+    world_id: Optional[str] = None
+    created: Optional[bool] = None
+
+
+def _raise_content_publish_http(error) -> None:
+    status_code = (
+        status.HTTP_409_CONFLICT
+        if error.code in {"CONTENT_FROZEN_VERSION", "CONTENT_VERSION_CONFLICT", "CONTENT_WORLD_ALREADY_BOUND"}
+        else status.HTTP_422_UNPROCESSABLE_ENTITY
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": error.code, "message": error.message, "path": error.path},
+    )
+
+
+def _assert_world_content_mutable(db: DBSession, world_id: str) -> None:
+    from ..core.content_publish_service import assert_world_content_mutable, ContentPublishError
+
+    try:
+        assert_world_content_mutable(db, world_id)
+    except ContentPublishError as error:
+        _raise_content_publish_http(error)
+
+
+def _guard_legacy_pack_targets(db: DBSession, pack_path: Path) -> None:
+    """Preflight the v1 import target worlds before its importer writes rows."""
+    from ..content.loader import load_content_pack, ContentPackLoadError
+
+    try:
+        legacy_pack = load_content_pack(pack_path)
+    except ContentPackLoadError:
+        # Keep the v1 import service's existing load-error response unchanged.
+        return
+    for definition in [*legacy_pack.factions, *legacy_pack.plot_beats]:
+        _assert_world_content_mutable(db, definition.world_id)
+
+
 # =============================================================================
 # Faction Routes
 # =============================================================================
@@ -261,6 +315,7 @@ def create_faction(
     Requires admin role.
     """
     require_admin_role(current_user)
+    _assert_world_content_mutable(db, request.world_id)
     repo = FactionRepository(db)
     
     # Check if faction with this logical_id already exists in this world
@@ -337,6 +392,7 @@ def update_faction(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Faction not found"
         )
+    _assert_world_content_mutable(db, faction.world_id)
     
     update_data = request.model_dump(exclude_unset=True)
     
@@ -380,6 +436,7 @@ def delete_faction(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Faction not found"
         )
+    _assert_world_content_mutable(db, faction.world_id)
     
     repo.delete(faction_id)
     return None
@@ -427,6 +484,7 @@ def create_plot_beat(
     Requires admin role.
     """
     require_admin_role(current_user)
+    _assert_world_content_mutable(db, request.world_id)
     repo = PlotBeatRepository(db)
     
     # Check if plot beat with this logical_id already exists in this world
@@ -501,6 +559,7 @@ def update_plot_beat(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Plot beat not found"
         )
+    _assert_world_content_mutable(db, plot_beat.world_id)
     
     update_data = request.model_dump(exclude_unset=True)
     
@@ -544,6 +603,7 @@ def delete_plot_beat(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Plot beat not found"
         )
+    _assert_world_content_mutable(db, plot_beat.world_id)
     
     repo.delete(beat_id)
     return None
@@ -636,6 +696,9 @@ def import_content_pack(
     pack_path = validate_content_pack_path(request.path)
     
     try:
+        if not dry_run:
+            _guard_legacy_pack_targets(db, pack_path)
+
         from ..content.importer import ContentImportService
         
         service = ContentImportService(db)
@@ -652,6 +715,8 @@ def import_content_pack(
             pack_id=report.pack_id,
             pack_name=report.pack_name,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         return ContentPackImportResponse(
             success=False,
@@ -679,6 +744,9 @@ def publish_content_pack_as_version(
     require_admin_role(current_user)
 
     pack_path = validate_content_pack_path(request.path)
+    if request.world_id:
+        _assert_world_content_mutable(db, request.world_id)
+    _guard_legacy_pack_targets(db, pack_path)
 
     try:
         from ..content.importer import ContentImportService
@@ -718,6 +786,62 @@ def publish_content_pack_as_version(
             success=False,
             errors=[f"Import/publish-as-version failed: {e}"],
         )
+
+
+@router.post(
+    "/content-packs/{pack_id}/publish",
+    response_model=ContentPackPublishResponse,
+    response_model_exclude_none=True,
+)
+def publish_content_v1_pack(
+    pack_id: str,
+    request: Optional[ContentPackPublishRequest] = None,
+    version: Optional[str] = Query(None),
+    dry_run: Optional[bool] = Query(None),
+    current_user: UserModel = Depends(require_admin),
+    db: DBSession = Depends(get_db),
+):
+    """Publish a strict content_v1 pack, or return read-only diagnostics."""
+    require_admin_role(current_user)
+    pack_path = validate_content_pack_path(f"content_packs/{pack_id}")
+    selected_version = (request.version if request and request.version is not None else version)
+    selected_dry_run = request.dry_run if request and request.dry_run is not None else bool(dry_run)
+
+    from ..core.content_publish_service import (
+        ContentPublishError,
+        dry_run_content_pack,
+        publish_content_pack_version,
+    )
+
+    try:
+        if selected_dry_run:
+            diagnostic = dry_run_content_pack(pack_path)
+            return {
+                "dry_run": True,
+                "package_id": diagnostic.package_id,
+                "pack_version": diagnostic.pack_version,
+                "source_hash": diagnostic.source_hash,
+                "runtime_hash": diagnostic.runtime_hash,
+                "bundle_schema_version": diagnostic.bundle_schema_version,
+                "engine_rules_version": diagnostic.engine_rules_version,
+                "counts": dict(diagnostic.counts),
+                "ref_map": dict(diagnostic.ref_map),
+            }
+        result = publish_content_pack_version(
+            db,
+            pack_dir=pack_path,
+            version=selected_version,
+        )
+        return {
+            "dry_run": False,
+            "version_id": result.version_id,
+            "world_id": result.world_id,
+            "runtime_hash": result.runtime_hash,
+            "source_hash": result.source_hash,
+            "created": result.created,
+        }
+    except ContentPublishError as error:
+        _raise_content_publish_http(error)
 
 
 # =============================================================================
@@ -841,6 +965,11 @@ def publish_story_package_version(
     )
 
     try:
+        from ..core.content_publish_service import assert_version_content_mutable, ContentPublishError
+        try:
+            assert_version_content_mutable(db, version_id)
+        except ContentPublishError as error:
+            _raise_content_publish_http(error)
         spv = svc_publish(db, version_id)
     except StoryPackageVersionError as e:
         if "not found" in str(e).lower():

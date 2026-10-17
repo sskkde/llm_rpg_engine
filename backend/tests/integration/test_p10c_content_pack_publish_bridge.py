@@ -1,4 +1,7 @@
 import os
+import uuid
+from pathlib import Path
+
 import pytest
 from datetime import datetime
 
@@ -19,6 +22,7 @@ from llm_rpg.storage.repositories import (
     FactionRepository,
     PlotBeatRepository,
 )
+from llm_rpg.core.content_publish_service import ContentPublishError, publish_content_pack_version
 from llm_rpg.core.story_package_service import (
     create_story_package_version,
     get_story_package_version,
@@ -50,6 +54,126 @@ def _seed_user(db: DBSession, is_admin: bool = True) -> UserModel:
         "username": f"testuser-{generate_uuid()[:8]}",
         "is_admin": is_admin,
     })
+
+
+def _legacy_import_pack(tmp_path: Path, pack_id: str) -> Path:
+    pack_dir = tmp_path / f"legacy-{pack_id}"
+    pack_dir.mkdir()
+    (pack_dir / "pack.yaml").write_text(
+        f"id: {pack_id}\nname: Legacy Import\nversion: 1.0.0\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "factions.yaml").write_text(
+        "factions:\n  - id: imported_faction\n    name: Imported faction\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "plot_beats.yaml").write_text(
+        "plot_beats:\n  - id: imported_beat\n    name: Imported beat\n    priority: 1\n",
+        encoding="utf-8",
+    )
+    return pack_dir
+
+
+_MISTY_FORD = Path(__file__).resolve().parents[3] / "content_packs" / "misty_ford"
+
+
+@pytest.mark.parametrize("operation", ["import_pack", "import_pack_as_version"])
+@pytest.mark.parametrize("target_kind", ["published", "draft", "legacy"])
+def test_v1_import_freeze_guard_preserves_draft_and_legacy_targets(
+    db_session, tmp_path, operation, target_kind
+):
+    target_id = f"legacy_import_{uuid.uuid4().hex}"
+    pack_dir = _legacy_import_pack(tmp_path, target_id)
+    if target_kind == "published":
+        publish_content_pack_version(db_session, pack_dir=_MISTY_FORD, world_id=target_id)
+    else:
+        world = WorldModel(
+            id=target_id,
+            code=f"legacy-import-world-{uuid.uuid4().hex}",
+            name="Legacy importer target",
+        )
+        db_session.add(world)
+        db_session.flush()
+        if target_kind == "draft":
+            draft = StoryPackageVersionModel(
+                story_package_id=f"draft-binding-{uuid.uuid4().hex}",
+                version="0.1.0",
+                status="draft",
+                world_id=world.id,
+            )
+            db_session.add(draft)
+            db_session.flush()
+            world.story_package_version_id = draft.id
+            db_session.flush()
+
+    service = ContentImportService(db_session)
+    if operation == "import_pack":
+        import_operation = lambda: service.import_pack(pack_dir)
+    else:
+        import_operation = lambda: service.import_pack_as_version(pack_dir, world_id=target_id)
+
+    if target_kind == "published":
+        with pytest.raises(ContentPublishError) as raised:
+            import_operation()
+        assert raised.value.code == "CONTENT_FROZEN_VERSION"
+        assert FactionRepository(db_session).list_by_world(target_id) == []
+        assert PlotBeatRepository(db_session).list_by_world(target_id) == []
+    else:
+        report = import_operation()
+        assert report.success is True
+        assert report.factions_imported == 1
+        assert report.plot_beats_imported == 1
+
+
+def test_import_content_pack_cli_enforces_published_freeze(db_session, tmp_path, monkeypatch):
+    target_id = f"legacy_import_{uuid.uuid4().hex}"
+    publish_content_pack_version(db_session, pack_dir=_MISTY_FORD, world_id=target_id)
+    pack_dir = _legacy_import_pack(tmp_path, target_id)
+
+    from llm_rpg.scripts import import_content_pack as cli
+
+    class NonClosingSession:
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: NonClosingSession())
+    monkeypatch.setattr("sys.argv", ["import_content_pack.py", str(pack_dir), "--format", "json"])
+    with pytest.raises(ContentPublishError) as raised:
+        cli.main()
+    assert raised.value.code == "CONTENT_FROZEN_VERSION"
+    assert FactionRepository(db_session).list_by_world(target_id) == []
+    assert PlotBeatRepository(db_session).list_by_world(target_id) == []
+
+
+def test_import_content_pack_cli_preserves_legacy_world_import(db_session, tmp_path, monkeypatch):
+    target_id = f"legacy_import_{uuid.uuid4().hex}"
+    db_session.add(
+        WorldModel(
+            id=target_id,
+            code=f"legacy-import-world-{uuid.uuid4().hex}",
+            name="Legacy importer target",
+        )
+    )
+    db_session.flush()
+    pack_dir = _legacy_import_pack(tmp_path, target_id)
+
+    from llm_rpg.scripts import import_content_pack as cli
+
+    class NonClosingSession:
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: NonClosingSession())
+    monkeypatch.setattr("sys.argv", ["import_content_pack.py", str(pack_dir), "--format", "json"])
+    assert cli.main() == 0
+    assert len(FactionRepository(db_session).list_by_world(target_id)) == 1
+    assert len(PlotBeatRepository(db_session).list_by_world(target_id)) == 1
 
 
 class TestContentPackVersionBridge:

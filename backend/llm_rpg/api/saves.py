@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
-from ..storage.models import UserModel, SaveSlotModel, SessionModel
+from ..storage.models import UserModel, SaveSlotModel, SessionModel, StoryPackageVersionModel
 from ..storage.repositories import SaveSlotRepository, SessionRepository, WorldRepository
 from .auth import get_current_active_user
 
@@ -249,6 +249,43 @@ def create_manual_save(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="World not found"
         )
+
+    ruleset = world.ruleset_json if isinstance(world.ruleset_json, dict) else {}
+    content_profile = ruleset.get("content_profile")
+    content_world = (
+        isinstance(content_profile, dict)
+        and content_profile.get("id") == "content_v1"
+    )
+    content_version = None
+    if content_world:
+        if "phase3_profile" in ruleset:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="CONTENT_BINDING_CONFLICT: world carries both content_v1 and phase-3 profiles",
+            )
+        if not world.story_package_version_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="CONTENT_BUNDLE_MISSING: content world has no version binding",
+            )
+        content_version = db.get(StoryPackageVersionModel, world.story_package_version_id)
+        if (
+            content_version is None
+            or content_version.world_id != world.id
+            or content_version.status != "published"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="CONTENT_BINDING_MISMATCH: content world and published version differ",
+            )
+        from ..core.content_publish_service import ContentPublishError, load_published_bundle
+        try:
+            load_published_bundle(db, version_id=content_version.id)
+        except ContentPublishError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            ) from e
     
     save_repo = SaveSlotRepository(db)
     
@@ -275,17 +312,44 @@ def create_manual_save(
         else:
             slot = existing_slots[0]
     
-    session_repo = SessionRepository(db)
-    session = session_repo.create({
-        "user_id": current_user.id,
-        "save_slot_id": slot.id,
-        "world_id": request.world_id,
-        "current_chapter_id": request.current_chapter_id,
-        "status": "active",
-    })
+    if content_world:
+        from ..core.content_publish_service import ContentPublishError
+        from ..core.playthrough_instance_service import create_content_v1_instance
+        try:
+            created = create_content_v1_instance(
+                db,
+                user_id=current_user.id,
+                version_id=content_version.id,
+                story_package_id=content_version.story_package_id,
+            )
+        except ContentPublishError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            ) from e
+        session = db.get(SessionModel, created["session_id"])
+        if session is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Content instance factory did not persist its session",
+            )
+        session.save_slot_id = slot.id
+        session.current_chapter_id = request.current_chapter_id
+        db.commit()
+        session_id = session.id
+    else:
+        session_repo = SessionRepository(db)
+        session = session_repo.create({
+            "user_id": current_user.id,
+            "save_slot_id": slot.id,
+            "world_id": request.world_id,
+            "current_chapter_id": request.current_chapter_id,
+            "status": "active",
+        })
+        session_id = session.id
     
     return ManualSaveResponse(
-        session_id=session.id,
+        session_id=session_id,
         save_slot_id=slot.id,
         message="Game saved successfully"
     )

@@ -1801,8 +1801,62 @@ class AssetRateLimitEventRepository(BaseRepository):
 
 
 class StoryPackageVersionRepository(BaseRepository):
+    _FROZEN_SEMANTIC_FIELDS = (
+        "runtime_bundle_json",
+        "runtime_hash",
+        "runtime_schema_version",
+        "source_hash",
+        "world_id",
+        "story_package_id",
+        "version",
+    )
+
     def __init__(self, db: Session):
         super().__init__(db, StoryPackageVersionModel)
+
+    def update(self, id: str, data: Dict[str, Any]) -> Optional[StoryPackageVersionModel]:
+        columns = (
+            StoryPackageVersionModel.status,
+            StoryPackageVersionModel.published_at,
+            *(getattr(StoryPackageVersionModel, field) for field in self._FROZEN_SEMANTIC_FIELDS),
+        )
+        with self.db.no_autoflush:
+            persisted = (
+                self.db.query(*columns)
+                .filter(StoryPackageVersionModel.id == id)
+                .one_or_none()
+            )
+        if persisted is not None and (
+            persisted[0] == "published" or persisted[1] is not None
+        ):
+            changed_fields = {
+                field
+                for index, field in enumerate(self._FROZEN_SEMANTIC_FIELDS, start=2)
+                if field in data and data[field] != persisted[index]
+            }
+            if changed_fields:
+                from ..core.content_publish_service import assert_version_content_mutable
+
+                assert_version_content_mutable(self.db, id)
+        return super().update(id, data)
+
+    def delete(self, id: str) -> bool:
+        with self.db.no_autoflush:
+            persisted = (
+                self.db.query(
+                    StoryPackageVersionModel.status,
+                    StoryPackageVersionModel.published_at,
+                )
+                .filter(StoryPackageVersionModel.id == id)
+                .one_or_none()
+            )
+        if persisted is not None and (
+            persisted.status == "published" or persisted.published_at is not None
+        ):
+            from ..core.content_publish_service import assert_version_content_mutable
+
+            assert_version_content_mutable(self.db, id)
+        return super().delete(id)
 
     def get_latest_published(self, story_package_id: str) -> Optional[StoryPackageVersionModel]:
         return (

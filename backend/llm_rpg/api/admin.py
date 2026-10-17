@@ -63,6 +63,18 @@ def require_admin_role(user: UserModel) -> None:
         )
 
 
+def _assert_world_content_mutable(db: DBSession, world_id: str) -> None:
+    from ..core.content_publish_service import assert_world_content_mutable, ContentPublishError
+
+    try:
+        assert_world_content_mutable(db, world_id)
+    except ContentPublishError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": error.code, "message": error.message, "path": error.path},
+        ) from error
+
+
 # =============================================================================
 # Pydantic Models
 # =============================================================================
@@ -465,6 +477,7 @@ def update_world(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="World not found"
         )
+    _assert_world_content_mutable(db, world_id)
 
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
@@ -640,6 +653,7 @@ def update_location(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Location not found"
         )
+    _assert_world_content_mutable(db, location.world_id)
 
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
@@ -726,6 +740,7 @@ def update_npc_template(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="NPC template not found"
         )
+    _assert_world_content_mutable(db, npc.world_id)
 
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
@@ -812,6 +827,7 @@ def update_item_template(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Item template not found"
         )
+    _assert_world_content_mutable(db, item.world_id)
 
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:
@@ -898,6 +914,7 @@ def update_quest_template(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Quest template not found"
         )
+    _assert_world_content_mutable(db, quest.world_id)
 
     update_data = request.model_dump(exclude_unset=True)
     if not update_data:

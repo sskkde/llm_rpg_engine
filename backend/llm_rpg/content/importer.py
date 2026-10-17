@@ -71,6 +71,13 @@ class ContentImportService:
                 pack_name=pack.manifest.name,
             )
 
+        # Published content_v1 worlds are immutable through every importer path.
+        # Run the guard outside the legacy DB-error report conversion so callers
+        # can handle the canonical CONTENT_FROZEN_VERSION code.
+        from llm_rpg.core.content_publish_service import assert_content_pack_mutable
+
+        assert_content_pack_mutable(self.db, pack)
+
         try:
             factions_imported = self._import_factions(pack.factions)
             plot_beats_imported = self._import_plot_beats(pack.plot_beats)

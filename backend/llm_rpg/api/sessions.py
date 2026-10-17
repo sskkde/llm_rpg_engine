@@ -1,12 +1,16 @@
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from ..storage.database import get_db
-from ..storage.models import UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel, EventLogModel
+from ..storage.models import (
+    UserModel, SessionModel, SessionStateModel, SessionPlayerStateModel, EventLogModel,
+    StoryPackageVersionModel, WorldModel,
+)
 from ..storage.repositories import (
     SessionRepository,
     SessionStateRepository,
@@ -233,16 +237,20 @@ def get_adventure_log(
 class PlayerInstantiateRequest(BaseModel):
     story_package_id: str = Field(..., min_length=1)
     config_json: Optional[Dict[str, Any]] = None
+    version_id: Optional[str] = None
+    runtime_mode: Optional[Literal["content_v1"]] = None
 
 
 class PlayerInstantiateResponse(BaseModel):
     playthrough_instance_id: str
     session_id: str
+    version_id: Optional[str] = None
 
 
 @router.post(
     "/instantiate",
     response_model=PlayerInstantiateResponse,
+    response_model_exclude_none=True,
     status_code=status.HTTP_201_CREATED,
 )
 def instantiate_story_package(
@@ -265,34 +273,112 @@ def instantiate_story_package(
             detail="Story package instantiation is not enabled",
         )
 
-    spv_repo = StoryPackageVersionRepository(db)
-    latest_published = spv_repo.get_latest_published(request.story_package_id)
+    if request.runtime_mode not in (None, "content_v1"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="runtime_mode must be content_v1",
+        )
 
-    if latest_published is None:
+    spv_repo = StoryPackageVersionRepository(db)
+    if request.version_id is not None:
+        selected = db.get(StoryPackageVersionModel, request.version_id)
+        if selected is None:
+            if request.runtime_mode == "content_v1":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="CONTENT_VERSION_NOT_PUBLISHED: requested version does not exist",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Story package version not found",
+            )
+    elif request.runtime_mode == "content_v1":
+        selected = (
+            db.query(StoryPackageVersionModel)
+            .filter(
+                StoryPackageVersionModel.story_package_id == request.story_package_id,
+                StoryPackageVersionModel.status == "published",
+            )
+            .order_by(
+                desc(StoryPackageVersionModel.published_at),
+                desc(StoryPackageVersionModel.id),
+            )
+            .first()
+        )
+    else:
+        # Preserve the legacy selector exactly for clients that omit both fields.
+        selected = spv_repo.get_latest_published(request.story_package_id)
+
+    if selected is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No published version found for this story package",
         )
 
+    if request.runtime_mode == "content_v1" and selected.story_package_id != request.story_package_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="CONTENT_VERSION_PACKAGE_MISMATCH: version belongs to another story package",
+        )
+    if request.runtime_mode == "content_v1" and selected.status != "published":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="CONTENT_VERSION_NOT_PUBLISHED: requested version is not published",
+        )
+
+    selected_world = db.get(WorldModel, selected.world_id) if selected.world_id else None
+    selected_ruleset = getattr(selected_world, "ruleset_json", None)
+    selected_profile = selected_ruleset.get("content_profile") if isinstance(selected_ruleset, dict) else None
+    is_content_world = (
+        isinstance(selected_profile, dict)
+        and selected_profile.get("id") == "content_v1"
+    )
+    use_content_factory = request.runtime_mode == "content_v1" or is_content_world
+
     from ..core.playthrough_instance_service import (
+        create_content_v1_instance,
         create_playthrough_from_version,
         PlaythroughInstanceError,
     )
+    from ..core.content_publish_service import ContentPublishError
 
     try:
-        result = create_playthrough_from_version(
-            db,
-            version_id=latest_published.id,
-            user_id=current_user.id,
-            config_json=request.config_json,
-        )
-    except PlaythroughInstanceError as e:
+        if use_content_factory:
+            if (
+                isinstance(selected_ruleset, dict)
+                and "content_profile" in selected_ruleset
+                and "phase3_profile" in selected_ruleset
+            ):
+                raise ContentPublishError(
+                    "CONTENT_BINDING_CONFLICT",
+                    "world carries both content_v1 and phase-3 profiles",
+                )
+            result = create_content_v1_instance(
+                db,
+                user_id=current_user.id,
+                version_id=selected.id,
+                story_package_id=request.story_package_id,
+                config_json=request.config_json,
+            )
+            instance_id = result["instance_id"]
+            session_id = result["session_id"]
+        else:
+            result = create_playthrough_from_version(
+                db,
+                version_id=selected.id,
+                user_id=current_user.id,
+                config_json=request.config_json,
+            )
+            instance_id = result.playthrough_instance_id
+            session_id = result.session_id
+    except (PlaythroughInstanceError, ContentPublishError) as e:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e),
         )
 
     return PlayerInstantiateResponse(
-        playthrough_instance_id=result.playthrough_instance_id,
-        session_id=result.session_id,
+        playthrough_instance_id=instance_id,
+        session_id=session_id,
+        version_id=selected.id if use_content_factory else None,
     )

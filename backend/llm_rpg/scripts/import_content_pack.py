@@ -7,6 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from llm_rpg.content.importer import ContentImportService
+from llm_rpg.content.loader import load_content_pack
+from llm_rpg.core.content_publish_service import assert_content_pack_mutable
 from llm_rpg.storage.database import SessionLocal
 
 
@@ -97,6 +99,16 @@ Exit codes:
     db = SessionLocal()
     try:
         service = ContentImportService(db)
+        if not args.dry_run:
+            # Keep the CLI boundary guarded even if its service adapter is ever
+            # replaced. Invalid packs retain the service's existing report path.
+            try:
+                pack = load_content_pack(pack_dir)
+            except Exception:
+                pass
+            else:
+                if not service.validator.validate(pack).has_errors():
+                    assert_content_pack_mutable(db, pack)
         report = service.import_pack(pack_dir, dry_run=args.dry_run)
 
         if args.format == "json":

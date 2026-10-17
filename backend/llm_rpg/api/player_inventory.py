@@ -24,6 +24,7 @@ from ..storage.repositories import (
     ItemTemplateRepository,
 )
 from ..core.time_simulation_persistence import resolve_simulation_profile
+from ..core.projections import resolve_content_public_visibility
 from .auth import get_current_active_user
 
 
@@ -219,9 +220,13 @@ def get_inventory_item(
             detail="Item not found in inventory",
         )
 
+    content_visibility = resolve_content_public_visibility(db, session)
     if (
         inv_item.owner_type != "player"
-        and resolve_simulation_profile(db, session) is not None
+        and (
+            resolve_simulation_profile(db, session) is not None
+            or content_visibility is not None
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

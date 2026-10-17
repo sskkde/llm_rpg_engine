@@ -192,9 +192,13 @@ def test_phase3_turn_commits_the_whole_timeline_in_one_transaction(
         namespaced = [
             event for event in events if (event.result_json or {}).get(PHASE3_NAMESPACE)
         ]
-        assert [e.result_json[PHASE3_NAMESPACE]["sequence"] for e in namespaced] == list(
-            range(6)
-        )
+        # The contract is that this turn's timeline carries sequences 0..5 exactly
+        # once each. The physical row order of an unordered SELECT is NOT part of
+        # that contract (PostgreSQL may return heap order, which varies with prior
+        # inserts/DDL on the shared test database), so compare as a multiset.
+        assert sorted(
+            e.result_json[PHASE3_NAMESPACE]["sequence"] for e in namespaced
+        ) == list(range(6))
         # Every delta points at a real engine event of the same transaction.
         deltas = db.query(StateDeltaModel).filter_by(session_id=session_id).all()
         assert deltas

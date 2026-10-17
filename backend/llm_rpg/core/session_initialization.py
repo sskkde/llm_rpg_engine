@@ -28,6 +28,7 @@ from ..storage.models import (
     NPCTemplateModel,
     QuestTemplateModel,
     LocationModel,
+    WorldModel,
     generate_uuid,
 )
 from ..storage.repositories import (
@@ -129,6 +130,12 @@ def plan_session_story_state(db: Session, session_id: str) -> SessionStoryStateP
 
     world_id = session.world_id
     plan = SessionStoryStatePlan(session_id=session_id, world_id=world_id)
+    world = db.get(WorldModel, world_id) if world_id else None
+    ruleset = getattr(world, "ruleset_json", None)
+    content_profile = ruleset.get("content_profile") if isinstance(ruleset, dict) else None
+    if isinstance(content_profile, dict) and content_profile.get("id") == "content_v1":
+        # content_v1 initial state is established by the instance factory from the immutable bundle InitialState; the generic initializer must not intervene.
+        return plan
 
     # Phase 3: a slice world has its own baseline (its own starting location, its
     # own run cursor, its own scheduled steps). The generic "square" defaults do

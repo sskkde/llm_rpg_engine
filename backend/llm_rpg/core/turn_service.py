@@ -64,6 +64,7 @@ from .turn_allocation import (
 from .turn_preparation import TurnWriteBuffer
 from .time_simulation import (
     ACTION_INTERRUPTED,
+    PlayerActionKind,
     PlayerActionStatus,
     TimeSimulationError,
 )
@@ -76,6 +77,14 @@ from .time_simulation_persistence import (
     plan_engine_event_ids,
     project_time_summary,
     resolve_simulation_profile,
+)
+from .content_runtime import (
+    ContentRuntimeBinding,
+    ContentRuntimeContext,
+    ContentRuntimeError,
+    apply_content_advance,
+    load_content_runtime_context,
+    read_content_binding,
 )
 from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
@@ -103,6 +112,7 @@ from .projections import (
     PlayerVisibleProjectionBuilder,
     NPCVisibleProjectionBuilder,
     NarratorProjectionBuilder,
+    project_content_public_context,
 )
 from ..engines.scheduled_event_processor import ScheduledEventProcessor
 
@@ -110,7 +120,9 @@ from ..storage.models import (
     SessionModel, SessionStateModel, SessionPlayerStateModel, SessionNPCStateModel,
     SessionInventoryItemModel, SessionQuestStateModel, SessionEventFlagModel,
     ScheduledEventModel, MemoryFactModel, NPCBeliefModel, NPCPrivateMemoryModel, NPCTemplateModel,
-    GameEventModel,
+    GameEventModel, StateDeltaModel, WorldModel, PlaythroughInstanceModel,
+    StoryPackageVersionModel, LocationModel, NPCTemplateModel, ItemTemplateModel,
+    generate_uuid,
     NPCRelationshipMemoryModel, EventLogModel, MemorySummaryModel, TurnTransactionModel,
 )
 from . import turn_claim
@@ -595,7 +607,7 @@ def _build_input_intent_context(
         "location_id": context.get("current_location_id"),
     }
     
-    return context
+    return _content_public_context(db, session_id, context)
 
 
 def _build_world_context_for_turn(
@@ -660,7 +672,7 @@ def _build_world_context_for_turn(
     recent_events = _get_recent_events(db, session_id, limit=3, planned_events=planned_events)
     context["recent_events"] = recent_events
 
-    return context
+    return _content_public_context(db, session_id, context)
 
 
 # Allowed fields for world progression proposals (bounded validation)
@@ -867,6 +879,68 @@ def _planned_game_event_ids(write_buffer: Optional[Any]) -> FrozenSet[str]:
             if getattr(planned, "id", None)
         )
     return planned_ids | frozenset(_phase3_planned_event_ids(write_buffer).values())
+
+
+def _content_public_context(
+    db: Session,
+    session_id: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply the content runtime's player-safe context and same-session routes."""
+    runtime = db.info.get("content_runtime_context")
+    if runtime is None:
+        return context
+    state = runtime.state
+    allowed_npc_ids = set()
+    for npc_state in SessionNPCStateRepository(db).get_by_session(session_id):
+        template = db.get(NPCTemplateModel, npc_state.npc_template_id)
+        code = getattr(template, "code", None)
+        if (
+            isinstance(code, str)
+            and code in state.npc_positions
+            and state.npc_positions[code] == state.player_location_code
+            and state.npc_is_alive(code)
+        ):
+            allowed_npc_ids.add(npc_state.id)
+
+    projected = project_content_public_context(
+        context,
+        visible_npc_ids=allowed_npc_ids,
+    )
+    available_locations = projected.get("available_locations")
+    if isinstance(available_locations, list):
+        open_destinations = {
+            destination
+            for source, destination in runtime.rules.data.routes
+            if source == state.player_location_code
+            and state.route_is_open(source, destination)
+        }
+        projected["available_locations"] = [
+            location
+            for location in available_locations
+            if isinstance(location, dict)
+            and location.get("code") in open_destinations
+        ]
+    return projected
+
+
+def _content_recommended_actions(db: Session, runtime: ContentRuntimeContext) -> List[str]:
+    """Generate only player recommendations backed by the current route view."""
+    source = runtime.state.player_location_code
+    destinations = sorted(
+        destination
+        for origin, destination in runtime.rules.data.routes
+        if origin == source and runtime.state.route_is_open(origin, destination)
+    )
+    if not destinations:
+        return ["观察周围"]
+    locations = db.query(LocationModel).filter(
+        LocationModel.world_id == runtime.binding.world_id,
+        LocationModel.code.in_(destinations),
+    ).all()
+    by_code = {location.code: location for location in locations}
+    actions = [f"前往{by_code[code].name}" for code in destinations if code in by_code]
+    return actions[:4] or ["观察周围"]
 
 
 def _phase3_planned_event_ids(write_buffer: Optional[Any]) -> Dict[int, str]:
@@ -1650,7 +1724,7 @@ def _build_narration_context(
     if memory_summaries:
         context["memory_context"] = memory_summaries
     
-    return context
+    return _content_public_context(db, session_id, context)
 
 
 def _get_session_state_with_plan(db: Session, session_id: str) -> Any:
@@ -1900,7 +1974,7 @@ def _build_scene_context(
         "location_id": current_location_id,
     }
     
-    return context
+    return _content_public_context(db, session_id, context)
 
 
 def _get_active_npcs_at_location(
@@ -2577,19 +2651,48 @@ def _execute_llm_stages(
     
     _emit("npc_stage", "started")
     _end_read_transaction(db)
-    npc_result = _execute_npc_stage(
-        db=db,
-        session_id=session_id,
-        turn_no=turn_no,
-        canonical_state=canonical_state,
-        player_input=player_input,
-        action_type=action_type,
-        movement_result=movement_result,
-        state_deltas=state_deltas,
-        current_location_id=current_location_id,
-        use_mock=use_mock,
-        write_buffer=write_buffer,
-    )
+    if db.info.get("content_runtime_context") is not None:
+        # Content NPC plans advance only at deterministic engine boundaries. Build
+        # their scoped decision contexts (including eligible private memories) for
+        # the closed-loop read path, but do not submit LLM-managed NPC actions.
+        content_npc_contexts = {}
+        for npc in _get_active_npcs_at_location(db, session_id, current_location_id):
+            content_npc_contexts[npc["npc_id"]] = _build_npc_context(
+                db=db,
+                session_id=session_id,
+                npc_id=npc["npc_id"],
+                npc_template_id=npc["npc_template_id"],
+                canonical_state=canonical_state,
+                player_input=player_input,
+                action_type=action_type,
+                movement_result=movement_result,
+                state_deltas=state_deltas,
+                current_location_id=current_location_id,
+                planned_game_events=write_buffer.planned_game_events() if write_buffer else None,
+            )
+        db.info["content_npc_decision_contexts"] = content_npc_contexts
+        npc_result = LLMStageResult(
+            stage_name="npc",
+            enabled=False,
+            timeout=30.0,
+            accepted=False,
+            fallback_reason="content_v1_engine_managed",
+            parsed_proposal={"npc_reactions": []},
+        )
+    else:
+        npc_result = _execute_npc_stage(
+            db=db,
+            session_id=session_id,
+            turn_no=turn_no,
+            canonical_state=canonical_state,
+            player_input=player_input,
+            action_type=action_type,
+            movement_result=movement_result,
+            state_deltas=state_deltas,
+            current_location_id=current_location_id,
+            use_mock=use_mock,
+            write_buffer=write_buffer,
+        )
     results.append(npc_result)
     npc_name_for_progress: Optional[str] = None
     if npc_result.accepted and npc_result.parsed_proposal:
@@ -3362,6 +3465,86 @@ def _phase3_advance(ctx: SimulationContext, player_action: Any) -> Any:
     )
 
 
+def _content_tick_positions(context: ContentRuntimeContext, result: Any) -> Dict[int, Dict[str, Any]]:
+    """Freeze the content runtime's NPC position view at each event tick."""
+    positions = dict(context.state.npc_positions)
+    alive = dict(context.state.npc_alive)
+    snapshots: Dict[int, Dict[str, Any]] = {}
+    for event in sorted(result.events, key=lambda item: (item.tick, item.phase, item.seq)):
+        payload = event.public_payload or event.private_payload or {}
+        if event.event_type == "npc_arrived" and isinstance(payload, dict):
+            actor = payload.get("npc_id") or event.actor_code
+            destination = payload.get("to")
+            if actor in positions and isinstance(destination, str):
+                positions[actor] = destination
+        snapshots[event.tick] = {
+            "npc_positions": dict(positions),
+            "npc_alive": dict(alive),
+        }
+    return snapshots
+
+
+def _write_content_engine_events(
+    db: Session,
+    *,
+    session_id: str,
+    transaction_id: str,
+    turn_no: int,
+    result: Any,
+    planned_event_ids: Dict[int, str],
+) -> None:
+    """Persist content engine facts/deltas using preplanned durable event IDs."""
+    event_ids_by_step: Dict[str, str] = {}
+    for engine_event in result.events:
+        event_id = planned_event_ids[engine_event.seq]
+        event_ids_by_step.setdefault(engine_event.step_code, event_id)
+        db.add(GameEventModel(
+            id=event_id,
+            transaction_id=transaction_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            event_type=engine_event.event_type,
+            actor_id=engine_event.actor_code,
+            target_ids_json=list(engine_event.target_ids) or None,
+            visibility_scope=engine_event.visibility_scope,
+            public_payload_json=engine_event.public_payload,
+            private_payload_json=engine_event.private_payload,
+            result_json={
+                **(engine_event.result_json or {}),
+                "engine_meta": {
+                    "profile": "content_v1",
+                    "logical_tick": engine_event.tick,
+                    "phase": int(engine_event.phase),
+                    "sequence": engine_event.seq,
+                },
+            },
+            occurred_at=datetime.now(),
+        ))
+    for delta in result.deltas:
+        source_event_id = event_ids_by_step.get(delta.step_code)
+        if source_event_id is None:
+            raise ContentRuntimeError(
+                "CONTENT_BINDING_MISMATCH",
+                f"content delta for step {delta.step_code!r} has no causal engine event",
+            )
+        db.add(StateDeltaModel(
+            id=generate_uuid(),
+            transaction_id=transaction_id,
+            source_event_id=source_event_id,
+            session_id=session_id,
+            turn_no=turn_no,
+            path=f"content_v1.{delta.path}",
+            operation=delta.operation,
+            old_value_json=delta.old_value,
+            new_value_json=delta.new_value,
+            visibility_scope=delta.visibility_scope,
+            validation_status="valid",
+            created_at=datetime.now(),
+        ))
+    # Cognition verifies that its source GameEvents already exist in this UoW.
+    db.flush()
+
+
 def _phase3_engine_message(result: Any) -> str:
     """A non-disclosing engine sentence for an interrupted / unfinished action."""
     if getattr(result, "interrupted", False):
@@ -3514,6 +3697,59 @@ def compute_state_fingerprint(db: Session, session_id: str) -> str:
             [{field: getattr(row, field) for field in fields} for row in rows],
             key=lambda row: str(row["id"]),
         )))
+
+    # A content_v1 session is pinned to a four-part immutable binding. Include the
+    # instance, profile/world and published artifact/materialization in the same
+    # optimistic fingerprint that is rechecked after the turn lock is acquired.
+    session_row = db.get(SessionModel, session_id)
+    world_row = db.get(WorldModel, session_row.world_id) if session_row is not None else None
+    ruleset = getattr(world_row, "ruleset_json", None)
+    content_profile = ruleset.get("content_profile") if isinstance(ruleset, dict) else None
+    if isinstance(content_profile, dict) and content_profile.get("id") == "content_v1":
+        instance_row = db.get(PlaythroughInstanceModel, session_row.playthrough_instance_id) if session_row.playthrough_instance_id else None
+        version_row = db.get(StoryPackageVersionModel, session_row.story_package_version_id) if session_row.story_package_version_id else None
+        binding_state: Dict[str, Any] = {
+            "session": {
+                "id": session_row.id,
+                "world_id": session_row.world_id,
+                "playthrough_instance_id": session_row.playthrough_instance_id,
+                "story_package_version_id": session_row.story_package_version_id,
+            },
+            "world": None if world_row is None else {
+                "id": world_row.id,
+                "story_package_version_id": world_row.story_package_version_id,
+                "ruleset_json": world_row.ruleset_json,
+            },
+            "instance": None if instance_row is None else {
+                "id": instance_row.id,
+                "world_id": instance_row.world_id,
+                "story_package_version_id": instance_row.story_package_version_id,
+                "config_json": instance_row.config_json,
+            },
+            "version": None if version_row is None else {
+                "id": version_row.id,
+                "story_package_id": version_row.story_package_id,
+                "status": version_row.status,
+                "world_id": version_row.world_id,
+                "published_at": version_row.published_at,
+                "runtime_bundle_json": version_row.runtime_bundle_json,
+                "runtime_hash": version_row.runtime_hash,
+                "runtime_schema_version": version_row.runtime_schema_version,
+            },
+        }
+        materialized = (
+            (LocationModel, ("id", "world_id", "code", "name", "description", "tags", "access_rules", "parent_location_id", "location_type", "environment_json", "discovery_rules_json", "scene_hooks_json")),
+            (NPCTemplateModel, ("id", "world_id", "code", "name", "role_type", "public_identity", "hidden_identity", "personality", "goals", "initial_location_id", "decision_profile_json")),
+            (ItemTemplateModel, ("id", "world_id", "code", "name", "item_type", "description", "effects_json", "ownership_rules_json", "visibility_rules_json", "use_effects_json")),
+        )
+        for model, fields in materialized:
+            rows = db.query(model).filter(model.world_id == session_row.world_id).all()
+            binding_state[model.__tablename__] = sorted(
+                [{field: getattr(row, field) for field in fields} for row in rows],
+                key=lambda row: str(row["id"]),
+            )
+        state.append(("content_binding_and_materialization", binding_state))
+
     encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -3597,6 +3833,20 @@ def execute_turn_service(
         )
     
     world_id = session.world_id
+    world_for_dispatch = db.get(WorldModel, world_id) if world_id else None
+    dispatch_ruleset = getattr(world_for_dispatch, "ruleset_json", None)
+    dispatch_ruleset = dispatch_ruleset if isinstance(dispatch_ruleset, dict) else {}
+    dispatch_content_profile = dispatch_ruleset.get("content_profile")
+    content_runtime_selected = (
+        isinstance(dispatch_content_profile, dict)
+        and dispatch_content_profile.get("id") == "content_v1"
+    )
+    if content_runtime_selected and "phase3_profile" in dispatch_ruleset:
+        # This marker conflict is rejected before claim creation or any other write.
+        raise ContentRuntimeError(
+            "CONTENT_BINDING_CONFLICT",
+            "world carries both content_v1 and phase-3 profiles",
+        )
 
     # Claim before business preparation; turn number is assigned under its session lock.
     claim_key = idempotency_key if idempotency_key is not None else str(uuid.uuid4())
@@ -3772,9 +4022,28 @@ def execute_turn_service(
         # legacy scheduler, which would treat the slice's namespaced conditions as
         # unconditional and fire the wrong events.
         try:
-            phase3_profile = resolve_simulation_profile(db, session)
+            phase3_profile = (
+                None if content_runtime_selected else resolve_simulation_profile(db, session)
+            )
         except TimeSimulationError as e:
             raise TurnServiceError(f"Phase-3 profile is unusable: {e}", session_id=session_id)
+
+        # Content binding and runtime state are loaded in this managed read phase,
+        # before input-intent/model execution. The first binding is retained for the
+        # lock-time revalidation below.
+        content_binding_prepared = None
+        content_runtime_context: Optional[ContentRuntimeContext] = None
+        content_result: Optional[Any] = None
+        content_write_event_ids: Dict[int, str] = {}
+        if content_runtime_selected:
+            content_binding_prepared = read_content_binding(db, session_id=session_id)
+            content_runtime_context = load_content_runtime_context(db, session_id=session_id)
+            if content_binding_prepared != content_runtime_context.binding:
+                raise ContentRuntimeError(
+                    "CONTENT_BINDING_MISMATCH",
+                    "content binding changed while loading runtime context",
+                )
+            db.info["content_runtime_context"] = content_runtime_context
 
         # The slice's advance, its write result and its NPC projection for this turn.
         phase3_context: Optional[SimulationContext] = None
@@ -3975,6 +4244,24 @@ def execute_turn_service(
                 auth_context, deterministic_action, deterministic_target
             )
 
+        if (
+            content_runtime_context is not None
+            and authorization.authorized
+            and authorization.action is not None
+            and authorization.action.handler == "player_move"
+        ):
+            source_code = content_runtime_context.state.player_location_code
+            destination_code = authorization.action.target_location_code
+            if (
+                destination_code
+                and destination_code != source_code
+                and not content_runtime_context.state.route_is_open(source_code or "", destination_code)
+            ):
+                authorization = AuthorizationOutcome(
+                    detail_code=ActionDetailCode.DOMAIN_RULE_BLOCKED,
+                    detail_message="the route is closed in this session",
+                )
+
         input_intent_result.authorization = authorization
 
         # A move whose target the player did not state is an explicitly ambiguous
@@ -4002,6 +4289,7 @@ def execute_turn_service(
                 input_intent_result=input_intent_result,
                 input_intent_metadata=input_intent_metadata,
                 clarification_question=None,
+                content_binding_prepared=content_binding_prepared,
             )
 
         # Step 6b: Adjudicate the action class's time cost exactly once.
@@ -4278,6 +4566,111 @@ def execute_turn_service(
             # themselves land in the final write section with these very ids.
             write_buffer.phase3_event_ids = plan_engine_event_ids(phase3_result)
 
+        if content_runtime_context is not None:
+            # The same admission result is adapted by the existing shared action
+            # codec; only its cursor/rule source differs from the phase-3 context.
+            from .world_advancer import WorldAdvancer
+
+            def _classify_content_action(value: Optional[str]) -> str:
+                normalized = (value or "").strip().lower()
+                if normalized in {"move", "follow"}:
+                    return PlayerActionKind.MOVE
+                if normalized in {"wait", "idle", "action", "inspect"}:
+                    return PlayerActionKind.IDLE
+                return PlayerActionKind.INSTANT
+
+            # Content's inspect slice is interruptible observational work; retain
+            # the shared spec builder with content semantics only, without invoking
+            # the phase-3 fixed TrialRules profile or the legacy scheduler.
+            content_action_rules = SimpleNamespace(
+                classify_player_action=_classify_content_action,
+            )
+            content_adjudication_context = SimpleNamespace(
+                rules=content_action_rules,
+                run_state=SimpleNamespace(logical_tick=content_runtime_context.run_state.logical_tick),
+            )
+            _admitted = bool(
+                player_action_resolution is not None
+                and player_action_resolution.status == ActionStatus.ACCEPTED
+            )
+            _target_code = None
+            if _admitted and movement_result is not None and movement_result.success:
+                _target_code = movement_result.new_location_code
+            content_player_action = build_player_action_spec(
+                content_adjudication_context,
+                action_type=action_type,
+                duration_minutes=_validator_result.accepted_elapsed_minutes,
+                target_location_code=_target_code,
+                refused=not _admitted,
+                detail_code=(
+                    str(player_action_resolution.detail_code)
+                    if player_action_resolution is not None
+                    and player_action_resolution.detail_code is not None
+                    else None
+                ),
+                detail_message=(
+                    player_action_resolution.detail_message
+                    if player_action_resolution is not None
+                    else None
+                ),
+            )
+            content_result = WorldAdvancer(content_runtime_context.rules).advance(
+                state=content_runtime_context.state,
+                player_action=content_player_action,
+                pending_steps=content_runtime_context.pending_steps,
+                consumed_step_keys=content_runtime_context.consumed_step_keys,
+                start_event_seq=content_runtime_context.start_event_seq,
+            )
+            content_write_event_ids = plan_engine_event_ids(content_result)
+            db.info["content_event_ids"] = dict(content_write_event_ids)
+            db.info["content_tick_positions"] = _content_tick_positions(
+                content_runtime_context, content_result
+            )
+            movement_result = _phase3_reconcile_movement(content_result, movement_result)
+            state_deltas.pop("location_id", None)
+            if movement_result is not None and movement_result.success and movement_result.new_location_id:
+                state_deltas["location_id"] = movement_result.new_location_id
+            elif movement_result is not None:
+                state_deltas["blocked_reason"] = movement_result.blocked_reason
+            if _admitted and content_result.player_result.status != PlayerActionStatus.COMPLETED:
+                _content_message = (
+                    content_result.player_result.detail_message
+                    or _phase3_engine_message(content_result)
+                )
+                _content_detail = (
+                    ActionDetailCode.ACTION_INTERRUPTED
+                    if content_result.player_result.status == PlayerActionStatus.INTERRUPTED
+                    else ActionDetailCode.DOMAIN_RULE_BLOCKED
+                )
+                player_action_resolution = reject_action(
+                    None,
+                    _content_detail,
+                    _content_message,
+                    reason=ActionReasonCode.TARGET_UNAVAILABLE,
+                )
+                phase3_resolution_override = _phase3_resolution_summary(
+                    action_type=action_type,
+                    result=content_result,
+                    fallback_used=intent_contract is None,
+                )
+                write_buffer.add_game_event(
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type="action_resolved",
+                    actor_id="player",
+                    target_ids=None,
+                    visibility_scope="player_visible",
+                    public_payload={
+                        "action_type": normalize_production_action_type(action_type),
+                        "status": "rejected",
+                    },
+                    result_json={
+                        "reason_code": ActionReasonCode.TARGET_UNAVAILABLE.value,
+                        "authorization_detail": str(_content_detail),
+                    },
+                )
+
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
             # Validate quest progression before checking
@@ -4365,6 +4758,10 @@ def execute_turn_service(
             baseline_quest_states=session_story_state_plan.quest_state_overlays(),
             npc_location_overrides=_phase3_npc_locations(db, session_id),
         )
+        if content_runtime_context is not None:
+            deterministic_recommended_actions = _content_recommended_actions(
+                db, content_runtime_context
+            )
         
         # Step 10: Build template narration (fallback-safe placeholder)
         narration = _build_narration(
@@ -4386,6 +4783,8 @@ def execute_turn_service(
             elapsed_minutes=(
                 phase3_result.actual_elapsed_minutes
                 if phase3_result is not None
+                else content_result.actual_elapsed_minutes
+                if content_result is not None
                 else _validator_result.accepted_elapsed_minutes
             ),
         )
@@ -4393,6 +4792,16 @@ def execute_turn_service(
         if phase3_result is not None:
             time_advance_result = project_time_summary(
                 phase3_result,
+                planned_elapsed_minutes=_validator_result.accepted_elapsed_minutes,
+                original_elapsed_minutes=_validator_result.original_elapsed_minutes,
+                adjusted=_validator_result.adjusted,
+                reason=_validator_result.reason,
+                category=_validator_result.category,
+                new_world_time=world_time,
+            )
+        elif content_result is not None:
+            time_advance_result = project_time_summary(
+                content_result,
                 planned_elapsed_minutes=_validator_result.accepted_elapsed_minutes,
                 original_elapsed_minutes=_validator_result.original_elapsed_minutes,
                 adjusted=_validator_result.adjusted,
@@ -4503,9 +4912,24 @@ def execute_turn_service(
             )
         _end_read_transaction(db)
         acquire_turn_lock(db, session_id)
-        if db.get_bind().dialect.name != "sqlite":
+        if content_binding_prepared is not None:
+            # Re-resolve the complete Session → Instance → World → SPV binding only
+            # after the lock is held. Runtime hash/version/world identity drift fails
+            # closed before any preparation or game-state write is applied.
+            locked_binding = read_content_binding(db, session_id=session_id)
+            if locked_binding != content_binding_prepared:
+                raise ContentRuntimeError(
+                    "CONTENT_BINDING_MISMATCH",
+                    "content session binding changed between preparation and locked write",
+                )
+        if db.get_bind().dialect.name != "sqlite" or content_binding_prepared is not None:
             fp_after = compute_state_fingerprint(db, session_id)
             if fp_after != fp_before:
+                if content_binding_prepared is not None:
+                    raise ContentRuntimeError(
+                        "CONTENT_BINDING_MISMATCH",
+                        "content binding or materialized definitions changed during turn preparation",
+                    )
                 raise TurnStateConflictError(session_id)
         
         # Step 14a: Apply the planned preparation writes, now inside the final write
@@ -4558,6 +4982,22 @@ def execute_turn_service(
                 write_events=True,
                 write_cognition=_is_memory_stage_enabled(db),
                 planned_event_ids=write_buffer.phase3_event_ids,
+            )
+        if content_result is not None:
+            _write_content_engine_events(
+                db,
+                session_id=session_id,
+                transaction_id=transaction_id,
+                turn_no=turn_no,
+                result=content_result,
+                planned_event_ids=content_write_event_ids,
+            )
+            apply_content_advance(
+                db,
+                session_id=session_id,
+                context=content_runtime_context,
+                advance_result=content_result,
+                write_cognition=_is_memory_stage_enabled(db),
             )
         try:
             write_buffer.flush(db)
@@ -4874,7 +5314,7 @@ def execute_turn_service(
         # namespaced rows outright, so a wiring mistake fails loudly instead of
         # firing a step whose conditions its legacy logic cannot read.
         scheduled_event_results: list[dict[str, Any]] = []
-        if phase3_result is None:
+        if phase3_result is None and content_result is None:
             try:
                 from ..models.events import WorldTime
                 world_time_obj = WorldTime(
@@ -5412,6 +5852,10 @@ def execute_turn_service(
         if db.info.get("turn_write_buffer") is write_buffer:
             db.info.pop("turn_write_buffer", None)
         db.info.pop("phase3_npc_overlay", None)
+        db.info.pop("content_runtime_context", None)
+        db.info.pop("content_npc_decision_contexts", None)
+        db.info.pop("content_event_ids", None)
+        db.info.pop("content_tick_positions", None)
 
 
 def _claim_row_is_committed(db: Session, token) -> bool:
@@ -5598,6 +6042,7 @@ def _commit_clarification_turn(
     input_intent_result: Optional[LLMStageResult] = None,
     input_intent_metadata: Optional[Dict[str, Any]] = None,
     clarification_question: Optional[str] = None,
+    content_binding_prepared: Optional[ContentRuntimeBinding] = None,
 ) -> TurnResult:
     """Commit an explicitly ambiguous input as a zero-time, zero-action turn.
 
@@ -5626,7 +6071,16 @@ def _commit_clarification_turn(
         )
     _end_read_transaction(db)
     acquire_turn_lock(db, session_id)
-    if db.get_bind().dialect.name != "sqlite":
+    if content_binding_prepared is not None:
+        locked_binding = read_content_binding(db, session_id=session_id)
+        if locked_binding != content_binding_prepared:
+            raise ContentRuntimeError(
+                "CONTENT_BINDING_MISMATCH",
+                "content binding changed before the clarification turn commit",
+            )
+        if compute_state_fingerprint(db, session_id) != fp_before:
+            raise TurnStateConflictError(session_id)
+    elif db.get_bind().dialect.name != "sqlite":
         fp_after = compute_state_fingerprint(db, session_id)
         if fp_after != fp_before:
             raise TurnStateConflictError(session_id)

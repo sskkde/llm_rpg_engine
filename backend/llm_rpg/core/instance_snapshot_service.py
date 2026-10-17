@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from ..core.feature_flags import instance_snapshot_enabled
 from ..core.time_simulation import PHASE3_NAMESPACE
+from ..core.content_runtime import CONTENT_NAMESPACE
 from ..core.time_simulation_persistence import resolve_simulation_profile
 from ..storage.models import (
     InstanceSnapshotModel,
@@ -42,6 +43,7 @@ from ..storage.models import (
     MemorySummaryModel,
     NPCMemoryScopeModel,
     NPCPrivateMemoryModel,
+    WorldModel,
 )
 from ..storage.repositories import (
     InstanceSnapshotRepository,
@@ -83,6 +85,55 @@ def _scrub_secrets(data: Any) -> Any:
     if isinstance(data, list):
         return [_scrub_secrets(item) for item in data]
     return data
+
+
+class SnapshotApplyError(Exception):
+    """Raised when a snapshot operation is unsupported or fails."""
+
+
+class SnapshotRewindRefusedError(SnapshotApplyError):
+    """Raised when snapshot rewind could corrupt a deterministic simulation."""
+
+
+class ContentSnapshotUnsupportedError(SnapshotRewindRefusedError):
+    """Content run-state is not represented by the legacy snapshot contract."""
+
+    code = "CONTENT_SNAPSHOT_UNSUPPORTED"
+
+    def __init__(self):
+        super().__init__(f"{self.code}: content_v1 snapshots are not supported")
+
+
+def _contains_content_namespace(value: Any) -> bool:
+    if isinstance(value, dict):
+        return CONTENT_NAMESPACE in value or any(
+            _contains_content_namespace(child) for child in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_content_namespace(child) for child in value)
+    return False
+
+
+def _refuse_content_snapshot_rewind(
+    db: DBSession,
+    session_id: str,
+    snapshot_payload: Any = None,
+) -> None:
+    """Reject content_v1 snapshots before reading or applying mutable state."""
+    if _contains_content_namespace(snapshot_payload):
+        raise ContentSnapshotUnsupportedError()
+    session = SessionRepository(db).get_by_id(session_id)
+    if session is None:
+        return
+    session_state = SessionStateRepository(db).get_by_session(session_id)
+    global_flags = getattr(session_state, "global_flags_json", None)
+    if isinstance(global_flags, dict) and CONTENT_NAMESPACE in global_flags:
+        raise ContentSnapshotUnsupportedError()
+    world = db.get(WorldModel, session.world_id) if session.world_id else None
+    ruleset = getattr(world, "ruleset_json", None)
+    profile = ruleset.get("content_profile") if isinstance(ruleset, dict) else None
+    if isinstance(profile, dict) and profile.get("id") == "content_v1":
+        raise ContentSnapshotUnsupportedError()
 
 
 def compute_checksum(snapshot_json: Dict[str, Any]) -> str:
@@ -287,6 +338,9 @@ def create_baseline_snapshot(
     Returns:
         The newly created InstanceSnapshotModel.
     """
+    # A baseline is a read-only creation-time capture, not a rewind. Content_v1
+    # remains blocked in apply/restore because replaying its payload would rewind
+    # state without re-running the event-time visibility and route invariants.
     snapshot_json = build_session_snapshot_json(db, session_id)
     checksum = compute_checksum(snapshot_json)
 
@@ -324,6 +378,7 @@ def create_manual_snapshot(
     Returns:
         The newly created InstanceSnapshotModel.
     """
+    _refuse_content_snapshot_rewind(db, session_id)
     snapshot_json = build_session_snapshot_json(db, session_id)
     checksum = compute_checksum(snapshot_json)
 
@@ -338,14 +393,6 @@ def create_manual_snapshot(
         "parent_snapshot_id": parent_snapshot_id,
         "source_transaction_id": source_transaction_id,
     })
-
-
-class SnapshotApplyError(Exception):
-    """Raised when a snapshot apply operation fails."""
-
-
-class SnapshotRewindRefusedError(SnapshotApplyError):
-    """Raised when snapshot rewind could corrupt a phase-3 simulation."""
 
 
 def _contains_phase3_namespace(value: Any) -> bool:
@@ -440,8 +487,10 @@ def apply_snapshot(
         raise SnapshotApplyError(f"Snapshot not found: {snapshot_id}")
 
     session_id = snap.snapshot_json.get("session_id") or snap.session_id
+    _refuse_content_snapshot_rewind(db, session_id, snap.snapshot_json)
     _refuse_phase3_snapshot_rewind(db, session_id, snap.snapshot_json)
     if snap.session_id != session_id:
+        _refuse_content_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
         _refuse_phase3_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
 
     expected_checksum = compute_checksum(snap.snapshot_json)
@@ -681,8 +730,10 @@ def restore_snapshot(
         raise ValueError(f"Snapshot not found: {snapshot_id}")
 
     session_id = snap.snapshot_json.get("session_id") or snap.session_id
+    _refuse_content_snapshot_rewind(db, session_id, snap.snapshot_json)
     _refuse_phase3_snapshot_rewind(db, session_id, snap.snapshot_json)
     if snap.session_id != session_id:
+        _refuse_content_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
         _refuse_phase3_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
 
     return {

@@ -19,6 +19,10 @@ from ..storage.repositories import (
     NPCTemplateRepository,
     NPCRelationshipMemoryRepository,
 )
+from ..core.projections import (
+    project_content_public_status,
+    resolve_content_public_visibility,
+)
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/player", tags=["player"])
@@ -135,8 +139,14 @@ def list_relationships(
             detail=f"Invalid sort field: '{sort}'. Valid: trust, respect, fear, last_interaction",
         )
 
+    content_visibility = resolve_content_public_visibility(db, session)
     npc_state_repo = SessionNPCStateRepository(db)
     npc_states = npc_state_repo.get_by_session(session_id)
+    if content_visibility is not None:
+        npc_states = [
+            row for row in npc_states
+            if row.npc_template_id in content_visibility.known_npc_template_ids
+        ]
 
     npc_repo = NPCTemplateRepository(db)
 
@@ -189,8 +199,14 @@ def relationship_summary(
     if session.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    content_visibility = resolve_content_public_visibility(db, session)
     npc_state_repo = SessionNPCStateRepository(db)
     npc_states = npc_state_repo.get_by_session(session_id)
+    if content_visibility is not None:
+        npc_states = [
+            row for row in npc_states
+            if row.npc_template_id in content_visibility.known_npc_template_ids
+        ]
 
     if not npc_states:
         return RelationshipSummaryResponse(
@@ -250,6 +266,13 @@ def get_relationship_detail(
     if session.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    content_visibility = resolve_content_public_visibility(db, session)
+    if (
+        content_visibility is not None
+        and npc_id not in content_visibility.known_npc_template_ids
+    ):
+        raise HTTPException(status_code=404, detail="NPC not found")
+
     npc_state_repo = SessionNPCStateRepository(db)
     npc_state = npc_state_repo.get_by_session_and_npc(session_id, npc_id)
 
@@ -264,34 +287,39 @@ def get_relationship_detail(
 
     respect, fear = _extract_respect_fear(npc_state.status_flags or {})
 
-    raw_memories = (
-        db.query(NPCRelationshipMemoryModel)
-        .filter(
-            NPCRelationshipMemoryModel.session_id == session_id,
-            or_(
-                and_(
-                    NPCRelationshipMemoryModel.npc_id == npc_id,
-                    NPCRelationshipMemoryModel.target_id == "player",
+    if content_visibility is not None:
+        # Relationship-memory text/impact is not in the content_v1 public whitelist.
+        history = []
+        public_status_flags = project_content_public_status(npc_state.status_flags)
+    else:
+        raw_memories = (
+            db.query(NPCRelationshipMemoryModel)
+            .filter(
+                NPCRelationshipMemoryModel.session_id == session_id,
+                or_(
+                    and_(
+                        NPCRelationshipMemoryModel.npc_id == npc_id,
+                        NPCRelationshipMemoryModel.target_id == "player",
+                    ),
+                    and_(
+                        NPCRelationshipMemoryModel.npc_id == "player",
+                        NPCRelationshipMemoryModel.target_id == npc_id,
+                    ),
                 ),
-                and_(
-                    NPCRelationshipMemoryModel.npc_id == "player",
-                    NPCRelationshipMemoryModel.target_id == npc_id,
-                ),
-            ),
+            )
+            .order_by(desc(NPCRelationshipMemoryModel.created_turn))
+            .limit(10)
+            .all()
         )
-        .order_by(desc(NPCRelationshipMemoryModel.created_turn))
-        .limit(10)
-        .all()
-    )
-
-    history = [
-        InteractionHistoryItem(
-            turn=m.created_turn,
-            content=m.content or "",
-            impact=m.impact_json if isinstance(m.impact_json, dict) else None,
-        )
-        for m in reversed(raw_memories)
-    ]
+        history = [
+            InteractionHistoryItem(
+                turn=m.created_turn,
+                content=m.content or "",
+                impact=m.impact_json if isinstance(m.impact_json, dict) else None,
+            )
+            for m in reversed(raw_memories)
+        ]
+        public_status_flags = npc_state.status_flags or {}
 
     return RelationshipDetailResponse(
         npc_id=npc_id,
@@ -302,6 +330,6 @@ def get_relationship_detail(
         suspicion_score=npc_state.suspicion_score,
         respect_score=respect,
         fear_score=fear,
-        status_flags=npc_state.status_flags or {},
+        status_flags=public_status_flags,
         interaction_history=history,
     )

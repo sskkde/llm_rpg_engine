@@ -22,6 +22,10 @@ from ..storage.repositories import (
     LocationRepository,
 )
 from ..core.time_simulation_persistence import resolve_simulation_profile
+from ..core.projections import (
+    project_content_public_status,
+    resolve_content_public_visibility,
+)
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/player/sessions", tags=["player-locations"])
@@ -166,17 +170,28 @@ def get_current_location(
     accessible_ids = _accessible_location_ids(current_location_id, world_locations)
     connections = [lid for lid in accessible_ids if lid != current_location_id]
 
+    content_visibility = resolve_content_public_visibility(
+        db, session, location_id=current_location_id
+    )
     npc_repo = SessionNPCStateRepository(db)
     session_npcs = npc_repo.get_by_session(session_id)
     npcs_present = [
         NPCPresent(
             npc_id=npc.npc_template_id,
             name=getattr(npc.npc_template, "name", npc.npc_template_id) if npc.npc_template else npc.npc_template_id,
-            mood=getattr(npc, "short_memory_summary", None),
-            status_flags=npc.status_flags,
+            mood=(None if content_visibility is not None else getattr(npc, "short_memory_summary", None)),
+            status_flags=(
+                project_content_public_status(npc.status_flags)
+                if content_visibility is not None
+                else npc.status_flags
+            ),
         )
         for npc in session_npcs
         if npc.current_location_id == current_location_id
+        and (
+            content_visibility is None
+            or npc.npc_template_id in content_visibility.perceivable_npc_template_ids
+        )
     ]
 
     item_repo = SessionInventoryItemRepository(db)
@@ -190,6 +205,10 @@ def get_current_location(
         for item in session_items
         if item.owner_type == "location"
         and item.owner_ref_id == current_location_id
+        and (
+            content_visibility is None
+            or item.instance_key in content_visibility.perceivable_item_instance_keys
+        )
     ]
 
     return LocationDetailResponse(
@@ -237,6 +256,9 @@ def get_location_detail(
     current_location_id = session_state.current_location_id if session_state else None
     is_current = (location.id == current_location_id)
     phase3_profile = resolve_simulation_profile(db, session)
+    content_visibility = resolve_content_public_visibility(
+        db, session, location_id=location.id
+    )
 
     if _is_location_hidden(location) and not is_current:
         raise HTTPException(
@@ -248,7 +270,35 @@ def get_location_detail(
     accessible_ids = _accessible_location_ids(location.id, world_locations)
     connections = [lid for lid in accessible_ids if lid != location.id]
 
-    if phase3_profile is not None and not is_current:
+    if content_visibility is not None:
+        npc_repo = SessionNPCStateRepository(db)
+        session_npcs = npc_repo.get_by_session(session_id)
+        npcs_present = [
+            NPCPresent(
+                npc_id=npc.npc_template_id,
+                name=getattr(npc.npc_template, "name", npc.npc_template_id) if npc.npc_template else npc.npc_template_id,
+                mood=None,
+                status_flags=project_content_public_status(npc.status_flags),
+            )
+            for npc in session_npcs
+            if npc.current_location_id == location_id
+            and npc.npc_template_id in content_visibility.perceivable_npc_template_ids
+        ]
+
+        item_repo = SessionInventoryItemRepository(db)
+        session_items = item_repo.get_by_session(session_id)
+        items_present = [
+            ItemPresent(
+                item_id=item.item_template_id,
+                name=getattr(item.item_template, "name", item.item_template_id) if item.item_template else item.item_template_id,
+                quantity=item.quantity,
+            )
+            for item in session_items
+            if item.owner_type == "location"
+            and item.owner_ref_id == location_id
+            and item.instance_key in content_visibility.perceivable_item_instance_keys
+        ]
+    elif phase3_profile is not None and not is_current:
         npcs_present = []
         items_present = []
     else:

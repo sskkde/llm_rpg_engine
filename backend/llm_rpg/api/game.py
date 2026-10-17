@@ -40,6 +40,7 @@ from ..core.turn_service import (
 )
 from ..core.state_reconstruction import reconstruct_canonical_state, StateReconstructionError
 from ..core.canonical_state import CanonicalStateManager
+from ..core.projections import resolve_content_public_visibility
 from ..llm.service import LLMService
 from ..services.settings import SystemSettingsService
 
@@ -425,6 +426,15 @@ def replay_turns(
                 for key, value in global_flags.items()
                 if not (isinstance(key, str) and key.startswith("__"))
             }
+        content_visibility = resolve_content_public_visibility(db, session)
+        if content_visibility is None:
+            # Preserve the legacy/phase-3 historical total-count contract.
+            npc_count = len(reconstructed_state.npc_states)
+        else:
+            npc_count = sum(
+                npc_code in content_visibility.perceivable_npc_codes
+                for npc_code in reconstructed_state.npc_states
+            )
         
         return ReplayResponse(
             game_id=game_id,
@@ -434,7 +444,7 @@ def replay_turns(
                 "player_state": reconstructed_state.player_state.model_dump(),
                 "world_state": world_state,
                 "scene_state": reconstructed_state.current_scene_state.model_dump(),
-                "npc_count": len(reconstructed_state.npc_states),
+                "npc_count": npc_count,
                 "location_count": len(reconstructed_state.location_states),
             },
             events_replayed=len(events),

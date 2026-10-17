@@ -2,7 +2,9 @@
 
 > **当前选定目标**：Python（FastAPI）游戏后端 + Next.js Web 前端，按本文四阶段推进。设计基线见 [RFC（LLM RPG Engine 设计总结，2026-10-08）](./llm_rpg_engine_design_summary_2026-10-08.md)。旧 [DSH 原生迁移目标](../v2_dsh_rpg_engine.md)已被替代，仅保留历史正文。
 >
-> **进度（2026-10-16）**：**阶段二已完成**（契约收紧、实体授权、领域裁决、事件与认知事实边界、安全回退、恢复兼容；远端全量验收两套配置均 0 失败，独立复核缺陷全部修复）。证据见 [`.omo/evidence/phase2/20261016-p2-authority/`](../../.omo/evidence/phase2/20261016-p2-authority/)；计划见 [阶段二实施计划](../../.omo/plans/phase2-llm-authority.md)。阶段三至四仍未实施。
+> **进度（2026-10-17）**：**阶段三已完成**（最小时间模拟纵切片：固定微型世界、共享 `WorkingState` 的按时间排序推进、离场 NPC 与唯一物品竞争、可感知中断与实际时间截断、单次权威提交与投影边界）。证据见 [`.omo/evidence/phase3/20261017-p3-timesim/`](../../.omo/evidence/phase3/20261017-p3-timesim/)；计划见 [阶段三实施计划](../../.omo/plans/phase3-time-simulation.md)。阶段四未实施。
+>
+> **进度（2026-10-16）**：**阶段二已完成**（契约收紧、实体授权、领域裁决、事件与认知事实边界、安全回退、恢复兼容；远端全量验收两套配置均 0 失败，独立复核缺陷全部修复）。证据见 [`.omo/evidence/phase2/20261016-p2-authority/`](../../.omo/evidence/phase2/20261016-p2-authority/)；计划见 [阶段二实施计划](../../.omo/plans/phase2-llm-authority.md)。
 >
 > **进度（2026-10-15）**：**阶段一已完成**（原阶段一计划 + [阶段一补齐计划](../../.omo/plans/phase1-turn-foundation-completion.md) 的 W0–W4 与收口修复）。证据见 [`.omo/evidence/phase1/20261015-p1-completion/`](../../.omo/evidence/phase1/20261015-p1-completion/)；当前保证与残留边界见 [`backend/docs/RECOVERY_AND_INVARIANTS.md`](../../backend/docs/RECOVERY_AND_INVARIANTS.md)。
 >
@@ -31,6 +33,7 @@
 - **目标：** 用小规模可验证样例证明规则能够驱动世界随时间演进。
 - **范围：** 少量地点、2 名 NPC、唯一物品与定时事件；按时间排序并共享 WorkingState；支持离场推进；覆盖资源冲突与中断；规则优先。
 - **退出标准：** 同一输入按确定规则推进并得到一致结果；事件顺序、共享状态、冲突和中断可验证；离场推进不依赖逐回合 LLM 托管。
+- **实施结果（2026-10-17）：** 已交付 opt-in 专用世界 `phase3_trial_micro`（`World.ruleset_json.phase3_profile = {id: trial_micro_v1, schema_version: 1}`）与封闭规则集：3 个地点（山门 / 广场 / 试炼峰）、2 名 NPC（甲 / 乙）、1 枚唯一令牌与固定 tick 表（+2 出发、+5 抵达与同刻争用、+6 试用、+7 可感知中断、+8/+9 后续行程）。正式回合入口内复用既有准入链，另由纯内存 `WorldAdvancer` 在**同一个 `WorkingState`** 上按 `(logical_tick, phase, actor, step)` 排序推进：同刻竞争即时读取前一步结果（甲取得、乙明确失败且不复制实例）、离场 NPC 与物品操作不依赖逐回合 LLM、玩家持续动作在 +7 被中断并**实际截断**（`planned=10/15 → actual=7`，截短时长不再过 validator）。运行态不新增表：游标与一次性状态在 `session_states.global_flags_json` 的命名空间内，NPC 行程在 `session_npc_states.hidden_plan_state`，定时步骤在 `scheduled_events.trigger_conditions_json`，唯一物品只更新同一库存行的 owner；首回合库存/调度/游标经既有初始化计划延迟落库，澄清回合不落任何初始化行。旧 `ScheduledEventProcessor` 拒绝阶段三命名空间行，普通世界行为不变。**未提前实施阶段四**：无通用 Condition/Trigger/Effect DSL、无完整 Schedule/Goal/CurrentPlan、无内容编辑器、无第二场景纯配置能力、无存档内容版本绑定、无战斗伤害系统、无后台世界循环。证据与残留见 [`.omo/evidence/phase3/20261017-p3-timesim/`](../../.omo/evidence/phase3/20261017-p3-timesim/)。
 
 ## 阶段四：沉淀内容能力
 

@@ -23,6 +23,8 @@ from ..storage.models import (
     SessionPlayerStateModel,
     SessionNPCStateModel,
     SessionQuestStateModel,
+    SessionInventoryItemModel,
+    ScheduledEventModel,
     NPCTemplateModel,
     QuestTemplateModel,
     LocationModel,
@@ -34,6 +36,8 @@ from ..storage.repositories import (
     SessionPlayerStateRepository,
     SessionNPCStateRepository,
     SessionQuestStateRepository,
+    SessionInventoryItemRepository,
+    ScheduledEventRepository,
     NPCTemplateRepository,
     QuestTemplateRepository,
     LocationRepository,
@@ -50,116 +54,42 @@ class SessionInitializationError(Exception):
 
 
 def initialize_session_story_state(db: Session, session_id: str) -> None:
-    """
-    Initialize baseline story state rows for a session.
-    
+    """Initialize baseline story state rows for a session.
+
     This function creates the required baseline rows if they don't exist:
     - SessionStateModel with default location
     - SessionPlayerStateModel with default stats
     - SessionNPCStateModel rows for all NPCs in the world
     - SessionQuestStateModel rows for visible quests
-    
+    - (phase 3) the slice's inventory row, scheduled steps and run cursor
+
     The function is idempotent - running twice leaves row counts unchanged.
-    
+
+    It is deliberately a thin wrapper over ``plan_session_story_state`` +
+    ``apply_session_story_state``: the turn path already defers those same rows
+    into its final transaction, and having one implementation is what keeps the
+    eager and deferred baselines from drifting apart.
+
     Args:
         db: SQLAlchemy database session
         session_id: The session ID to initialize
-        
+
     Raises:
         SessionInitializationError: If session not found or initialization fails
     """
-    session_repo = SessionRepository(db)
-    session_state_repo = SessionStateRepository(db)
-    player_state_repo = SessionPlayerStateRepository(db)
-    npc_state_repo = SessionNPCStateRepository(db)
-    quest_state_repo = SessionQuestStateRepository(db)
-    npc_template_repo = NPCTemplateRepository(db)
-    quest_template_repo = QuestTemplateRepository(db)
-    location_repo = LocationRepository(db)
-    
-    session = session_repo.get_by_id(session_id)
-    if session is None:
-        raise SessionInitializationError(
-            f"Session not found: {session_id}",
-            session_id=session_id,
-        )
-    
-    world_id = session.world_id
-    
-    default_location = location_repo.get_by_code(world_id, "square")
-    default_location_id = default_location.id if default_location else None
-    
-    existing_session_state = session_state_repo.get_by_session(session_id)
-    if existing_session_state is None:
-        session_state_repo.create_or_update({
-            "session_id": session_id,
-            "current_time": "修仙历 春 第1日 辰时",
-            "time_phase": "辰时",
-            "current_location_id": default_location_id,
-            "active_mode": "exploration",
-            "global_flags_json": {},
-        })
-    
-    existing_player_state = player_state_repo.get_by_session(session_id)
-    if existing_player_state is None:
-        player_state_repo.create_or_update({
-            "session_id": session_id,
-            "realm_stage": "炼气一层",
-            "hp": 100,
-            "max_hp": 100,
-            "stamina": 100,
-            "spirit_power": 100,
-            "relation_bias_json": {},
-            "conditions_json": [],
-        })
-    
-    npc_templates = npc_template_repo.get_by_world(world_id)
-    
-    for npc_template in npc_templates:
-        existing_npc_state = npc_state_repo.get_by_session_and_npc(
-            session_id, npc_template.id
-        )
-        
-        if existing_npc_state is None:
-            npc_location_id = default_location_id
-            
-            npc_state_repo.create_or_update({
-                "session_id": session_id,
-                "npc_template_id": npc_template.id,
-                "current_location_id": npc_location_id,
-                "trust_score": 50,
-                "suspicion_score": 0,
-                "status_flags": {},
-                "short_memory_summary": None,
-                "hidden_plan_state": None,
-            })
-    
-    quest_templates = quest_template_repo.get_by_world(world_id)
-    
-    for quest_template in quest_templates:
-        if quest_template.visibility != "visible":
-            continue
-        
-        existing_quest_state = quest_state_repo.get_by_session_and_quest(
-            session_id, quest_template.id
-        )
-        
-        if existing_quest_state is None:
-            quest_state_repo.create({
-                "session_id": session_id,
-                "quest_template_id": quest_template.id,
-                "current_step_no": 1,
-                "progress_json": {},
-                "status": "active",
-            })
-    
-    # P10-C Phase 4: Seed major NPC private memories when NPC_MEMORY_FIRST_ENABLED=true
-    seed_major_npc_private_memories(db, session_id, world_id)
+    plan = plan_session_story_state(db, session_id)
+    apply_session_story_state(db, plan)
 
 
 @dataclass
 class SessionStoryStatePlan:
-    """Read-only baseline inserts prepared for one turn."""
+    """Read-only baseline inserts prepared for one turn.
+
+    Phase 3 adds two deferred row groups to the same plan so a slice session's
+    first turn writes its inventory row, its scheduled steps and its run cursor
+    inside the single authoritative transaction -- and a clarification turn,
+    which never applies the plan, writes none of them.
+    """
 
     session_id: str
     world_id: str
@@ -167,6 +97,8 @@ class SessionStoryStatePlan:
     player_state: Optional[Dict[str, Any]] = None
     npc_states: List[Dict[str, Any]] = field(default_factory=list)
     quest_states: List[Dict[str, Any]] = field(default_factory=list)
+    inventory_items: List[Dict[str, Any]] = field(default_factory=list)
+    scheduled_events: List[Dict[str, Any]] = field(default_factory=list)
     seed_memory_plan: List[str] = field(default_factory=list)
     seed_memories_enabled: bool = False
 
@@ -182,6 +114,12 @@ class SessionStoryStatePlan:
     def quest_state_overlays(self) -> List[SessionQuestStateModel]:
         return [SessionQuestStateModel(**row) for row in self.quest_states]
 
+    def inventory_item_overlays(self) -> List[SessionInventoryItemModel]:
+        return [SessionInventoryItemModel(**row) for row in self.inventory_items]
+
+    def scheduled_event_overlays(self) -> List[ScheduledEventModel]:
+        return [ScheduledEventModel(**row) for row in self.scheduled_events]
+
 
 def plan_session_story_state(db: Session, session_id: str) -> SessionStoryStatePlan:
     """Read current rows and compute missing baseline rows without writing."""
@@ -190,33 +128,47 @@ def plan_session_story_state(db: Session, session_id: str) -> SessionStoryStateP
         raise SessionInitializationError(f"Session not found: {session_id}", session_id=session_id)
 
     world_id = session.world_id
-    default_location = LocationRepository(db).get_by_code(world_id, "square")
-    default_location_id = default_location.id if default_location else None
     plan = SessionStoryStatePlan(session_id=session_id, world_id=world_id)
 
-    if SessionStateRepository(db).get_by_session(session_id) is None:
-        plan.session_state = {
-            "id": generate_uuid(), "session_id": session_id,
-            "current_time": "修仙历 春 第1日 辰时", "time_phase": "辰时",
-            "current_location_id": default_location_id, "active_mode": "exploration",
-            "global_flags_json": {},
-        }
+    # Phase 3: a slice world has its own baseline (its own starting location, its
+    # own run cursor, its own scheduled steps). The generic "square" defaults do
+    # not exist there, so the slice plans those groups instead.
+    from .time_simulation_persistence import plan_phase3_baseline
+
+    phase3_baseline = plan_phase3_baseline(db, session_id, world_id)
+    if phase3_baseline is not None:
+        plan.session_state = phase3_baseline.session_state
+        plan.npc_states = list(phase3_baseline.npc_states)
+        plan.inventory_items = list(phase3_baseline.inventory_items)
+        plan.scheduled_events = list(phase3_baseline.scheduled_events)
+    else:
+        default_location = LocationRepository(db).get_by_code(world_id, "square")
+        default_location_id = default_location.id if default_location else None
+
+        if SessionStateRepository(db).get_by_session(session_id) is None:
+            plan.session_state = {
+                "id": generate_uuid(), "session_id": session_id,
+                "current_time": "修仙历 春 第1日 辰时", "time_phase": "辰时",
+                "current_location_id": default_location_id, "active_mode": "exploration",
+                "global_flags_json": {},
+            }
+
+        npc_repo = SessionNPCStateRepository(db)
+        for template in NPCTemplateRepository(db).get_by_world(world_id):
+            if npc_repo.get_by_session_and_npc(session_id, template.id) is None:
+                plan.npc_states.append({
+                    "id": generate_uuid(), "session_id": session_id,
+                    "npc_template_id": template.id, "current_location_id": default_location_id,
+                    "trust_score": 50, "suspicion_score": 0, "status_flags": {},
+                    "short_memory_summary": None, "hidden_plan_state": None,
+                })
+
     if SessionPlayerStateRepository(db).get_by_session(session_id) is None:
         plan.player_state = {
             "id": generate_uuid(), "session_id": session_id, "realm_stage": "炼气一层",
             "hp": 100, "max_hp": 100, "stamina": 100, "spirit_power": 100,
             "relation_bias_json": {}, "conditions_json": [],
         }
-
-    npc_repo = SessionNPCStateRepository(db)
-    for template in NPCTemplateRepository(db).get_by_world(world_id):
-        if npc_repo.get_by_session_and_npc(session_id, template.id) is None:
-            plan.npc_states.append({
-                "id": generate_uuid(), "session_id": session_id,
-                "npc_template_id": template.id, "current_location_id": default_location_id,
-                "trust_score": 50, "suspicion_score": 0, "status_flags": {},
-                "short_memory_summary": None, "hidden_plan_state": None,
-            })
 
     quest_repo = SessionQuestStateRepository(db)
     for template in QuestTemplateRepository(db).get_by_world(world_id):
@@ -258,6 +210,16 @@ def apply_session_story_state(db: Session, plan: SessionStoryStatePlan) -> None:
     for row in plan.quest_states:
         if quest_repo.get_by_session_and_quest(plan.session_id, row["quest_template_id"]) is None:
             quest_repo.create(row)
+    # Phase 3: the slice's inventory row and scheduled steps are baseline rows too.
+    # The plan already decided which ones are missing, so this only creates them.
+    inventory_repo = SessionInventoryItemRepository(db)
+    for row in plan.inventory_items:
+        if inventory_repo.get_by_id(row["id"]) is None:
+            inventory_repo.create(row)
+    scheduled_repo = ScheduledEventRepository(db)
+    for row in plan.scheduled_events:
+        if scheduled_repo.get_by_id(row["id"]) is None:
+            scheduled_repo.create(row)
     if plan.seed_memories_enabled:
         seed_major_npc_private_memories(db, plan.session_id, plan.world_id)
 

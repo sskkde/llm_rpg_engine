@@ -72,6 +72,11 @@ class ActionDetailCode(str, Enum):
     NO_HANDLER = "no_handler"
     UNSUPPORTED_ACTION = "unsupported_action"
 
+    # Phase-3 time simulation: a perceivable world interrupt cut the player's
+    # continuous action short. Internal only -- it maps onto the existing public
+    # ``target_unavailable`` vocabulary so the v1 public enum is unchanged.
+    ACTION_INTERRUPTED = "action_interrupted"
+
 
 def public_reason_for_detail(detail: Optional[ActionDetailCode]) -> Optional[ActionReasonCode]:
     """Map restricted detail onto the coarse public reason vocabulary.
@@ -127,6 +132,7 @@ _TARGET_DETAILS = frozenset(
         ActionDetailCode.EVENT_REFERENCE_FOREIGN,
         ActionDetailCode.RECOMMENDED_ACTION_UNKNOWN,
         ActionDetailCode.MEMORY_ID_NOT_AVAILABLE,
+        ActionDetailCode.ACTION_INTERRUPTED,
     }
 )
 

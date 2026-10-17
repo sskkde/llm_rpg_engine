@@ -146,6 +146,12 @@ class TurnWriteBuffer:
         self.game_events: List[PlannedGameEvent] = []
         self.event_logs: List[PlannedEventLog] = []
         self.model_call_logs: List[PlannedModelCallLog] = []
+        #: Pre-allocated engine-event ids of the phase-3 advance, keyed by the
+        #: engine's own sequence number. The advance decides its facts during
+        #: preparation while their rows land in the final write section; the ids
+        #: must already be visible to the stages that may only *reference* events
+        #: the engine has decided (``_planned_game_event_ids``).
+        self.phase3_event_ids: Dict[int, str] = {}
         self._flushed_event_logs: Dict[str, Any] = {}
         self._flushed = False
 

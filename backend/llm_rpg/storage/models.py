@@ -363,6 +363,10 @@ class StoryPackageVersionModel(Base):
     published_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    # Phase 4 content_v1 runtime bundle fields (nullable by design).
+    runtime_bundle_json = Column(JSON, nullable=True)
+    runtime_hash = Column(String(64), nullable=True)
+    runtime_schema_version = Column(Integer, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("story_package_id", "version"),
@@ -512,9 +516,19 @@ class SessionInventoryItemModel(Base):
     durability = Column(Integer, nullable=True)
     bound_flag = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.now)
+    # Phase 4 content_v1 instance identity (nullable by design).
+    instance_key = Column(String, nullable=True)
 
     session = relationship("SessionModel", back_populates="inventory_items")
     item_template = relationship("ItemTemplateModel", back_populates="inventory_items")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "instance_key",
+            name="uq_session_inventory_items_session_instance_key",
+        ),
+    )
 
 
 class SessionQuestStateModel(Base):
@@ -600,11 +614,26 @@ class MemoryFactModel(Base):
     source_event_id = Column(String, ForeignKey("event_logs.id"), nullable=True)
     embedding = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
+    # Phase 4 content_v1 provenance and deduplication fields (nullable by design).
+    source_game_event_id = Column(
+        String,
+        ForeignKey("game_events.id", name="fk_memory_facts_source_game_event_id"),
+        nullable=True,
+    )
+    derivation_key = Column(String, nullable=True)
 
     session = relationship("SessionModel", back_populates="memory_facts")
     source_event = relationship("EventLogModel", back_populates="memory_facts")
 
-    __table_args__ = (Index("idx_memory_facts_lookup", "session_id", "fact_type", "subject_ref"),)
+    __table_args__ = (
+        Index("idx_memory_facts_lookup", "session_id", "fact_type", "subject_ref"),
+        UniqueConstraint(
+            "session_id",
+            "subject_ref",
+            "derivation_key",
+            name="uq_memory_facts_session_subject_derivation",
+        ),
+    )
 
 
 class ModelCallLogModel(Base):
@@ -1031,6 +1060,8 @@ class NPCPrivateMemoryModel(Base):
     recall_policy_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, nullable=True, default=datetime.now)
     updated_at = Column(DateTime, nullable=True, default=datetime.now, onupdate=datetime.now)
+    # Phase 4 content_v1 derivation identity (nullable by design).
+    derivation_key = Column(String, nullable=True)
 
     session = relationship("SessionModel", back_populates="npc_private_memories")
     npc_template = relationship("NPCTemplateModel")
@@ -1042,6 +1073,12 @@ class NPCPrivateMemoryModel(Base):
         Index("idx_npc_private_memories_type", "session_id", "memory_type"),
         Index("idx_npc_private_memories_kind_status", "session_id", "npc_id", "memory_kind", "status"),
         Index("idx_npc_private_memories_source_turn", "session_id", "npc_id", "source_turn_no"),
+        UniqueConstraint(
+            "session_id",
+            "npc_id",
+            "derivation_key",
+            name="uq_npc_private_memories_session_npc_derivation",
+        ),
     )
 
 

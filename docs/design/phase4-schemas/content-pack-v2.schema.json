@@ -1,0 +1,594 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-rpg-engine.local/schemas/content-pack-v2.schema.json",
+  "title": "ContentPack v2 (content_v1)",
+  "description": "Frozen W1 contract for content pack schema_version 2. See docs/design/phase4-content-v1-spec.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pack", "world", "locations", "initial_state"],
+  "properties": {
+    "pack": { "$ref": "#/$defs/PackManifest" },
+    "world": { "$ref": "#/$defs/World" },
+    "locations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locations"],
+      "properties": {
+        "locations": { "type": "array", "items": { "$ref": "#/$defs/Location" } },
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/Route" } }
+      }
+    },
+    "characters": { "type": "array", "items": { "$ref": "#/$defs/Character" } },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/Item" } },
+    "initial_state": { "$ref": "#/$defs/InitialState" },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/Rule" } },
+    "schedules": { "type": "array", "items": { "$ref": "#/$defs/Schedule" } },
+    "goals": { "type": "array", "items": { "$ref": "#/$defs/Goal" } },
+    "recipes": { "type": "array", "items": { "$ref": "#/$defs/PlanRecipe" } },
+    "knowledge_rules": { "type": "array", "items": { "$ref": "#/$defs/KnowledgeRule" } },
+    "quests": { "type": "array", "items": { "$ref": "#/$defs/Quest" } },
+    "plot_beats": { "type": "array", "items": { "$ref": "#/$defs/PlotBeat" } },
+    "factions": { "type": "array", "items": { "$ref": "#/$defs/Faction" } }
+  },
+  "$defs": {
+    "StableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "not": { "enum": ["player", "world"] }
+    },
+    "Tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "OwnerRef": {
+      "type": "string",
+      "pattern": "^(player|location:[a-z][a-z0-9_]{0,63}|character:[a-z][a-z0-9_]{0,63})$"
+    },
+    "FlagValue": { "type": ["boolean", "integer", "string"] },
+    "PackManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "name", "version"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "author": { "type": "string" },
+        "genre": { "type": "string" },
+        "theme": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" }
+      }
+    },
+    "World": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "genre": { "type": "string" },
+        "theme": { "type": "string" },
+        "lore_summary": { "type": "string" },
+        "status": { "enum": ["active", "draft", "archived"] },
+        "start_hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "start_minute": { "type": "integer", "minimum": 0, "maximum": 59 },
+        "start_tick": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "parent_id": { "oneOf": [{ "$ref": "#/$defs/StableId" }, { "type": "null" }] },
+        "access_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "always_accessible": { "type": "boolean" } }
+        }
+      }
+    },
+    "Route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/StableId" },
+        "to": { "$ref": "#/$defs/StableId" },
+        "open": { "type": "boolean" },
+        "travel_ticks": { "type": "integer", "minimum": 1 },
+        "bidirectional": { "type": "boolean" }
+      }
+    },
+    "Character": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "initial_location_id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "public_identity": { "type": "string" },
+        "personality": { "type": "string" },
+        "initial_location_id": { "$ref": "#/$defs/StableId" },
+        "alive": { "type": "boolean" }
+      }
+    },
+    "Item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "item_type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "item_type": { "type": "string", "minLength": 1 },
+        "quantity": { "const": 1 }
+      }
+    },
+    "InitialState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["player"],
+      "properties": {
+        "player": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["location_id"],
+          "properties": {
+            "location_id": { "$ref": "#/$defs/StableId" },
+            "alive": { "type": "boolean" }
+          }
+        },
+        "characters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "location_id"],
+            "properties": {
+              "id": { "$ref": "#/$defs/StableId" },
+              "location_id": { "$ref": "#/$defs/StableId" },
+              "alive": { "type": "boolean" }
+            }
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "owner"],
+            "properties": {
+              "id": { "$ref": "#/$defs/StableId" },
+              "owner": { "$ref": "#/$defs/OwnerRef" }
+            }
+          }
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "open"],
+            "properties": {
+              "from": { "$ref": "#/$defs/StableId" },
+              "to": { "$ref": "#/$defs/StableId" },
+              "open": { "type": "boolean" }
+            }
+          }
+        },
+        "flags": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/FlagValue" }
+        },
+        "schedules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["character_id", "activity", "location_id"],
+            "properties": {
+              "character_id": { "$ref": "#/$defs/StableId" },
+              "activity": { "type": "string", "minLength": 1 },
+              "location_id": { "$ref": "#/$defs/StableId" },
+              "start_tick": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "Trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "due_tick"],
+          "properties": {
+            "type": { "const": "on_time_crossed" },
+            "due_tick": { "type": "integer", "minimum": 1 },
+            "phase": { "enum": ["environment", "npc_move", "item", "player_continuous"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "action", "actor"],
+          "properties": {
+            "type": { "const": "on_action_completed" },
+            "action": { "enum": ["move", "idle"] },
+            "actor": { "type": "string", "pattern": "^(player|[a-z][a-z0-9_]{0,63})$" },
+            "location": { "$ref": "#/$defs/StableId" }
+          }
+        }
+      ]
+    },
+    "Condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["all"],
+          "properties": { "all": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Condition" } } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["any"],
+          "properties": { "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Condition" } } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not"],
+          "properties": { "not": { "$ref": "#/$defs/Condition" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "key", "value"],
+          "properties": {
+            "type": { "const": "flag_equals" },
+            "key": { "$ref": "#/$defs/StableId" },
+            "value": { "$ref": "#/$defs/FlagValue" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "actor"],
+          "properties": {
+            "type": { "const": "actor_alive" },
+            "actor": { "type": "string", "pattern": "^(player|[a-z][a-z0-9_]{0,63})$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "actor", "location"],
+          "properties": {
+            "type": { "const": "actor_at_location" },
+            "actor": { "type": "string", "pattern": "^(player|[a-z][a-z0-9_]{0,63})$" },
+            "location": { "$ref": "#/$defs/StableId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "from", "to"],
+          "properties": {
+            "type": { "const": "route_open" },
+            "from": { "$ref": "#/$defs/StableId" },
+            "to": { "$ref": "#/$defs/StableId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "item", "owner"],
+          "properties": {
+            "type": { "const": "item_owner_is" },
+            "item": { "$ref": "#/$defs/StableId" },
+            "owner": { "$ref": "#/$defs/OwnerRef" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "item", "actor"],
+          "properties": {
+            "type": { "const": "item_has" },
+            "item": { "$ref": "#/$defs/StableId" },
+            "actor": { "type": "string", "pattern": "^(player|[a-z][a-z0-9_]{0,63})$" }
+          }
+        }
+      ]
+    },
+    "Effect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "key", "value"],
+          "properties": {
+            "type": { "const": "flag_set" },
+            "key": { "$ref": "#/$defs/StableId" },
+            "value": { "$ref": "#/$defs/FlagValue" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "from", "to", "open"],
+          "properties": {
+            "type": { "const": "route_set_open" },
+            "from": { "$ref": "#/$defs/StableId" },
+            "to": { "$ref": "#/$defs/StableId" },
+            "open": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "actor", "action"],
+          "properties": {
+            "type": { "const": "npc_action_start" },
+            "actor": { "$ref": "#/$defs/StableId" },
+            "action": { "enum": ["move", "wait"] },
+            "target": { "$ref": "#/$defs/StableId" },
+            "ticks": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "actor", "goal"],
+          "properties": {
+            "type": { "const": "plan_start" },
+            "actor": { "$ref": "#/$defs/StableId" },
+            "goal": { "$ref": "#/$defs/StableId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "item", "to"],
+          "properties": {
+            "type": { "const": "item_transfer" },
+            "item": { "$ref": "#/$defs/StableId" },
+            "to": { "$ref": "#/$defs/OwnerRef" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "item", "actor"],
+          "properties": {
+            "type": { "const": "item_use" },
+            "item": { "$ref": "#/$defs/StableId" },
+            "actor": { "type": "string", "pattern": "^(player|[a-z][a-z0-9_]{0,63})$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "kind", "message"],
+          "properties": {
+            "type": { "const": "interrupt" },
+            "kind": { "type": "string", "minLength": 1 },
+            "message": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "event_type"],
+          "properties": {
+            "type": { "const": "emit_event" },
+            "event_type": { "type": "string", "minLength": 1 },
+            "payload": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "rule", "tick"],
+          "properties": {
+            "type": { "const": "event_schedule" },
+            "rule": { "$ref": "#/$defs/StableId" },
+            "tick": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "FirePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "enum": ["once_per_instance", "once_per_source_event"] } }
+    },
+    "Rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "trigger", "effects", "fire_policy"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "trigger": { "$ref": "#/$defs/Trigger" },
+        "condition": { "oneOf": [{ "$ref": "#/$defs/Condition" }, { "type": "null" }] },
+        "effects": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Effect" } },
+        "fire_policy": { "$ref": "#/$defs/FirePolicy" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "Schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "character_id", "activity", "location_id", "at_tick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "character_id": { "$ref": "#/$defs/StableId" },
+        "activity": { "type": "string", "minLength": 1 },
+        "location_id": { "$ref": "#/$defs/StableId" },
+        "at_tick": { "type": "integer", "minimum": 0 },
+        "window_ticks": { "type": "integer", "minimum": 1 },
+        "default_activity": { "type": "boolean" }
+      }
+    },
+    "PlanStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": { "enum": ["move", "wait", "take", "use", "transfer"] },
+        "target": { "$ref": "#/$defs/StableId" },
+        "ticks": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "PlanRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "steps"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/PlanStep" } }
+      }
+    },
+    "Goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "priority", "recipe"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "character_id": { "oneOf": [{ "$ref": "#/$defs/StableId" }, { "type": "null" }] },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "description": { "type": "string" },
+        "preconditions": { "oneOf": [{ "$ref": "#/$defs/Condition" }, { "type": "null" }] },
+        "completion": { "oneOf": [{ "$ref": "#/$defs/Condition" }, { "type": "null" }] },
+        "recipe": { "$ref": "#/$defs/StableId" },
+        "initial_status": { "enum": ["inactive", "active"] }
+      }
+    },
+    "KnowledgeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_event_types", "observers", "memory_kind", "visibility", "template"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "source_event_types": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "observers": { "enum": ["actor", "at_location", "all_alive"] },
+        "memory_kind": { "enum": ["action", "observation"] },
+        "visibility": { "enum": ["npc_private", "npc_shared"] },
+        "template": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Quest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "steps"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "location_id"],
+            "properties": {
+              "id": { "$ref": "#/$defs/StableId" },
+              "location_id": { "$ref": "#/$defs/StableId" }
+            }
+          }
+        }
+      }
+    },
+    "PlotBeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "trigger", "effects"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "trigger": { "$ref": "#/$defs/Trigger" },
+        "effects": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "key", "value"],
+            "properties": {
+              "type": { "const": "flag_set" },
+              "key": { "$ref": "#/$defs/StableId" },
+              "value": { "$ref": "#/$defs/FlagValue" }
+            }
+          }
+        },
+        "visibility": { "enum": ["hidden", "conditional", "revealed"] }
+      }
+    },
+    "Faction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "tags": { "$ref": "#/$defs/Tags" },
+        "enabled": { "type": "boolean" },
+        "ideology": { "type": "string" },
+        "visibility": { "enum": ["public", "hidden", "secret"] },
+        "goals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["goal_id", "description"],
+            "properties": {
+              "goal_id": { "type": "string", "minLength": 1 },
+              "description": { "type": "string", "minLength": 1 },
+              "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+              "status": { "type": "string" }
+            }
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target_faction_id"],
+            "properties": {
+              "target_faction_id": { "$ref": "#/$defs/StableId" },
+              "relationship_type": { "type": "string" },
+              "score": { "type": "integer", "minimum": -100, "maximum": 100 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

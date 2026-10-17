@@ -41,6 +41,41 @@ _NON_TRIVIAL_ACTION_TYPES: Set[str] = {
 }
 
 
+_REMOVED_PLAYER_KNOWLEDGE = object()
+
+
+def _exclude_player_knowledge(value: Any) -> Any:
+    """Remove player-scoped MemoryFact projections before NPC retrieval/context use."""
+    if getattr(value, "fact_type", None) == "player_knowledge":
+        return _REMOVED_PLAYER_KNOWLEDGE
+    if isinstance(value, dict):
+        if value.get("fact_type") == "player_knowledge":
+            return _REMOVED_PLAYER_KNOWLEDGE
+        filtered: Dict[str, Any] = {}
+        for key, child in value.items():
+            if key == "player_knowledge":
+                continue
+            safe_child = _exclude_player_knowledge(child)
+            if safe_child is not _REMOVED_PLAYER_KNOWLEDGE:
+                filtered[key] = safe_child
+        return filtered
+    if isinstance(value, list):
+        result = []
+        for child in value:
+            safe_child = _exclude_player_knowledge(child)
+            if safe_child is not _REMOVED_PLAYER_KNOWLEDGE:
+                result.append(safe_child)
+        return result
+    if isinstance(value, tuple):
+        result = []
+        for child in value:
+            safe_child = _exclude_player_knowledge(child)
+            if safe_child is not _REMOVED_PLAYER_KNOWLEDGE:
+                result.append(safe_child)
+        return tuple(result)
+    return value
+
+
 @dataclass
 class NormalizationResult:
     proposal: NPCActionProposal
@@ -74,8 +109,12 @@ def enrich_major_npc_decision_context(
         return npc_context
 
     try:
+        # MemoryFact.player_knowledge belongs only to the player. Remove any
+        # pre-projected player facts before NPC-scoped retrieval runs; the
+        # retrieval service then filters by NPC ownership and its visibility whitelist.
+        npc_safe_context = _exclude_player_knowledge(npc_context)
         return enrich_npc_context_with_memories(
-            npc_context=npc_context,
+            npc_context=npc_safe_context,
             db=db,
             session_id=session_id,
             npc_template_id=npc_template_id,

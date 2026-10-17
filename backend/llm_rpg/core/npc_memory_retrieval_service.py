@@ -41,8 +41,10 @@ class RetrievedMemory:
     reason: str
     signals: Dict[str, float] = field(default_factory=dict)
     memory_kind: Optional[str] = None
+    memory_type: Optional[str] = None
     knowledge_source: Optional[str] = None
     source_turn_no: Optional[int] = None
+    source_event_ids: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
     entity_refs: List[str] = field(default_factory=list)
     location_id: Optional[str] = None
@@ -66,6 +68,20 @@ _W_RECENCY = 0.30
 _W_LEXICAL = 0.25
 _W_CONFIDENCE = 0.15
 _DEFAULT_BUDGET = 10
+
+
+def adapt_legacy_memory_row(
+    memory_type: str | None, visibility: str | None
+) -> tuple[str | None, str | None]:
+    """Return a read-only projection of the two legacy phase-3 fields.
+
+    Only the exact old values are adapted. The source ORM row is never mutated;
+    all other memory types and visibility values pass through unchanged so the
+    normal retrieval whitelist continues to reject unknown visibility.
+    """
+    adapted_type = "episodic" if memory_type in {"action", "observation"} else memory_type
+    adapted_visibility = "npc_private" if visibility == "private" else visibility
+    return adapted_type, adapted_visibility
 
 
 def _recency_score(source_turn_no: Optional[int], current_turn: int) -> float:
@@ -122,7 +138,8 @@ def retrieve_major_npc_memories(
     """Retrieve and score active private memories for a major NPC.
 
     Filters by session_id + npc_template_id, status active/None,
-    visibility npc_private/npc_shared/None. Scoring: salience, recency,
+    visibility npc_private/npc_shared/None after read-only legacy adaptation.
+    Scoring: salience, recency,
     lexical, confidence. Returns RetrievalResult with audit payload.
 
     By default (update_recall_stats=False), retrieval is pure and does
@@ -167,18 +184,19 @@ def retrieve_major_npc_memories(
 
     all_memories = memory_repo.get_by_npc_template(session_id, npc_template_id)
 
-    candidates: List[NPCPrivateMemoryModel] = []
+    candidates: List[tuple[NPCPrivateMemoryModel, Optional[str], Optional[str]]] = []
     for m in all_memories:
+        adapted_type, adapted_visibility = adapt_legacy_memory_row(m.memory_type, m.visibility)
         if m.status not in ("active", None):
             continue
-        if m.visibility not in ("npc_private", "npc_shared", None):
+        if adapted_visibility not in ("npc_private", "npc_shared", None):
             continue
-        candidates.append(m)
+        candidates.append((m, adapted_type, adapted_visibility))
 
     total_candidates = len(candidates)
 
     scored: List[tuple] = []
-    for m in candidates:
+    for m, adapted_type, _adapted_visibility in candidates:
         text = m.memory_text or m.content or ""
         summary = m.short_summary
 
@@ -219,9 +237,14 @@ def retrieve_major_npc_memories(
             score=round(combined, 4),
             reason=reason,
             signals=signals,
-            memory_kind=m.memory_kind,
+            memory_kind=(
+                m.memory_kind
+                or (m.memory_type if m.memory_type in {"action", "observation"} else None)
+            ),
+            memory_type=adapted_type,
             knowledge_source=m.knowledge_source,
             source_turn_no=m.source_turn_no,
+            source_event_ids=list(m.source_event_ids_json or []),
             tags=m.tags_json or [],
             entity_refs=m.entity_refs_json or [],
             location_id=m.location_id,
@@ -303,8 +326,10 @@ def enrich_npc_context_with_memories(
             "reason": rm.reason,
             "signals": rm.signals,
             "memory_kind": rm.memory_kind,
+            "memory_type": rm.memory_type,
             "knowledge_source": rm.knowledge_source,
             "source_turn_no": rm.source_turn_no,
+            "source_event_ids": rm.source_event_ids,
             "tags": rm.tags,
             "entity_refs": rm.entity_refs,
             "location_id": rm.location_id,

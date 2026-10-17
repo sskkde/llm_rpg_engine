@@ -563,6 +563,21 @@ def resolve_location_text_reference(
         if location is not None:
             return location, None
 
+    # A world's own place names are a legitimate player-text source. The alias
+    # table above is the default world's colloquial table; a world that names its
+    # own locations (the phase-3 slice does) must still be addressable by those
+    # exact names. Matching stays exact -- never by similarity -- an ambiguous name
+    # is refused instead of resolved arbitrarily, and concealed locations are
+    # excluded so a name probe still cannot disclose their existence.
+    matches = [
+        location
+        for location in LocationRepository(ctx.db).get_by_world(ctx.world_id)
+        if not _location_is_concealed(location)
+        and (location.name or "").strip() == candidate
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+
     return resolve_location_reference(ctx, candidate)
 
 

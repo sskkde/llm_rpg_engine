@@ -161,6 +161,7 @@ def generate_recommended_actions(
     planned_player_state: Optional[SessionPlayerStateModel] = None,
     planned_npc_states: Optional[List[SessionNPCStateModel]] = None,
     baseline_quest_states: Optional[List[SessionQuestStateModel]] = None,
+    npc_location_overrides: Optional[Mapping[str, str]] = None,
 ) -> List[str]:
     """Generate rule-based recommended actions for the current scene.
     
@@ -255,7 +256,13 @@ def generate_recommended_actions(
     existing_npc_templates = {row.npc_template_id for row in npc_states}
     npc_states.extend(row for row in (planned_npc_states or []) if row.npc_template_id not in existing_npc_templates)
     for npc_state in npc_states:
-        if npc_state.current_location_id == current_location_id:
+        # ``npc_location_overrides`` carries a not-yet-written position (the phase-3
+        # advance's final state). It *overrides* the durable value: a recommendation
+        # must describe the scene the player will be in when the turn commits.
+        effective_location = (npc_location_overrides or {}).get(
+            getattr(npc_state, "id", None), npc_state.current_location_id
+        )
+        if effective_location == current_location_id:
             npc_template = npc_template_repo.get_by_id(npc_state.npc_template_id)
             if npc_template:
                 # Add interaction action

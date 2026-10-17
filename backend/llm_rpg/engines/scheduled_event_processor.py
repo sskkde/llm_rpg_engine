@@ -27,6 +27,11 @@ from ..storage.repositories import (
 )
 from ..models.events import WorldTime
 from ..core.turn_unit_of_work import is_managed
+from ..core.time_simulation import is_phase3_conditions
+
+
+class ScheduledEventNamespaceError(RuntimeError):
+    """A scheduled row belongs to a settlement engine this processor does not own."""
 
 
 class ScheduledEventProcessor:
@@ -96,6 +101,7 @@ class ScheduledEventProcessor:
         fired_events: list[dict[str, Any]] = []
         
         pending_events = self.scheduled_event_repo.get_pending(session_id)
+        self._reject_foreign_namespace(pending_events)
         
         for scheduled_event in pending_events:
             if self._should_fire_event(
@@ -113,6 +119,24 @@ class ScheduledEventProcessor:
         
         return fired_events
     
+    def _reject_foreign_namespace(
+        self, pending_events: list[ScheduledEventModel]
+    ) -> None:
+        """Refuse rows whose conditions belong to another settlement engine.
+
+        This processor treats an unknown condition object as *unconditional*, so a
+        phase-3 namespaced row would fire on the wrong trigger. The slice owns its
+        own settlement, so a row it owns reaching this path is a wiring error and
+        must fail loudly instead of firing.
+        """
+        for scheduled_event in pending_events:
+            if is_phase3_conditions(scheduled_event.trigger_conditions_json):
+                raise ScheduledEventNamespaceError(
+                    "scheduled event "
+                    f"{scheduled_event.id} belongs to the phase-3 time-simulation "
+                    "namespace and must not be settled by the legacy processor"
+                )
+
     def _should_fire_event(
         self,
         scheduled_event: ScheduledEventModel,

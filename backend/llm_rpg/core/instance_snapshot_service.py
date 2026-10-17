@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session as DBSession
 
 from ..core.feature_flags import instance_snapshot_enabled
+from ..core.time_simulation import PHASE3_NAMESPACE
+from ..core.time_simulation_persistence import resolve_simulation_profile
 from ..storage.models import (
     InstanceSnapshotModel,
     PlaythroughInstanceModel,
@@ -342,6 +344,48 @@ class SnapshotApplyError(Exception):
     """Raised when a snapshot apply operation fails."""
 
 
+class SnapshotRewindRefusedError(SnapshotApplyError):
+    """Raised when snapshot rewind could corrupt a phase-3 simulation."""
+
+
+def _contains_phase3_namespace(value: Any) -> bool:
+    if isinstance(value, dict):
+        return PHASE3_NAMESPACE in value or any(
+            _contains_phase3_namespace(child) for child in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_phase3_namespace(child) for child in value)
+    return False
+
+
+def _refuse_phase3_snapshot_rewind(
+    db: DBSession,
+    session_id: str,
+    snapshot_payload: Any,
+) -> None:
+    """Fail closed before mutation for phase-3 sessions or payloads."""
+    if _contains_phase3_namespace(snapshot_payload):
+        raise SnapshotRewindRefusedError(
+            "Snapshot rewind is not supported for phase-3 simulation payloads"
+        )
+
+    session = SessionRepository(db).get_by_id(session_id)
+    if session is None:
+        return
+
+    session_state = SessionStateRepository(db).get_by_session(session_id)
+    global_flags = getattr(session_state, "global_flags_json", None)
+    if isinstance(global_flags, dict) and PHASE3_NAMESPACE in global_flags:
+        raise SnapshotRewindRefusedError(
+            "Snapshot rewind is not supported for sessions with a phase-3 run marker"
+        )
+
+    if resolve_simulation_profile(db, session) is not None:
+        raise SnapshotRewindRefusedError(
+            "Snapshot rewind is not supported for phase-3 simulation worlds"
+        )
+
+
 def _parse_optional_datetime(value: Any) -> Optional[datetime]:
     """Parse a value that may be an ISO-format datetime string or None."""
     if value is None:
@@ -385,6 +429,7 @@ def apply_snapshot(
 
     Raises:
         SnapshotApplyError: If flag off, snapshot not found, or checksum mismatch.
+        SnapshotRewindRefusedError: If phase-3 state or payload is detected.
     """
     if not instance_snapshot_enabled():
         raise SnapshotApplyError("INSTANCE_SNAPSHOT_ENABLED is off; apply not allowed")
@@ -394,6 +439,11 @@ def apply_snapshot(
     if snap is None:
         raise SnapshotApplyError(f"Snapshot not found: {snapshot_id}")
 
+    session_id = snap.snapshot_json.get("session_id") or snap.session_id
+    _refuse_phase3_snapshot_rewind(db, session_id, snap.snapshot_json)
+    if snap.session_id != session_id:
+        _refuse_phase3_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
+
     expected_checksum = compute_checksum(snap.snapshot_json)
     if snap.checksum != expected_checksum:
         raise SnapshotApplyError(
@@ -401,7 +451,6 @@ def apply_snapshot(
             f"stored={snap.checksum}, computed={expected_checksum}"
         )
 
-    session_id = snap.snapshot_json.get("session_id") or snap.session_id
     pi_id = snap.playthrough_instance_id
 
     with db.begin_nested():
@@ -602,12 +651,14 @@ def restore_snapshot(
     quest_states, inventory), creates a pre-apply checkpoint, and updates
     instance/session pointers.
 
-    When the flag is off, falls back to read-only verification (returns
-    snapshot_json, checksum, snapshot_kind for inspection without mutation).
+    When the flag is off, ordinary sessions fall back to read-only verification
+    (returns snapshot_json, checksum, snapshot_kind without mutation). Phase-3
+    snapshots are refused in either mode rather than presented as restored.
 
     Raises:
         ValueError: If snapshot not found (read-only path).
         SnapshotApplyError: If flag on and checksum mismatch or other apply error.
+        SnapshotRewindRefusedError: If phase-3 state or payload is detected.
     """
     if instance_snapshot_enabled():
         try:
@@ -628,6 +679,11 @@ def restore_snapshot(
     snap = repo.get_by_id(snapshot_id)
     if snap is None:
         raise ValueError(f"Snapshot not found: {snapshot_id}")
+
+    session_id = snap.snapshot_json.get("session_id") or snap.session_id
+    _refuse_phase3_snapshot_rewind(db, session_id, snap.snapshot_json)
+    if snap.session_id != session_id:
+        _refuse_phase3_snapshot_rewind(db, snap.session_id, snap.snapshot_json)
 
     return {
         "snapshot_json": snap.snapshot_json,

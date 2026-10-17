@@ -23,6 +23,7 @@ from ..storage.repositories import (
     SessionInventoryItemRepository,
     ItemTemplateRepository,
 )
+from ..core.time_simulation_persistence import resolve_simulation_profile
 from .auth import get_current_active_user
 
 
@@ -207,12 +208,21 @@ def get_inventory_item(
     db: Session = Depends(get_db),
 ):
     """Get detailed information about a specific inventory item."""
-    _get_session_for_user(session_id, current_user, db)
+    session = _get_session_for_user(session_id, current_user, db)
 
     inv_repo = SessionInventoryItemRepository(db)
     inv_item = inv_repo.get_by_id(item_id)
 
     if not inv_item or inv_item.session_id != session_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Item not found in inventory",
+        )
+
+    if (
+        inv_item.owner_type != "player"
+        and resolve_simulation_profile(db, session) is not None
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Item not found in inventory",

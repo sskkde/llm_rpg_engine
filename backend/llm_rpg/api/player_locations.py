@@ -21,6 +21,7 @@ from ..storage.repositories import (
     SessionInventoryItemRepository,
     LocationRepository,
 )
+from ..core.time_simulation_persistence import resolve_simulation_profile
 from .auth import get_current_active_user
 
 router = APIRouter(prefix="/player/sessions", tags=["player-locations"])
@@ -235,6 +236,7 @@ def get_location_detail(
     session_state = state_repo.get_by_session(session_id)
     current_location_id = session_state.current_location_id if session_state else None
     is_current = (location.id == current_location_id)
+    phase3_profile = resolve_simulation_profile(db, session)
 
     if _is_location_hidden(location) and not is_current:
         raise HTTPException(
@@ -246,31 +248,35 @@ def get_location_detail(
     accessible_ids = _accessible_location_ids(location.id, world_locations)
     connections = [lid for lid in accessible_ids if lid != location.id]
 
-    npc_repo = SessionNPCStateRepository(db)
-    session_npcs = npc_repo.get_by_session(session_id)
-    npcs_present = [
-        NPCPresent(
-            npc_id=npc.npc_template_id,
-            name=getattr(npc.npc_template, "name", npc.npc_template_id) if npc.npc_template else npc.npc_template_id,
-            mood=getattr(npc, "short_memory_summary", None),
-            status_flags=npc.status_flags,
-        )
-        for npc in session_npcs
-        if npc.current_location_id == location_id
-    ]
+    if phase3_profile is not None and not is_current:
+        npcs_present = []
+        items_present = []
+    else:
+        npc_repo = SessionNPCStateRepository(db)
+        session_npcs = npc_repo.get_by_session(session_id)
+        npcs_present = [
+            NPCPresent(
+                npc_id=npc.npc_template_id,
+                name=getattr(npc.npc_template, "name", npc.npc_template_id) if npc.npc_template else npc.npc_template_id,
+                mood=getattr(npc, "short_memory_summary", None),
+                status_flags=npc.status_flags,
+            )
+            for npc in session_npcs
+            if npc.current_location_id == location_id
+        ]
 
-    item_repo = SessionInventoryItemRepository(db)
-    session_items = item_repo.get_by_session(session_id)
-    items_present = [
-        ItemPresent(
-            item_id=item.item_template_id,
-            name=getattr(item.item_template, "name", item.item_template_id) if item.item_template else item.item_template_id,
-            quantity=item.quantity,
-        )
-        for item in session_items
-        if item.owner_type == "location"
-        and item.owner_ref_id == location_id
-    ]
+        item_repo = SessionInventoryItemRepository(db)
+        session_items = item_repo.get_by_session(session_id)
+        items_present = [
+            ItemPresent(
+                item_id=item.item_template_id,
+                name=getattr(item.item_template, "name", item.item_template_id) if item.item_template else item.item_template_id,
+                quantity=item.quantity,
+            )
+            for item in session_items
+            if item.owner_type == "location"
+            and item.owner_ref_id == location_id
+        ]
 
     return LocationDetailResponse(
         location_id=location.id,

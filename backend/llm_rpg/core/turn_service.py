@@ -35,6 +35,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Literal
 
 from .turn_progress import TurnProgressEvent, emit_stage
@@ -61,6 +62,21 @@ from .turn_allocation import (
     TurnConflictError,
 )
 from .turn_preparation import TurnWriteBuffer
+from .time_simulation import (
+    ACTION_INTERRUPTED,
+    PlayerActionStatus,
+    TimeSimulationError,
+)
+from .time_simulation_persistence import (
+    SimulationContext,
+    apply_simulation_advance,
+    build_player_action_spec,
+    load_simulation_context,
+    npc_overlay_for_turn,
+    plan_engine_event_ids,
+    project_time_summary,
+    resolve_simulation_profile,
+)
 from .movement_handler import handle_movement, MovementResult, MovementError
 from .scene_action_generator import generate_recommended_actions
 from .quest_progression import (
@@ -611,7 +627,12 @@ def _build_world_context_for_turn(
     if session_state:
         context["world_time"] = _get_world_time(session_state)
         context["current_location_id"] = current_location_id or session_state.current_location_id
-        context["global_flags"] = session_state.global_flags_json or {}
+        # Internal-namespace flags (``__``-prefixed) are run-state carriers owned by
+        # a specific subsystem -- the phase-3 slice keeps its tick cursor and
+        # one-shot switches there. They are part of the session row, but they are
+        # not part of any model context: the whitelist below is the only shape a
+        # stage may see.
+        context["global_flags"] = _public_global_flags(session_state.global_flags_json)
     else:
         context["world_time"] = _get_world_time(None)
         context["current_location_id"] = current_location_id
@@ -814,17 +835,46 @@ def _build_authorization_context(
     )
 
 
+def _public_global_flags(global_flags: Any) -> Dict[str, Any]:
+    """Session flags as a model context may see them.
+
+    A key in an internal namespace (``__``-prefixed) belongs to one subsystem's
+    private run state and never leaves the database row it lives in.
+    """
+    if not isinstance(global_flags, dict):
+        return {}
+    return {
+        key: value
+        for key, value in global_flags.items()
+        if not (isinstance(key, str) and key.startswith("__"))
+    }
+
+
 def _planned_game_event_ids(write_buffer: Optional[Any]) -> FrozenSet[str]:
-    """Ids of this turn's already-planned engine fact events.
+    """Ids of this turn's already-decided engine fact events.
 
     A world/scene reference may only point at events the engine produced *in this
-    turn*; an id from an earlier turn is not an execution grant.
+    turn*; an id from an earlier turn is not an execution grant. The phase-3
+    advance decides its own facts during preparation, so its pre-allocated ids are
+    part of this set even though the rows land in the final write section.
     """
     if write_buffer is None:
-        return frozenset()
-    return frozenset(
-        planned.id for planned in write_buffer.planned_game_events() if getattr(planned, "id", None)
-    )
+        planned_ids: FrozenSet[str] = frozenset()
+    else:
+        planned_ids = frozenset(
+            planned.id
+            for planned in write_buffer.planned_game_events()
+            if getattr(planned, "id", None)
+        )
+    return planned_ids | frozenset(_phase3_planned_event_ids(write_buffer).values())
+
+
+def _phase3_planned_event_ids(write_buffer: Optional[Any]) -> Dict[int, str]:
+    """The advance's pre-allocated event ids, keyed by engine sequence."""
+    if write_buffer is None:
+        return {}
+    planned = getattr(write_buffer, "phase3_event_ids", None)
+    return planned if isinstance(planned, dict) else {}
 
 
 def _apply_authorization_to_stage(
@@ -1638,7 +1688,8 @@ def _get_visible_npcs(
     if story_plan is not None and story_plan.session_id == session_id:
         present_templates = {row.npc_template_id for row in npc_states}
         npc_states.extend(row for row in story_plan.npc_state_overlays() if row.npc_template_id not in present_templates)
-    
+    npc_states = _phase3_npc_projection(db, session_id, npc_states)
+
     visible_npcs = []
     npc_template_repo = NPCTemplateRepository(db)
     
@@ -1875,7 +1926,8 @@ def _get_active_npcs_at_location(
     if story_plan is not None and story_plan.session_id == session_id:
         present_templates = {row.npc_template_id for row in npc_states}
         npc_states.extend(row for row in story_plan.npc_state_overlays() if row.npc_template_id not in present_templates)
-    
+    npc_states = _phase3_npc_projection(db, session_id, npc_states)
+
     active_npcs = []
     npc_template_repo = NPCTemplateRepository(db)
     
@@ -1971,9 +2023,18 @@ def _build_npc_context(
         if ns.id == npc_id:
             npc_state = ns
             break
-    
+
+    # Phase 3: the advance's final position *overrides* the durable row, so the NPC
+    # prompt describes the scene the player will be in when the turn commits rather
+    # than a position the world already left behind.
+    phase3_overlay = (db.info.get("phase3_npc_overlay") or {}).get("by_npc_state_id") or {}
+    override = phase3_overlay.get(npc_id) if npc_id else None
+
     # Determine NPC location
-    npc_location_id = npc_state.current_location_id if npc_state else current_location_id
+    if override and override.get("current_location_id"):
+        npc_location_id = override["current_location_id"]
+    else:
+        npc_location_id = npc_state.current_location_id if npc_state else current_location_id
     
     context: Dict[str, Any] = {
         "npc_id": npc_id,
@@ -1994,7 +2055,7 @@ def _build_npc_context(
         # decision context — P10-C Memory-first architecture
         status_flags = npc_state.status_flags or {}
         context["mood"] = status_flags.get("mood", "neutral")
-        context["current_location_id"] = npc_state.current_location_id
+        context["current_location_id"] = npc_location_id
     
     context["player_action"] = {
         "input": player_input,
@@ -3273,6 +3334,162 @@ class TurnStateConflictError(TurnServiceError):
         super().__init__("Turn state changed before commit", session_id=session_id)
 
 
+# ---------------------------------------------------------------------------
+# Phase-3 time simulation helpers (plan section 7.1)
+#
+# The slice's turn branch reuses the *existing* admission chain unchanged and
+# only replaces the completion half: the player's move is admitted by the
+# movement validator as before, and the world advancer then decides whether that
+# move actually completes, is interrupted, or is refused at the moment of
+# arrival. Nothing here runs for a world without the profile.
+# ---------------------------------------------------------------------------
+
+
+def _phase3_advance(ctx: SimulationContext, player_action: Any) -> Any:
+    """Run the pure advancer over the slice's preloaded steps.
+
+    The advancer is imported lazily so the legacy turn path never depends on the
+    slice's kernel being importable.
+    """
+    from .world_advancer import WorldAdvancer
+
+    return WorldAdvancer(ctx.rules).advance(
+        state=ctx.state,
+        player_action=player_action,
+        pending_steps=[row.step for row in ctx.pending_steps],
+        consumed_step_keys=ctx.consumed_step_keys,
+        start_event_seq=ctx.run_state.next_event_seq,
+    )
+
+
+def _phase3_engine_message(result: Any) -> str:
+    """A non-disclosing engine sentence for an interrupted / unfinished action."""
+    if getattr(result, "interrupted", False):
+        return "试炼钟声响起，阵法扰动打断了你正在做的事。"
+    return "你的行动没有完成。"
+
+
+def _phase3_reconcile_movement(
+    result: Any,
+    original: Optional[MovementResult],
+) -> Optional[MovementResult]:
+    """Replace the *admission* result with the advance's actual completion.
+
+    Admission answers "may this move start"; the advance answers "did it arrive".
+    A move that was interrupted or refused at arrival must not keep the admitted
+    success: no target location, no arrival task, no success narration and no
+    success count.
+    """
+    if original is None:
+        return None
+    status = result.player_result.status
+    if status == PlayerActionStatus.COMPLETED:
+        return original
+    message = result.player_result.detail_message or _phase3_engine_message(result)
+    return MovementResult(
+        success=False,
+        blocked_reason=message,
+        narration_hint=message,
+        previous_location_id=original.previous_location_id,
+    )
+
+
+def _phase3_resolution_summary(
+    *,
+    action_type: str,
+    result: Any,
+    fallback_used: bool,
+) -> Optional[Dict[str, Any]]:
+    """The public action-resolution summary of a simulated turn.
+
+    An interrupted or arrival-refused action is reported as a rejected action in
+    the *existing* v1 public vocabulary (``rejected`` / ``target_unavailable``);
+    the new internal ``ACTION_INTERRUPTED`` detail stays in restricted audit.
+    """
+    status = result.player_result.status
+    if status == PlayerActionStatus.INTERRUPTED:
+        return _build_action_resolution_summary(
+            action_type=action_type,
+            resolution=reject_action(
+                None,
+                ActionDetailCode.ACTION_INTERRUPTED,
+                "the action was cut short by a perceivable world event",
+                reason=ActionReasonCode.TARGET_UNAVAILABLE,
+            ),
+            authorization=None,
+            fallback_used=fallback_used,
+        )
+    if status == PlayerActionStatus.REFUSED and result.player_result.detail_code:
+        return _build_action_resolution_summary(
+            action_type=action_type,
+            resolution=reject_action(
+                None,
+                ActionDetailCode.DOMAIN_RULE_BLOCKED,
+                result.player_result.detail_message or "the action did not complete",
+                reason=ActionReasonCode.TARGET_UNAVAILABLE,
+            ),
+            authorization=None,
+            fallback_used=fallback_used,
+        )
+    return None
+
+
+def _phase3_npc_locations(db: Session, session_id: str) -> Dict[str, str]:
+    """``session_npc_states.id`` -> the advance's final location, for this turn.
+
+    Only populated while a phase-3 turn is being prepared; every other world gets
+    an empty mapping, so this is a no-op for the legacy path.
+    """
+    overlay = db.info.get("phase3_npc_overlay")
+    if not overlay or overlay.get("session_id") != session_id:
+        return {}
+    return {
+        state_id: values.get("current_location_id")
+        for state_id, values in (overlay.get("by_npc_state_id") or {}).items()
+        if values.get("current_location_id")
+    }
+
+
+def _phase3_npc_projection(
+    db: Session,
+    session_id: str,
+    npc_states: List[Any],
+) -> List[Any]:
+    """Reader-facing NPC rows with this turn's advance values applied.
+
+    The overlay *overrides* the durable values instead of only filling gaps: the
+    model context must describe the world the player will be in when the turn
+    commits, and a stale persisted position must never authorize a present-NPC
+    reaction. Detached copies are used so no ORM row is marked dirty during
+    preparation.
+    """
+    overlay = db.info.get("phase3_npc_overlay")
+    if not overlay or overlay.get("session_id") != session_id:
+        return list(npc_states)
+    by_state_id = overlay.get("by_npc_state_id") or {}
+    projected: List[Any] = []
+    for row in npc_states:
+        override = by_state_id.get(getattr(row, "id", None))
+        if not override:
+            projected.append(row)
+            continue
+        projected.append(
+            SimpleNamespace(
+                id=row.id,
+                npc_template_id=row.npc_template_id,
+                current_location_id=override.get(
+                    "current_location_id", row.current_location_id
+                ),
+                status_flags=override.get("status_flags", row.status_flags),
+                hidden_plan_state=override.get("hidden_plan_state"),
+                trust_score=getattr(row, "trust_score", None),
+                suspicion_score=getattr(row, "suspicion_score", None),
+                short_memory_summary=getattr(row, "short_memory_summary", None),
+            )
+        )
+    return projected
+
+
 def compute_state_fingerprint(db: Session, session_id: str) -> str:
     """Hash decision-relevant persisted state, including row membership."""
     models_and_fields = (
@@ -3496,6 +3713,11 @@ def execute_turn_service(
         _abort_before_execution(e)
         if isinstance(e, SessionInitializationError):
             raise TurnServiceError(f"Failed to initialize session: {str(e)}", session_id=session_id)
+        if isinstance(e, TimeSimulationError):
+            # A phase-3 world whose profile marker is unknown or damaged must fail
+            # explicitly; initializing it as a legacy session would silently drop
+            # the slice's baseline rows.
+            raise TurnServiceError(f"Phase-3 initialization failed: {str(e)}", session_id=session_id)
         raise
 
     db.info["session_story_state_plan"] = session_story_state_plan
@@ -3544,6 +3766,24 @@ def execute_turn_service(
         session_state_repo = SessionStateRepository(db)
         session_state = _get_session_state_with_plan(db, session_id)
         current_location_id = session_state.current_location_id if session_state else None
+
+        # Phase 3: the slice is opt-in per world. A marker that exists but is
+        # unknown or damaged fails this turn explicitly; it never falls back to the
+        # legacy scheduler, which would treat the slice's namespaced conditions as
+        # unconditional and fire the wrong events.
+        try:
+            phase3_profile = resolve_simulation_profile(db, session)
+        except TimeSimulationError as e:
+            raise TurnServiceError(f"Phase-3 profile is unusable: {e}", session_id=session_id)
+
+        # The slice's advance, its write result and its NPC projection for this turn.
+        phase3_context: Optional[SimulationContext] = None
+        phase3_result: Optional[Any] = None
+        phase3_write: Optional[Any] = None
+        #: Set only when the *advance* refused or interrupted an action the admission
+        #: chain had accepted; a refusal that already happened before the advance
+        #: keeps its own public reason code.
+        phase3_resolution_override: Optional[Dict[str, Any]] = None
         
         # Create ValidationContext for this turn.
         #
@@ -3764,6 +4004,38 @@ def execute_turn_service(
                 clarification_question=None,
             )
 
+        # Step 6b: Adjudicate the action class's time cost exactly once.
+        #
+        # Phase 3 reuses this same validated *planned* duration to size the player's
+        # continuous action. The advance may then truncate it (a perceivable world
+        # interrupt); a truncated actual duration is never pushed back through the
+        # validator, because clamping it again could lift it past the interrupt tick
+        # and silently extend the turn.
+        world_time_before = _get_world_time(session_state)
+        elapsed_minutes = _resolve_elapsed_minutes(
+            action_type=action_type,
+            intent_result=input_intent_result,
+        )
+
+        from .time_advance import INTENT_TO_TIME_CATEGORY, TimeAdvanceProposal
+        from .time_advance_validator import TimeAdvanceValidator
+
+        _intent_type = None
+        if input_intent_result is not None:
+            _parsed = getattr(input_intent_result, "parsed_proposal", None)
+            if _parsed and isinstance(_parsed, dict):
+                _intent_type = _parsed.get("intent_type")
+        if _intent_type is None and action_type:
+            _intent_type = action_type
+        _resolved_category = INTENT_TO_TIME_CATEGORY.get(_intent_type or "", "unknown")
+
+        _time_proposal = TimeAdvanceProposal(
+            elapsed_minutes=elapsed_minutes,
+            time_category=_resolved_category,
+        )
+        _validator = TimeAdvanceValidator()
+        _validator_result = _validator.validate(_time_proposal)
+
         # Step 7: Domain adjudication. The engine decides the actual result; the
         # model never supplies a delta, an effect, a success flag or a duration.
         movement_result: Optional[MovementResult] = None
@@ -3889,7 +4161,123 @@ def execute_turn_service(
         # already-happened result. It is never reported as a success.
 
         _emit("action_resolving", "completed")
-        
+
+        # Step 7b: Phase-3 world advance.
+        #
+        # The admission chain above is untouched: it answered "may this action
+        # start". The advancer now answers "what actually happened between the
+        # start tick and the action's planned end", on one WorkingState shared by
+        # the player action, the NPC steps and the item steps. It is pure -- it
+        # plans events, deltas and the final state; the final write section applies
+        # them inside the one authoritative transaction. Legacy worlds skip this
+        # block entirely.
+        if phase3_profile is not None:
+            try:
+                phase3_context = load_simulation_context(
+                    db, session_id, plan=session_story_state_plan
+                )
+            except TimeSimulationError as e:
+                # A run marker, plan or step row the engine cannot trust fails this
+                # turn explicitly; it is never repaired by guessing a cursor and it
+                # never falls back to the legacy scheduler.
+                raise TurnServiceError(
+                    f"Phase-3 state is unusable: {e}", session_id=session_id
+                )
+            _admitted = bool(
+                player_action_resolution is not None
+                and player_action_resolution.status == ActionStatus.ACCEPTED
+            )
+            _target_code: Optional[str] = None
+            if _admitted and movement_result is not None and movement_result.success:
+                _target_code = movement_result.new_location_code
+            phase3_player_action = build_player_action_spec(
+                phase3_context,
+                action_type=action_type,
+                duration_minutes=_validator_result.accepted_elapsed_minutes,
+                target_location_code=_target_code,
+                refused=not _admitted,
+                detail_code=(
+                    str(player_action_resolution.detail_code)
+                    if player_action_resolution is not None
+                    and player_action_resolution.detail_code is not None
+                    else None
+                ),
+                detail_message=(
+                    player_action_resolution.detail_message
+                    if player_action_resolution is not None
+                    else None
+                ),
+            )
+            try:
+                phase3_result = _phase3_advance(phase3_context, phase3_player_action)
+            except TimeSimulationError as e:
+                raise TurnServiceError(
+                    f"Phase-3 advance failed: {e}", session_id=session_id
+                )
+            movement_result = _phase3_reconcile_movement(phase3_result, movement_result)
+            state_deltas.pop("location_id", None)
+            if (
+                movement_result is not None
+                and movement_result.success
+                and movement_result.new_location_id
+            ):
+                state_deltas["location_id"] = movement_result.new_location_id
+            elif movement_result is not None:
+                state_deltas["blocked_reason"] = movement_result.blocked_reason
+            if _admitted and phase3_result.player_result.status != PlayerActionStatus.COMPLETED:
+                # The admission chain answered "may this start"; the advance answered
+                # "it did not finish". The admission's own fact events must not
+                # survive as committed facts -- no target position, no arrival task,
+                # no success narration and no success count -- so the resolution is
+                # replaced by an engine-authored refusal and its own audit event.
+                _phase3_message = (
+                    phase3_result.player_result.detail_message
+                    or _phase3_engine_message(phase3_result)
+                )
+                _phase3_detail = (
+                    ActionDetailCode.ACTION_INTERRUPTED
+                    if phase3_result.player_result.status == PlayerActionStatus.INTERRUPTED
+                    else ActionDetailCode.DOMAIN_RULE_BLOCKED
+                )
+                player_action_resolution = reject_action(
+                    None,
+                    _phase3_detail,
+                    _phase3_message,
+                    reason=ActionReasonCode.TARGET_UNAVAILABLE,
+                )
+                phase3_resolution_override = _phase3_resolution_summary(
+                    action_type=action_type,
+                    result=phase3_result,
+                    fallback_used=intent_contract is None,
+                )
+                refused_action_event_id = write_buffer.add_game_event(
+                    transaction_id=transaction_id,
+                    session_id=session_id,
+                    turn_no=turn_no,
+                    event_type="action_resolved",
+                    actor_id="player",
+                    target_ids=None,
+                    visibility_scope="player_visible",
+                    public_payload={
+                        "action_type": normalize_production_action_type(action_type),
+                        "status": "rejected",
+                    },
+                    result_json={
+                        "reason_code": ActionReasonCode.TARGET_UNAVAILABLE.value,
+                        "authorization_detail": str(_phase3_detail),
+                    },
+                )
+            # Present-NPC readers (scene/NPC stages, recommendations) consume this
+            # projection, never the stale persisted positions.
+            db.info["phase3_npc_overlay"] = npc_overlay_for_turn(
+                phase3_context, phase3_result
+            )
+            # Pre-allocate the durable ids of this turn's engine facts so a
+            # world/scene stage may only reference events the engine has already
+            # decided -- including the slice's own steps of this turn. The rows
+            # themselves land in the final write section with these very ids.
+            write_buffer.phase3_event_ids = plan_engine_event_ids(phase3_result)
+
         # Step 8: Check quest progression
         if movement_result and movement_result.success:
             # Validate quest progression before checking
@@ -3975,6 +4363,7 @@ def execute_turn_service(
             planned_player_state=session_story_state_plan.player_state_overlay(),
             planned_npc_states=session_story_state_plan.npc_state_overlays(),
             baseline_quest_states=session_story_state_plan.quest_state_overlays(),
+            npc_location_overrides=_phase3_npc_locations(db, session_id),
         )
         
         # Step 10: Build template narration (fallback-safe placeholder)
@@ -3985,44 +4374,41 @@ def execute_turn_service(
             canonical_state=canonical_state,
         )
         
-        # Step 11: Advance world time for the committed turn
-        world_time_before = _get_world_time(session_state)
-        elapsed_minutes = _resolve_elapsed_minutes(
-            action_type=action_type,
-            intent_result=input_intent_result,
-        )
-
-        from .time_advance import INTENT_TO_TIME_CATEGORY, TimeAdvanceProposal
-        from .time_advance_validator import TimeAdvanceValidator
-
-        _intent_type = None
-        if input_intent_result is not None:
-            _parsed = getattr(input_intent_result, "parsed_proposal", None)
-            if _parsed and isinstance(_parsed, dict):
-                _intent_type = _parsed.get("intent_type")
-        if _intent_type is None and action_type:
-            _intent_type = action_type
-        _resolved_category = INTENT_TO_TIME_CATEGORY.get(_intent_type or "", "unknown")
-
-        _time_proposal = TimeAdvanceProposal(
-            elapsed_minutes=elapsed_minutes,
-            time_category=_resolved_category,
-        )
-        _validator = TimeAdvanceValidator()
-        _validator_result = _validator.validate(_time_proposal)
+        # Step 11: Advance world time for the committed turn.
+        #
+        # Phase 3: the calendar is a *projection* of the authoritative cursor. It is
+        # computed once, from the turn's starting display time plus the advance's
+        # ACTUAL elapsed minutes, so the cursor, the events, the deltas and the
+        # response all describe the same real endpoint. ``WorldTime.total_minutes``
+        # is never used to back-compute the cursor (it resets across seasons).
         world_time = _advance_world_time(
             world_time_before,
-            elapsed_minutes=_validator_result.accepted_elapsed_minutes,
+            elapsed_minutes=(
+                phase3_result.actual_elapsed_minutes
+                if phase3_result is not None
+                else _validator_result.accepted_elapsed_minutes
+            ),
         )
 
-        time_advance_result = {
-            "accepted_elapsed_minutes": _validator_result.accepted_elapsed_minutes,
-            "original_elapsed_minutes": _validator_result.original_elapsed_minutes,
-            "adjusted": _validator_result.adjusted,
-            "reason": _validator_result.reason,
-            "category": _validator_result.category,
-            "new_world_time": world_time,
-        }
+        if phase3_result is not None:
+            time_advance_result = project_time_summary(
+                phase3_result,
+                planned_elapsed_minutes=_validator_result.accepted_elapsed_minutes,
+                original_elapsed_minutes=_validator_result.original_elapsed_minutes,
+                adjusted=_validator_result.adjusted,
+                reason=_validator_result.reason,
+                category=_validator_result.category,
+                new_world_time=world_time,
+            )
+        else:
+            time_advance_result = {
+                "accepted_elapsed_minutes": _validator_result.accepted_elapsed_minutes,
+                "original_elapsed_minutes": _validator_result.original_elapsed_minutes,
+                "adjusted": _validator_result.adjusted,
+                "reason": _validator_result.reason,
+                "category": _validator_result.category,
+                "new_world_time": world_time,
+            }
         
 
         # Step 12: Get player state
@@ -4138,7 +4524,7 @@ def execute_turn_service(
         # direct writes produced and every later reader in this transaction sees the
         # same state it saw before.
         apply_session_story_state(db, session_story_state_plan)
-        if (
+        if phase3_result is None and (
             session_state_id is not None
             and movement_result
             and movement_result.success
@@ -4155,6 +4541,24 @@ def execute_turn_service(
                     "status": quest_update.status,
                     "progress_json": quest_update.progress_json,
                 })
+        if phase3_result is not None:
+            # Phase 3: one advance, one apply. The cursor, the NPC positions and
+            # plans, the token's owner, the scheduled-step states, the engine facts,
+            # their deltas and the enabled necessary cognition all land here, inside
+            # the single authoritative transaction -- a failure rolls the turn back
+            # whole rather than committing a prefix of the timeline. It runs after
+            # the buffered rows so the turn's own events keep their causal order
+            # ahead of the world timeline they started.
+            phase3_write = apply_simulation_advance(
+                db,
+                phase3_context,
+                phase3_result,
+                transaction_id=transaction_id,
+                turn_no=turn_no,
+                write_events=True,
+                write_cognition=_is_memory_stage_enabled(db),
+                planned_event_ids=write_buffer.phase3_event_ids,
+            )
         try:
             write_buffer.flush(db)
         except TurnAllocationError as e:
@@ -4463,41 +4867,48 @@ def execute_turn_service(
         ]
 
         # Scheduled-event settlement uses the single adjudicated world_time above.
+        #
+        # Phase 3 replaces this path entirely: the slice's own steps were already
+        # settled by the advance, so calling the legacy processor here would settle
+        # the same game time twice. The processor also refuses the slice's
+        # namespaced rows outright, so a wiring mistake fails loudly instead of
+        # firing a step whose conditions its legacy logic cannot read.
         scheduled_event_results: list[dict[str, Any]] = []
-        try:
-            from ..models.events import WorldTime
-            world_time_obj = WorldTime(
-                calendar=world_time.get("calendar", "修仙历"),
-                season=world_time.get("season", "春"),
-                day=_parse_world_day(world_time.get("day", "第1日")),
-                period=world_time.get("period", "辰时"),
-                hour=world_time.get("hour", 7),
-                minute=world_time.get("minute", 0),
-            )
-            scheduled_processor = ScheduledEventProcessor(db)
-            scheduled_event_results = scheduled_processor.process_scheduled_events(
-                session_id=session_id,
-                world_time=world_time_obj,
-                current_turn=turn_no,
-                world_state=None,
-                transaction_id=transaction_id,
-            )
-            if scheduled_event_results:
-                logger.info(
-                    "Fired %d scheduled events for session %s turn %d",
-                    len(scheduled_event_results),
+        if phase3_result is None:
+            try:
+                from ..models.events import WorldTime
+                world_time_obj = WorldTime(
+                    calendar=world_time.get("calendar", "修仙历"),
+                    season=world_time.get("season", "春"),
+                    day=_parse_world_day(world_time.get("day", "第1日")),
+                    period=world_time.get("period", "辰时"),
+                    hour=world_time.get("hour", 7),
+                    minute=world_time.get("minute", 0),
+                )
+                scheduled_processor = ScheduledEventProcessor(db)
+                scheduled_event_results = scheduled_processor.process_scheduled_events(
+                    session_id=session_id,
+                    world_time=world_time_obj,
+                    current_turn=turn_no,
+                    world_state=None,
+                    transaction_id=transaction_id,
+                )
+                if scheduled_event_results:
+                    logger.info(
+                        "Fired %d scheduled events for session %s turn %d",
+                        len(scheduled_event_results),
+                        session_id,
+                        turn_no,
+                    )
+            except Exception as e:
+                if is_managed(db):
+                    raise
+                logger.warning(
+                    "ScheduledEventProcessor failed for session %s turn %d: %s",
                     session_id,
                     turn_no,
+                    e,
                 )
-        except Exception as e:
-            if is_managed(db):
-                raise
-            logger.warning(
-                "ScheduledEventProcessor failed for session %s turn %d: %s",
-                session_id,
-                turn_no,
-                e,
-            )
         
         # Add this turn's adjudicated scheduler output to the frozen narration
         # snapshot without rereading session state.
@@ -4703,17 +5114,19 @@ def execute_turn_service(
         # model outage, a contract-incompatible answer, or a refused proposal whose
         # effect the deterministic path then re-derived). Individual stage fallbacks
         # are recorded per stage in ``llm_stages`` instead.
-        action_resolution_summary = _build_action_resolution_summary(
-            action_type=action_type,
-            resolution=player_action_resolution,
-            authorization=authorization,
-            fallback_used=intent_contract is None,
-            reason_override=_action_reason_override(
+        action_resolution_summary = phase3_resolution_override
+        if action_resolution_summary is None:
+            action_resolution_summary = _build_action_resolution_summary(
+                action_type=action_type,
                 resolution=player_action_resolution,
-                intent_contract=intent_contract,
-                input_intent_result=input_intent_result,
-            ),
-        )
+                authorization=authorization,
+                fallback_used=intent_contract is None,
+                reason_override=_action_reason_override(
+                    resolution=player_action_resolution,
+                    intent_contract=intent_contract,
+                    input_intent_result=input_intent_result,
+                ),
+            )
         llm_stages_json = [sr.to_result_json_dict() for sr in llm_stage_results]
         input_intent_stage_json = input_intent_result.to_result_json_dict()
         updated_result_json = {
@@ -4779,6 +5192,11 @@ def execute_turn_service(
             "current_time": _format_world_time(world_time),
             "time_phase": world_time["period"],
         }
+        if phase3_write is not None:
+            # The advance's merged flags carry the cursor, the monotonic event
+            # sequence and the finite one-shot switches. They are written in this
+            # same authoritative transaction as the facts they describe.
+            session_state_update["global_flags_json"] = phase3_write.global_flags_json
         if movement_result and movement_result.success and movement_result.new_location_id:
             session_state_update["current_location_id"] = movement_result.new_location_id
         session_state_repo.create_or_update(session_state_update)
@@ -4993,6 +5411,7 @@ def execute_turn_service(
         _stop_heartbeat()
         if db.info.get("turn_write_buffer") is write_buffer:
             db.info.pop("turn_write_buffer", None)
+        db.info.pop("phase3_npc_overlay", None)
 
 
 def _claim_row_is_committed(db: Session, token) -> bool:

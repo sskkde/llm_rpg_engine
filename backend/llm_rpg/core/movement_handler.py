@@ -278,7 +278,19 @@ def handle_movement(
     world_id = session.world_id
 
     # 2. Resolve target location code
-    resolved_code = _resolve_location_code(target_location_code)
+    #
+    # An exact code that exists in *this* world wins over the alias table. The
+    # alias table is the default world's colloquial-name table, so relying on it
+    # alone would make a world that names its own locations (a phase-3 slice does)
+    # impossible to walk into even after its target was authorized.
+    resolved_code: Optional[str] = None
+    raw_target = (target_location_code or "").strip()
+    if raw_target:
+        exact = location_repo.get_by_code(world_id, raw_target)
+        if exact is not None:
+            resolved_code = exact.code
+    if resolved_code is None:
+        resolved_code = _resolve_location_code(raw_target)
     if resolved_code is None:
         return MovementResult(
             success=False,

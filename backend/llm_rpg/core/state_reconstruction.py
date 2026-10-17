@@ -240,10 +240,20 @@ def _build_world_state(
         period=period,
     )
     
-    # Build global flags from session_state
+    # Build global flags from session_state.
+    #
+    # Keys in an internal namespace (``__``-prefixed) are run-state carriers owned
+    # by a specific subsystem -- the phase-3 slice keeps its cursor there. They are
+    # deliberately *not* projected into canonical state: canonical state feeds the
+    # model context, the narration context and the player replay, none of which may
+    # see another subsystem's private run state.
     global_flags: Dict[str, Any] = {}
     if session_state and session_state.global_flags_json:
-        global_flags = session_state.global_flags_json.copy()
+        global_flags = {
+            key: value
+            for key, value in session_state.global_flags_json.items()
+            if not (isinstance(key, str) and key.startswith("__"))
+        }
     
     return WorldState(
         entity_id=f"world_{world.id}",

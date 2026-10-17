@@ -417,6 +417,14 @@ def replay_turns(
             event for event in event_log_repo.get_by_session_ordered(session_id)
             if request.start_turn <= int(getattr(event, "turn_no", 0)) <= end_turn
         ]
+        world_state = reconstructed_state.world_state.model_dump()
+        global_flags = world_state.get("global_flags")
+        if isinstance(global_flags, dict):
+            world_state["global_flags"] = {
+                key: value
+                for key, value in global_flags.items()
+                if not (isinstance(key, str) and key.startswith("__"))
+            }
         
         return ReplayResponse(
             game_id=game_id,
@@ -424,7 +432,7 @@ def replay_turns(
             end_turn=end_turn,
             reconstructed_state={
                 "player_state": reconstructed_state.player_state.model_dump(),
-                "world_state": reconstructed_state.world_state.model_dump(),
+                "world_state": world_state,
                 "scene_state": reconstructed_state.current_scene_state.model_dump(),
                 "npc_count": len(reconstructed_state.npc_states),
                 "location_count": len(reconstructed_state.location_states),

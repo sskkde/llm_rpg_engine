@@ -40,6 +40,7 @@
 - **目标：** 让新增场景主要由内容配置表达，而非修改核心逻辑。
 - **范围：** 沿现有 ContentPack 渐进扩展；稳定 ID 引用；存档绑定内容版本；最小 Typed DSL；Schedule、Goal、CurrentPlan；由事件派生知识与记忆；保持旧内容存档兼容。
 - **退出标准：** 能以配置建立第二个场景而不改核心代码；引用与版本绑定可验证；旧内容存档可兼容读取或有明确安全处理。
+- **实施结果（2026-10-17）：** 已交付 `content_v1` 解释器与包 schema `schema_version: 2`（严格 `extra=forbid`、单次字节捕获、路径逃逸拒绝、22 个内容错误码），canonical `RuntimeBundle` + `runtime_hash`（覆盖 bundle schema 与引擎规则版本）与版本作用域 `ref_map`；受管 UoW 内**原子发布**（dry-run 零写、独立物化 World/templates、`(package_id, version)` 冲突不覆盖、发布后语义字段冻结）；`PlaythroughInstance`/`Session` 固定版本绑定与服务器保留键 `__content_binding`，每回合按保存版本加载并在锁内重验；最小 Typed DSL（2 类 Trigger、6 种原子 Condition、9 种 Effect、2 种 fire policy，深度 8/节点 128/recipe 16/重评估 64 预算）；有限 Schedule/Goal/CurrentPlan（冻结 tie-break，失败即 fallback 重选，不逐回合调用 LLM）；事件派生认知（事件当时视角求观察者、`memory_type=episodic`、`derivation_key` 去重、`player_knowledge` 独立 `source_game_event_id` FK）与旧 phase3 行的**只读窄映射**。新增 `content_packs/trial_micro_config`（复刻阶段三 +2/+5/+6/+7/+8/+9）与 `content_packs/misty_ford`（4 地点/2 NPC，封桥→到达失败→守桥 fallback→重开→重选→抵达）；**第二场景纯配置，核心源码未因加入 B 而改动**（AST 搜索确认生产代码无 pack 字面量）。迁移 `026` 为纯增量 nullable，未回填/清洗。验收：新增 109 项测试；SQLite 全量 4137 passed/44 skipped、PG 全量 4171 passed/10 skipped、PG 必需项 0 skip。规范正文见 [`phase4-content-v1-spec.md`](phase4-content-v1-spec.md)，证据见 [`.omo/evidence/phase4/20261017-p4-content/`](../../.omo/evidence/phase4/20261017-p4-content/)。**未提前实施阶段五/六**：无完整编辑器、无 14 类对象全量字段、无通用行为树、无任意脚本/表达式、无跨包依赖、无存档自动升级、无 rewind/branch、无后台实时世界。
 
 ## 推进原则与暂缓项
 
